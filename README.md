@@ -13,7 +13,7 @@ npm ci
 npm run tauri dev
 ```
 
-On first use, open **Settings & local setup → Install local transcription**. This downloads a pinned Windows whisper.cpp CPU runtime and the multilingual `base` model (about 148 MB). Both downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
+On first use, open **Settings & local setup → Install local transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB). Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
 
 ```powershell
 winget install Gyan.FFmpeg
@@ -34,13 +34,13 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 4. Play the recording and click transcript words to seek. Word timestamps are model estimates, not guaranteed exact alignment. Original Whisper JSON is retained for inspection.
 5. Copy for agent, or open the session folder.
 
-Speech recognition can still produce incorrect words or repetitions on sustained background noise. Conservative decoding reduces this, but does not replace voice activity detection. Review the transcript alongside the original recording; raw model output is retained.
+Before transcription, a local detector checks for speech. An explicit successful no-speech result produces an empty transcript; detector failures remain actionable errors. When speech is present, the original audio goes through Whisper without cutting silence or changing its word-to-time mapping. Speech detection and recognition are imperfect, particularly with mixed speech/noise; review the transcript alongside the recording. Raw model output and detector diagnostics are retained when produced.
 
 During recording, local transcription updates in short batches from the latest 30 seconds of microphone audio, or Windows system audio when no microphone is selected (roughly every eight seconds plus inference time). These provisional words may change; stopping recomputes the full authoritative transcript. If local speech setup is missing, the recording remains usable and can be transcribed later. Device audio without a PC microphone is transcribed after stopping. System audio uses WASAPI loopback for Windows sources; supported Android devices use scrcpy's device audio.
 
 ## Storage and agent CLI
 
-Default storage is `%LOCALAPPDATA%\CueReview`. Projects and sessions are plain JSON files; each session directory contains `video.mp4`, audio tracks, `session.json`, `transcript.txt`, `transcript.json`, raw `whisper.json`, and markers when present. Original native/device capture tracks are retained for recovery. `CUEREVIEW_DATA_DIR` changes this root; `CUEREVIEW_MODEL` can select another compatible local GGML model.
+Default storage is `%LOCALAPPDATA%\CueReview`. Projects and sessions are plain JSON files; each session directory contains `video.mp4`, audio tracks, `session.json`, `transcript.txt`, `transcript.json`, raw `whisper.json` when recognition ran, and markers when present. Speech detector output is retained in `vad.txt` and `vad.log`. Original native/device capture tracks are retained for recovery. `CUEREVIEW_DATA_DIR` changes this root; `CUEREVIEW_MODEL` and `CUEREVIEW_VAD_MODEL` can select compatible local speech and detection models.
 
 The Windows package includes `cue.exe` beside the application. Copy for agent uses its absolute path, so adding it to PATH is optional.
 
@@ -75,5 +75,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib capture::tests -- --includ
 `scripts/verify-pipeline.ps1` synthesizes a known spoken fixture locally, combines it with a real captured window, transcribes it, and verifies phrase-to-frame and clip retrieval. Run the native tests first and build `cue.exe` in debug mode. `scripts/verify-desktop.cjs` exercises the running Tauri WebView through an explicitly enabled local CDP test port (9224); this port is not enabled in normal launches.
 
 Use a dedicated `CUEREVIEW_DATA_DIR` for desktop verification. The review script expects the pipeline fixture in that same directory (launching the test app against `.local/pipeline-data` satisfies this). `scripts/verify-native-ux.cjs` checks review controls and compact mode; `scripts/verify-installed.cjs` additionally requires `CUEREVIEW_TEST_PID` to identify the exact test process for its safe-close check. Test recordings are stopped on script failure.
+
+`scripts/verify-recovery.cjs` launches and closes its own isolated app instance, verifies interrupted-session recovery and missing-model retry, then checks real transcription and marker persistence after relaunch. It uses the pipeline fixture and already installed models, preserving the source media and the normal app's data.
 
 See [architecture](docs/ARCHITECTURE.md) and the [verification checklist](docs/VERIFICATION.md) for boundaries and remaining hardware validation. Passing display capture does not establish Android/Quest correctness. Device-to-PC-microphone alignment needs hardware measurement, and recordings should be checked before relying on millisecond-level cross-device alignment.

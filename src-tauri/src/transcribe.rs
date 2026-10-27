@@ -102,17 +102,25 @@ fn run_logged(mut command: std::process::Command, log: &Path) -> Result<(), Stri
     }
     Ok(())
 }
-fn run_live(
+fn run_live(command: std::process::Command, log: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    run_live_output(command, log, cancel, None)
+}
+fn run_live_output(
     mut command: std::process::Command,
     log: &Path,
     cancel: &AtomicBool,
+    output: Option<&Path>,
 ) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) {
         return Err("Live transcription cancelled.".into());
     }
     let file = fs::File::create(log).map_err(|e| e.to_string())?;
+    let stdout = match output {
+        Some(path) => Stdio::from(fs::File::create(path).map_err(|e| e.to_string())?),
+        None => Stdio::null(),
+    };
     let mut child = command
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(file)
         .spawn()
         .map_err(|e| e.to_string())?;
@@ -128,7 +136,7 @@ fn run_live(
                     Ok(())
                 } else {
                     Err(format!(
-                        "Live transcription failed ({status}); see {}.",
+                        "Local speech processing failed ({status}); see {}.",
                         log.display()
                     ))
                 }
@@ -140,6 +148,49 @@ fn run_live(
                 return Err(error.to_string());
             }
         }
+    }
+}
+fn vad_count(output: &str) -> Result<usize, String> {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let count = lines
+        .next()
+        .and_then(|line| line.strip_prefix("Detected "))
+        .and_then(|line| line.strip_suffix(" speech segments:"))
+        .filter(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|count| count.parse::<usize>().ok())
+        .ok_or("Speech detector returned an invalid result; see vad.txt.")?;
+    let regions: Vec<_> = lines.collect();
+    if regions.len() != count
+        || regions
+            .iter()
+            .enumerate()
+            .any(|(i, line)| !line.starts_with(&format!("Speech segment {i}: start = ")))
+    {
+        return Err("Speech detector returned inconsistent regions; see vad.txt.".into());
+    }
+    Ok(count)
+}
+// Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
+// JSON token times are not mapped back to the original recording timeline.
+fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
+    let mut detector = deps::command("whisper-vad-speech-segments")?;
+    detector
+        .args(["-vm"])
+        .arg(deps::vad_model_path())
+        .arg("-f")
+        .arg(speech)
+        .args(["-vt", "0.35", "-vp", "500", "-vspd", "100", "-np"]);
+    let output = folder.join("vad.txt");
+    run_live_output(detector, &folder.join("vad.log"), cancel, Some(&output))?;
+    Ok(vad_count(&fs::read_to_string(output).map_err(|e| e.to_string())?)? > 0)
+}
+fn empty_transcript() -> Transcript {
+    Transcript {
+        status: Some("complete".into()),
+        ..Default::default()
     }
 }
 /// Only scratch files are written here; final session transcript files are untouched.
@@ -156,6 +207,9 @@ pub fn transcribe_snapshot(
         .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
         .arg(&speech);
     run_live(ffmpeg, &folder.join("transcode.log"), cancel)?;
+    if !has_speech(&speech, folder, cancel)? {
+        return Ok(empty_transcript());
+    }
     let mut whisper = deps::command("whisper-cli")?;
     whisper
         .arg("-m")
@@ -277,6 +331,11 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         ])
         .arg(&speech);
     run_logged(ffmpeg, &folder.join("transcode.log"))?;
+    if !has_speech(&speech, &folder, &AtomicBool::new(false))? {
+        let transcript = empty_transcript();
+        store.save_transcript(id, &transcript)?;
+        return Ok(transcript);
+    }
     let mut whisper = deps::command("whisper-cli")?;
     whisper
         .arg("-m")
@@ -296,6 +355,30 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn detector_requires_explicit_consistent_count() {
+        assert_eq!(vad_count("\nDetected 0 speech segments:\n").unwrap(), 0);
+        assert_eq!(
+            vad_count("Detected 1 speech segments:\nSpeech segment 0: start = 1.00, end = 50.00\n")
+                .unwrap(),
+            1
+        );
+        for invalid in [
+            "",
+            "error loading model",
+            "Detected -1 speech segments:",
+            "Detected 999999999999999999999999999 speech segments:",
+            "Detected 1 speech segments:",
+            "Detected 0 speech segments:\nSpeech segment 0: start = 0, end = 1",
+            "Detected 0 speech segments:\nDetected 0 speech segments:",
+            "Detected 1 speech segments:\nSpeech segment 2: start = 0, end = 1",
+        ] {
+            assert!(
+                vad_count(invalid).is_err(),
+                "Accepted invalid detector output: {invalid}"
+            );
+        }
+    }
     #[test]
     fn merges_subwords_and_punctuation_preserving_offsets() {
         let raw = json!({"result":{"language":"en"},"transcription":[{"text":"Click here, please.","tokens":[
@@ -489,5 +572,92 @@ mod tests {
                 "Quiet speech lost phrase: {phrase}"
             );
         }
+    }
+    #[test]
+    #[ignore = "Requires installed tools/models and test-results/vad-experiment fixtures; CUEREVIEW_VAD_MODEL may point to the isolated verified model"]
+    fn actual_vad_gate_preserves_words_clock_and_rejects_noise() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let fixture = root.join("test-results/vad-experiment");
+        let output = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        for name in ["short-fast-No.wav", "short-fast-Stop.wav"] {
+            let source = fixture.join(name);
+            let wav = hound::WavReader::open(&source).unwrap();
+            assert!(
+                wav.duration() < wav.spec().sample_rate,
+                "Expected sub-second speech"
+            );
+            assert!(
+                has_speech(&source, output.path(), &cancel).unwrap(),
+                "Lost short feedback: {name}"
+            );
+        }
+        assert!(has_speech(&fixture.join("missing.wav"), output.path(), &cancel).is_err());
+        assert!(has_speech(
+            &fixture.join("delayed-speech.wav"),
+            output.path(),
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .contains("cancelled"));
+
+        // The gate must not compress silence or rewrite raw ASR word timing.
+        let gated =
+            transcribe_snapshot(&fixture.join("delayed-speech.wav"), output.path(), &cancel)
+                .unwrap();
+        let mut baseline = deps::command("whisper-cli").unwrap();
+        baseline
+            .arg("-m")
+            .arg(deps::model_path())
+            .arg("-f")
+            .arg(output.path().join("speech.wav"))
+            .args(DECODING_OPTIONS)
+            .args(["-t", "2", "-of"])
+            .arg(output.path().join("baseline"));
+        run_logged(baseline, &output.path().join("baseline.log")).unwrap();
+        let raw: Value = read_json(&output.path().join("baseline.json")).unwrap();
+        let ungated = parse_whisper(&raw).unwrap();
+        assert_eq!(
+            serde_json::to_value(&gated).unwrap(),
+            serde_json::to_value(&ungated).unwrap()
+        );
+        let click = crate::agent::find(&gated, "click here").unwrap();
+        assert!((14000..16000).contains(&click[0].start_ms));
+        let merged = merge_live(&Transcript::default(), gated, 30000, 51000);
+        assert_eq!(
+            crate::agent::find(&merged, "click here").unwrap()[0].start_ms,
+            click[0].start_ms + 30000
+        );
+
+        // Exercise final persistence, without modifying the original noisy recording.
+        let store = Store::open(output.path().join("data")).unwrap();
+        let project = store.create_project("VAD verification").unwrap();
+        let mut session = store
+            .create_session(
+                &project.id,
+                "Quiet mic",
+                &crate::models::CaptureConfig {
+                    source_id: "fixture".into(),
+                    microphone_id: Some("fixture".into()),
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        let source = fixture.join("long-noise.wav");
+        let wav = hound::WavReader::open(&source).unwrap();
+        session.duration_ms = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
+        store.save_session(&session).unwrap();
+        let folder = store.session_dir(&session.id).unwrap();
+        fs::copy(source, folder.join("mic.wav")).unwrap();
+        let transcript = transcribe(&store, &session.id).unwrap();
+        assert!(transcript.segments.is_empty());
+        assert_eq!(transcript.status.as_deref(), Some("complete"));
+        assert!(store.transcript(&session.id).unwrap().segments.is_empty());
+        assert!(folder.join("vad.txt").is_file());
+        assert!(
+            !folder.join("whisper.json").exists(),
+            "Skipped ASR must not fabricate raw output"
+        );
     }
 }

@@ -2133,4 +2133,176 @@ mod tests {
             "Static interval changed video duration"
         );
     }
+    #[test]
+    #[ignore = "Verifies selected-window preview and recording through an actual opaque occluding window"]
+    fn actual_selected_window_occlusion() {
+        use std::ffi::c_void;
+        #[repr(C)]
+        struct Message {
+            hwnd: *mut c_void,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+            time: u32,
+            x: i32,
+            y: i32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn CreateWindowExW(
+                ex: u32,
+                class: *const u16,
+                title: *const u16,
+                style: u32,
+                x: i32,
+                y: i32,
+                width: i32,
+                height: i32,
+                parent: *mut c_void,
+                menu: *mut c_void,
+                instance: *mut c_void,
+                param: *mut c_void,
+            ) -> *mut c_void;
+            fn DestroyWindow(window: *mut c_void) -> i32;
+            fn UpdateWindow(window: *mut c_void) -> i32;
+            fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+            fn PeekMessageW(
+                message: *mut Message,
+                window: *mut c_void,
+                min: u32,
+                max: u32,
+                remove: u32,
+            ) -> i32;
+            fn TranslateMessage(message: *const Message) -> i32;
+            fn DispatchMessageW(message: *const Message) -> isize;
+        }
+        struct OwnedWindow(*mut c_void);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                unsafe {
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+        let pump = || {
+            let mut message: Message = unsafe { std::mem::zeroed() };
+            unsafe {
+                while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, 1) != 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        };
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let title: Vec<u16> = "CueReview occlusion verification\0"
+            .encode_utf16()
+            .collect();
+        let make_window = |ex, style| {
+            OwnedWindow(unsafe {
+                CreateWindowExW(
+                    ex,
+                    class.as_ptr(),
+                    title.as_ptr(),
+                    style,
+                    200,
+                    200,
+                    320,
+                    180,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            })
+        };
+        let source_window = make_window(0x08000000, 0x90000006);
+        assert!(!source_window.0.is_null());
+        unsafe {
+            UpdateWindow(source_window.0);
+        }
+        pump();
+        let source_id = format!("window:{}", source_window.0 as usize);
+        let folder = PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap())
+            .join("occlusion");
+        let mut capture = start(
+            CaptureConfig {
+                source_id: source_id.clone(),
+                microphone_id: None,
+                system_audio: false,
+                fps: 30,
+            },
+            &folder,
+        )
+        .unwrap();
+        let covering_window = make_window(0x08000008, 0x90000004);
+        assert!(!covering_window.0.is_null());
+        unsafe {
+            ShowWindow(covering_window.0, 4);
+            UpdateWindow(covering_window.0);
+        }
+        pump();
+        let wait_until = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < wait_until {
+            pump();
+            thread::sleep(Duration::from_millis(2));
+        }
+        let png = |id: &str| {
+            let data = preview(id).unwrap();
+            base64::engine::general_purpose::STANDARD
+                .decode(data.split(',').nth(1).unwrap())
+                .unwrap()
+        };
+        let selected_png = png(&source_id);
+        fs::write(folder.join("selected-preview.png"), &selected_png).unwrap();
+        let selected = image::load_from_memory(&selected_png).unwrap().to_luma8();
+        let source_center = selected.get_pixel(selected.width() / 2, selected.height() / 2)[0];
+        let display = image::load_from_memory(&png(&format!(
+            "monitor:{}",
+            Monitor::primary().unwrap().index().unwrap()
+        )))
+        .unwrap()
+        .to_luma8();
+        let desktop_center = display.get_pixel(360, 290)[0];
+        image::imageops::crop_imm(&display, 200, 200, 320, 180)
+            .to_image()
+            .save(folder.join("desktop-covered-region.png"))
+            .unwrap();
+        assert!(
+            desktop_center < 180,
+            "The opaque test window did not cover the source on the desktop: {desktop_center}"
+        );
+        assert!(
+            source_center > 220,
+            "Selected-window preview captured the occluder instead of the source: {source_center}"
+        );
+        let wait_until = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < wait_until {
+            pump();
+            thread::sleep(Duration::from_millis(2));
+        }
+        capture.stop().unwrap();
+        drop(covering_window);
+        drop(source_window);
+        let mut decode = deps::command("ffmpeg").unwrap();
+        decode
+            .args(["-v", "error", "-i"])
+            .arg(folder.join("video.mp4"))
+            .args([
+                "-an",
+                "-vf",
+                "crop=100:100:(iw-100)/2:(ih-100)/2,scale=1:1:flags=area,format=gray",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ]);
+        let output = output_with_timeout(decode, Duration::from_secs(10)).unwrap();
+        assert!(output.status.success() && !output.stdout.is_empty());
+        let minimum = *output.stdout.iter().min().unwrap();
+        let maximum = *output.stdout.iter().max().unwrap();
+        fs::write(folder.join("occlusion-verification.json"), serde_json::to_vec_pretty(&serde_json::json!({"desktopCoveredCenterLuma":desktop_center,"selectedPreviewCenterLuma":source_center,"recordedFrameCenterMinimumLuma":minimum,"recordedFrameCenterMaximumLuma":maximum,"recordedFrames":output.stdout.len(),"durationMs":capture.elapsed_ms(),"videoFps":30})).unwrap()).unwrap();
+        assert!(
+            minimum > 220,
+            "Selected-window recording contained the covering window: minimum luma {minimum}"
+        );
+    }
 }

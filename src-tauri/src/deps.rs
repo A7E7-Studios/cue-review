@@ -50,46 +50,69 @@ pub fn model_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| data_root().join("models").join("ggml-base.bin"))
 }
-fn whisper_works() -> bool {
-    command("whisper-cli")
+const VAD_MODEL_SHA256: &str = "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987";
+pub fn vad_model_path() -> PathBuf {
+    std::env::var_os("CUEREVIEW_VAD_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_root().join("models/ggml-silero-v6.2.0.bin"))
+}
+fn runtime_works(name: &str) -> bool {
+    command(name)
         .and_then(|mut c| c.arg("-h").output().map_err(|e| e.to_string()))
         .is_ok_and(|out| out.status.success())
 }
 pub fn setup_status() -> SetupStatus {
-    let whisper_ok = whisper_works();
-    let dependencies: Vec<_> = ["ffmpeg", "ffprobe", "whisper-cli", "adb", "scrcpy"]
-        .iter()
-        .map(|name| {
-            let path = tool(name).ok();
-            Dependency {
-                name: name.to_string(),
-                available: path.is_some() && (*name != "whisper-cli" || whisper_ok),
-                path: path.map(|p| p.to_string_lossy().into()),
-                detail: Some(
-                    if matches!(*name, "adb" | "scrcpy") {
-                        "Required for Android and Quest USB capture"
-                    } else {
-                        "Required for recording or local transcription"
-                    }
-                    .into(),
-                ),
-            }
-        })
-        .collect();
-    let model_ready = model_ready();
+    let whisper_ok = runtime_works("whisper-cli");
+    let vad_ok = runtime_works("whisper-vad-speech-segments");
+    let dependencies: Vec<_> = [
+        "ffmpeg",
+        "ffprobe",
+        "whisper-cli",
+        "whisper-vad-speech-segments",
+        "adb",
+        "scrcpy",
+    ]
+    .iter()
+    .map(|name| {
+        let path = tool(name).ok();
+        Dependency {
+            name: name.to_string(),
+            available: path.is_some()
+                && (*name != "whisper-cli" || whisper_ok)
+                && (*name != "whisper-vad-speech-segments" || vad_ok),
+            path: path.map(|p| p.to_string_lossy().into()),
+            detail: Some(
+                if matches!(*name, "adb" | "scrcpy") {
+                    "Required for Android and Quest USB capture"
+                } else {
+                    "Required for recording or local transcription"
+                }
+                .into(),
+            ),
+        }
+    })
+    .collect();
+    let speech_ready = speech_model_ready();
+    let vad_ready = vad_model_ready();
+    let model_ready = speech_ready && vad_ready;
     let mut issues = vec![];
     for d in &dependencies {
         if !d.available && !matches!(d.name.as_str(), "adb" | "scrcpy") {
             issues.push(format!("{} is missing", d.name));
         }
     }
-    if tool("whisper-cli").is_ok() && !whisper_ok {
+    if (tool("whisper-cli").is_ok() && !whisper_ok)
+        || (tool("whisper-vad-speech-segments").is_ok() && !vad_ok)
+    {
         issues.push(
             "The speech runtime cannot start. Reinstall it to repair missing runtime files.".into(),
         );
     }
-    if !model_ready {
+    if !speech_ready {
         issues.push("Local speech model is missing (about 148 MB).".into());
+    }
+    if !vad_ready {
+        issues.push("Local speech detection model is missing or invalid (about 885 KB).".into());
     }
     SetupStatus {
         ready: issues.is_empty(),
@@ -136,7 +159,7 @@ pub fn install_transcription() -> Result<SetupStatus, String> {
     let root = data_root();
     fs::create_dir_all(root.join("tools")).map_err(|e| e.to_string())?;
     fs::create_dir_all(root.join("models")).map_err(|e| e.to_string())?;
-    if !whisper_works() {
+    if !runtime_works("whisper-cli") || !runtime_works("whisper-vad-speech-segments") {
         let archive = root.join("tools/whisper.zip");
         download(
             "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
@@ -164,22 +187,25 @@ pub fn install_transcription() -> Result<SetupStatus, String> {
                 std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
             }
         }
-        let mut check = Command::new(staging.join("whisper-cli.exe"));
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            check.creation_flags(0x08000000);
-        }
-        if !check
-            .arg("-h")
-            .output()
-            .map_err(|e| format!("Speech runtime failed to start: {e}"))?
-            .status
-            .success()
-        {
-            return Err(
-                "Speech runtime verification failed; existing installation was preserved.".into(),
-            );
+        for name in ["whisper-cli.exe", "whisper-vad-speech-segments.exe"] {
+            let mut check = Command::new(staging.join(name));
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                check.creation_flags(0x08000000);
+            }
+            if !check
+                .arg("-h")
+                .output()
+                .map_err(|e| format!("Speech runtime failed to start: {e}"))?
+                .status
+                .success()
+            {
+                return Err(
+                    "Speech runtime verification failed; existing installation was preserved."
+                        .into(),
+                );
+            }
         }
         let destination = root.join("tools/whisper-b5454");
         if destination.exists() {
@@ -194,15 +220,21 @@ pub fn install_transcription() -> Result<SetupStatus, String> {
         drop(zip);
         let _ = fs::remove_file(archive);
     }
-    if !model_ready() {
+    if !speech_model_ready() {
         if std::env::var_os("CUEREVIEW_MODEL").is_some() {
             return Err("The custom CUEREVIEW_MODEL file is missing or invalid. Correct that path or unset it to install the standard model.".into());
         }
         download("https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",&model_path(),Some("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"))?;
     }
+    if !vad_model_ready() {
+        if std::env::var_os("CUEREVIEW_VAD_MODEL").is_some() {
+            return Err("The custom CUEREVIEW_VAD_MODEL file is missing or invalid. Correct that path or unset it to install the standard detection model.".into());
+        }
+        download("https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin", &vad_model_path(), Some(VAD_MODEL_SHA256))?;
+    }
     Ok(setup_status())
 }
-fn model_ready() -> bool {
+fn speech_model_ready() -> bool {
     model_path().metadata().is_ok_and(|m| {
         if std::env::var_os("CUEREVIEW_MODEL").is_some() {
             m.len() > 1_000_000
@@ -210,4 +242,11 @@ fn model_ready() -> bool {
             m.len() == 147_951_465
         }
     })
+}
+fn vad_model_ready() -> bool {
+    let path = vad_model_path();
+    if std::env::var_os("CUEREVIEW_VAD_MODEL").is_some() {
+        return path.metadata().is_ok_and(|m| m.len() > 100_000);
+    }
+    fs::read(path).is_ok_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == VAD_MODEL_SHA256)
 }

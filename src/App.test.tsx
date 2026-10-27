@@ -133,6 +133,28 @@ describe('project and session workflows',()=>{
 });
 
 describe('recording and processing',()=>{
+  it('preserves no microphone on refresh and describes the resulting video-only recording honestly',async()=>{
+    const user=await ready();
+    await user.click(screen.getByRole('button',{name:'Studio microphone'}));
+    await user.selectOptions(screen.getByLabelText('Input device'),'');await user.click(screen.getByRole('button',{name:'Done'}));
+    await user.click(screen.getByRole('button',{name:'Display 1'}));
+    await user.click(screen.getByRole('button',{name:'Refresh capture devices'}));
+    await waitFor(()=>expect(backend.microphones).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole('button',{name:'Done'}));
+    expect(screen.getByRole('button',{name:'No microphone'})).toBeVisible();
+    await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
+    expect(backend.start).toHaveBeenCalledWith('p1','New recording','display1',null,false,false);
+    expect(screen.getByText('No audio',{exact:true})).toBeVisible();
+    expect(screen.getByText('No audio input was selected for this recording.')).toBeVisible();
+    expect(screen.queryByText('Listening… transcript updates in short batches.')).not.toBeInTheDocument();
+  });
+  it('preserves no microphone when restoring an active video-only recording before device enumeration',async()=>{
+    sessions=[{...newSession(),status:'recording',microphoneId:undefined}];status={state:'recording',sessionId:'s1',elapsedMs:3000};
+    render(<App/>);
+    await screen.findByRole('button',{name:'Stop'});
+    await waitFor(()=>expect(backend.microphones).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button',{name:'No microphone'})).toBeVisible();
+  });
   it('describes device-only audio as post-recording transcription',async()=>{
     const user=await ready();
     await user.click(screen.getByRole('button',{name:'Display 1'}));
@@ -245,8 +267,36 @@ describe('review handoff',()=>{
 });
 
 describe('local setup recovery and request races',()=>{
-  it('lets installation fail, retry, and recover even when the model exists but the CLI is absent',async()=>{
-    setup={ready:false,issues:['whisper-cli is missing'],modelReady:true,dependencies:[{name:'whisper-cli',available:false}]};
+  it('allows selecting an offline device to read its recovery guidance without starting capture',async()=>{
+    backend.sources.mockResolvedValue([{id:'display1',name:'Display 1',kind:'display',available:true},{id:'quest-offline',name:'Quest disconnected',kind:'quest',available:false,detail:'Reconnect the USB cable and authorize USB debugging on the headset, then refresh.'}]);
+    const user=await ready();await user.click(screen.getByRole('button',{name:'Display 1'}));
+    await user.selectOptions(screen.getByLabelText('Screen, window, or device'),'quest-offline');
+    expect(screen.getByLabelText('Screen, window, or device')).toHaveValue('quest-offline');
+    expect(screen.getAllByText('Reconnect the USB cable and authorize USB debugging on the headset, then refresh.').length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading',{name:'Capture source unavailable'})).toBeVisible();
+    expect(screen.getByRole('button',{name:'Record'})).toBeDisabled();
+    await user.click(screen.getByRole('button',{name:'Done'}));
+    await user.keyboard('{Control>}r{/Control}');
+    expect(backend.start).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('authorize USB debugging');
+  });
+  it('keeps a vanished selected source unavailable instead of silently recording the first monitor',async()=>{
+    const user=await ready();await user.click(screen.getByRole('button',{name:'Display 1'}));
+    await user.selectOptions(screen.getByLabelText('Screen, window, or device'),'quest1');
+    backend.sources.mockResolvedValue([{id:'display1',name:'Display 1',kind:'display',available:true}]);
+    await user.click(screen.getByRole('button',{name:'Refresh capture devices'}));
+    await screen.findByRole('option',{name:'Previously selected source · unavailable'});
+    expect(screen.getByLabelText('Screen, window, or device')).toHaveValue('quest1');
+    expect(screen.getByRole('heading',{name:'Capture source unavailable'})).toBeVisible();
+    expect(screen.getByRole('button',{name:'Record'})).toBeDisabled();
+    expect(screen.queryByRole('img',{name:'Live preview of Display 1'})).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button',{name:'Done'}));
+    await user.keyboard('{Control>}r{/Control}');
+    expect(backend.start).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Reconnect it and refresh');
+  });
+  it.each(['whisper-cli','whisper-vad-speech-segments'])('lets installation fail, retry, and recover when models exist but %s is absent',async(dependency)=>{
+    setup={ready:false,issues:[`${dependency} is missing`],modelReady:true,dependencies:[{name:dependency,available:false}]};
     backend.installTranscription.mockRejectedValueOnce('Download failed. Check your connection and retry.').mockImplementationOnce(async()=>{setup={...readySetup};});
     const user=await ready();await user.click(screen.getByRole('button',{name:'Review setup'}));
     await user.click(screen.getByRole('button',{name:'Install local transcription'}));

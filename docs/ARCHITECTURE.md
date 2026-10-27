@@ -31,7 +31,11 @@ scrcpy records encoded device streams with device timestamps. Those timestamps p
 
 Convert the transcription input to mono, 16 kHz signed 16-bit PCM WAV. Run the local `whisper-cli` with a locally stored model and full JSON output. A multilingual model supports automatic language selection; an English-only model should only be selected for English recordings.
 
+Before inference, the bundled `whisper-vad-speech-segments` executable checks the entire input with a pinned Silero v6.2.0 model. A valid zero-region result produces an empty transcript. Any detected speech passes the original, unchanged PCM to Whisper, preserving its playback clock. Detector errors or malformed output remain failures with diagnostics, never silent success. This whole-input gate suppresses the tested noise-only hallucinations; it does not remove noise from mixed speech/noise recordings. The detector can also miss speech.
+
 Whisper token timestamps are estimates. Retain the original JSON. Construct display words by joining continuation tokens and punctuation, excluding model control tokens. Never manufacture word timings by evenly dividing a sentence. Store all UI/CLI offsets in milliseconds from the playback origin; seek only within the available media duration. Silence between words must clear the active-word highlight.
+
+Leading silence can substantially distort the first word's estimated interval: a ten-second delayed fixture placed its first word near zero while later words retained their original clock. An experimental DTW pass improved token seek points but supplied no start/end intervals and nearly doubled inference time; it is not enabled. Direct Whisper VAD transcription also altered the tested token clock, so the detector is used only as the whole-input gate above.
 
 Transcription failure must preserve playable recorded media and offer retry. An empty result from silent audio is a valid empty transcript, not a fabricated paragraph.
 

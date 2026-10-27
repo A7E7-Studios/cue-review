@@ -4,8 +4,8 @@ This is the acceptance checklist, not a claim that every item has passed. Record
 
 ## Recorded automated evidence (27 October 2026)
 
-- Latest `cargo test --lib`: 21 passed, 0 failed, 12 explicitly ignored integration/hardware tests. Those integration cases are run separately as described below. Run with normal Windows permissions; the restricted execution environment denied metadata replacement operations that passed outside that sandbox.
-- Frontend: 21 tests passed; TypeScript and Vite production build passed. Rust Clippy passed for all targets with warnings treated as errors. Keyboard regressions cover native Space activation and preventing recording shortcuts inside dialogs.
+- Latest `cargo test --lib`: 22 passed, 0 failed, 14 explicitly ignored integration/hardware tests. Those integration cases are run separately as described below. Run with normal Windows permissions; the restricted execution environment denied metadata replacement operations that passed outside that sandbox.
+- Frontend: 26 tests passed; TypeScript and Vite production build passed. Rust Clippy passed for all targets with warnings treated as errors. Keyboard regressions cover native Space activation, preventing recording shortcuts inside dialogs, unavailable sources, and preserving an explicit No microphone selection across source refresh.
 - `cargo test --lib orchestration_tests::recovered_video_becomes_playable_metadata -- --ignored --exact --nocapture`: passed. This test creates an actual one-second H.264 video with FFmpeg, restores missing playback path/duration using ffprobe, and confirms that corrupt media is rejected.
 - `cargo test --lib agent::tests -- --nocapture`: 4 passed. Coverage includes PowerShell path quoting and data-root preservation, rejection of active-session transcription, phrase matching, and clip bounds. The real-video recovery test also verifies that CLI retry restores a silent session to ready with its video path, while corrupt media cannot be marked ready.
 - `cargo check --bin cue`: passed after the CLI recovery and handoff changes.
@@ -20,10 +20,13 @@ These tests do not establish physical microphone content, audiovisual synchroniz
 
 - The actual Tauri/WebView2 application completed display recording, stop, local transcription, and playback with no browser errors. The final video reached ready state 4 and playback time advanced. Evidence: `test-results/ui/verification.json`.
 - Native UI checks passed for compact mode (520×320, Stop remains visible), restoration to 1280×820, word seeking to 4.7 seconds, a marker saved at 4700 ms, native clipboard handoff, playback at 1.5×, project/session renaming across WebView reload, and both themes. Evidence: `test-results/ui/native-ux-verification-{compact,review}.json` and adjacent screenshots.
+- The rebuilt release passed `scripts/verify-recovery.cjs`: an interrupted processing session reopened with a playable 10.733-second video; retry with a missing model produced an actionable saved-recording error; restoring the model yielded 26 words through real VAD and Whisper. Early/late word clicks sought to 0.11/9.73 seconds, and a 9730 ms marker survived relaunch. Video and microphone SHA-256 hashes stayed unchanged throughout. Native checks also retained No microphone after refresh and showed the enumerated offline source's recovery guidance while blocking both Record and Ctrl+R. Owned app processes exited cleanly, the copied model was removed, and normal user data was untouched. Evidence: `test-results/recovery/verification.json`.
 - `scripts/verify-pipeline.ps1` generated known speech with Windows System.Speech, combined it with an actual captured window, ran the real local model, found “click here,” exported its frame and a clip, and decoded the result. This proves the media/transcript/CLI pipeline with explicitly synthesized speech; it is not a claim that the user spoke those words. Evidence: `test-results/pipeline-verification.json`.
 - Progressive transcript results were observed in the running desktop UI with absolute session times. Actual Whisper snapshot offsets and cancellation were also tested separately.
-- Conservative Whisper decoding (`-mc 0 -nf -nth 0.3`) suppressed a problematic 30-second quiet microphone snapshot while retaining expected phrases from speech attenuated by about 46 dB. The actual regression passed. A longer 199-second noise recording still produced some repetitive text: the model is not a voice activity detector. Original Whisper JSON remains available, and transcripts require review. Evidence: `test-results/silence-check/`.
+- The transcription suite passed all 11 tests, including actual local inference. Conservative Whisper decoding (`-mc 0 -nf -nth 0.3`) suppressed a problematic 30-second quiet microphone snapshot while retaining speech attenuated by about 46 dB. The new whole-input speech detector suppressed all six invented segments previously produced from a 199-second noise fixture. It retained normal/quiet speech and subsecond “No”/“Stop” fixtures. Detector failures, malformed region counts, cancellation, empty-result persistence, and absolute live offsets were exercised. Evidence: `test-results/vad-experiment/` and `test-results/silence-check/`.
+- Speech-positive inputs reach Whisper unchanged. A delayed fixture's later words retained their original clock, but Whisper still estimated the first word near zero despite ten seconds of leading silence. Experimental DTW gave a useful approximate point (10,220 ms) but no corrected start/end intervals, and raised inference from about 2.2 to 4.0 seconds; it remains disabled. Word timestamps are estimates. Mixed speech/noise may still produce repetitions, and the detector can miss speech. Evidence: `test-results/dtw-experiment/`.
 - The 4.10 MiB NSIS package installed and upgraded in an isolated temporary directory outside the repository with its sibling `cue.exe`. The installed CLI discovered dependencies and retrieved the test transcript/frame. The installed GUI passed recording/playback, blocking close during capture, and the review checks above. Light video and controls resolved to `rgb(243, 244, 246)` and white, using Segoe UI. Evidence: `test-results/ui/installed-verification.json`. The local test CDP port is enabled only by the verification launch environment, not by the application.
+- The final rebuilt installer also installed/uninstalled successfully in a fresh temporary directory. Its CLI matched the release hash; its GUI binary matched all bytes after accounting for Tauri's expected `UNK`→`NSS` bundle marker. Installed setup reported the speech runtime, both models, and media tools ready. Test executables were removed by their uninstaller. Evidence: `test-results/package-verification.json` (installer SHA-256 `8788BA6B31CA6EEFA9F7F8A160BC73EB66B48041BE1BDBF579CF0114350F9932`).
 
 Screenshots and captured media are deliberately ignored by Git because desktop captures may contain private content.
 
@@ -36,12 +39,13 @@ $env:CUEREVIEW_CAPTURE_TEST_DIR = "$PWD\test-results\native-capture"
 cargo test --manifest-path src-tauri/Cargo.toml --lib capture::tests -- --include-ignored --test-threads=1
 ```
 
-Evidence is retained in `test-results/native-capture/test-run.txt`, `long-sync-30fps-test-run.txt`, and `verification.json` alongside the media files. All eight final videos have H.264 video, AAC audio, and a clean full FFmpeg decode.
+Evidence is retained in `test-results/native-capture/test-run.txt`, `long-sync-30fps-test-run.txt`, and `verification.json` alongside the media files. The original eight final videos have H.264 video, AAC audio, and a clean full FFmpeg decode. A subsequent selected-window occlusion test also passed, giving nine decoded outputs.
 
 | Actual test | Evidence |
 | --- | --- |
 | Display plus microphone, mute/unmute | 2560×1440 video, 3.533 seconds; nonzero microphone samples and a silent muted interval |
 | Window capture and preview | 1282×852 final video, 1.667 seconds |
+| Selected window completely occluded | The desktop cover had center luminance 105 while the selected-window preview and all 56 recorded frames remained 255. The 320×180, 1.867-second video decoded fully; owned windows were closed. |
 | System loopback | Two real 440 Hz tones detected in raw capture with the intervening silence retained; 2.600-second final video |
 | Odd-sized window resized and closed during capture | Window grew to 801×601 and shrank to 401×301; frames remained cropped/padded to the initial canvas, normalized to 640×426 in the final video. Source-close error reported while a 1.400-second video remained playable. |
 | Microphone muted before startup | All microphone samples zero; 0.867-second final video |
@@ -53,6 +57,8 @@ The loopback endpoint substantially attenuated the test tones. The 440 Hz signal
 The synchronization check measures visual marker frames and audio in the final MP4. Native capture copies immutable BGRA pixels, respects stride and orientation, and paces frames on the shared recording clock. The earlier 15 fps check also passed, with an early/late offset change of 66.7 ms, within one frame. Detailed measurements are in `long-sync/sync-verification.json` and `long-sync-30fps/sync-verification.json`. These checks establish the measured behavior on this host over 31 seconds; hour-long drift and sustained inference load were not tested.
 
 Android/Quest USB recording, device audio, and their graceful-stop path remain unverified because no authorized ADB device was available. One bounded preview diagnostic opened the registered Meta Quest 3 DirectShow filter, but its NV12 packets were smaller than the advertised 2064×1440 frame size. It produced no valid image within eight seconds and the FFmpeg process was terminated. This registered filter does not establish a working headset connection. Diagnostic metadata and stderr are retained in `quest-dshow-diagnostic.json` and `quest-dshow-stderr.log`; no device reset or system volume change was performed.
+
+A subsequent bounded format audit obtained a uniformly green 2064×1440 placeholder (one color, zero pixel variance), not a headset view. ADB still listed only an offline emulator, despite registered Quest PnP interfaces. Evidence: `test-results/device-audit/audit-result.json`. Physical headset wake/unlock and USB debugging authorization are required before the USB capture tests can run.
 
 ## Automated checks
 
@@ -84,12 +90,12 @@ Android/Quest USB recording, device audio, and their graceful-stop path remain u
 - [x] Mute and unmute the microphone during capture; the silent interval preserves its duration.
 - [ ] Disconnect the active microphone/output device; surface the failure and preserve usable recording material.
 - [ ] Stop a short recording immediately after starting; recover cleanly even if no frame arrives.
-- [ ] Automatic transcription completes locally; click several early and late words and confirm corresponding playback positions.
+- [x] Automatic transcription completes locally; click early and late words and confirm their stored playback positions (synthesized speech fixture; linguistic alignment remains approximate).
 - [x] Playback, pause, scrub, playback speed, and transcript following work together.
 - [x] Markers retain their timestamp after reopening the app.
-- [ ] Retry a failed transcription without losing the original recording.
+- [x] Retry a failed transcription without losing the original recording.
 - [x] Open the session folder and copy/use the agent handoff instructions.
-- [ ] Restart after an interrupted recording/processing job; show an actionable persisted state.
+- [x] Restart after an interrupted recording/processing job; show an actionable persisted state.
 - [x] Launch the packaged application outside the repository and verify dependency discovery and playback.
 
 ## Device acceptance
