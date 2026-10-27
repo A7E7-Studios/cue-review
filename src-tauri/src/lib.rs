@@ -30,6 +30,7 @@ struct AppState {
     runtime: Mutex<Runtime>,
     installer: Mutex<()>,
     inference: Mutex<()>,
+    preview: Mutex<capture::Preview>,
 }
 type Shared = Arc<AppState>;
 type CmdState<'a> = tauri::State<'a, Shared>;
@@ -227,8 +228,15 @@ async fn list_microphones() -> Result<Vec<Microphone>, String> {
     blocking(capture::microphones).await
 }
 #[tauri::command]
-async fn source_preview(source_id: String) -> Result<String, String> {
-    blocking(move || capture::preview(&source_id)).await
+async fn source_preview(s: CmdState<'_>, source_id: String) -> Result<String, String> {
+    let s = s.inner().clone();
+    blocking(move || {
+        s.preview
+            .lock()
+            .map_err(|e| e.to_string())?
+            .frame(&source_id)
+    })
+    .await
 }
 #[tauri::command]
 async fn get_setup_status() -> Result<SetupStatus, String> {
@@ -488,6 +496,7 @@ pub fn run() {
                 runtime: Mutex::new(Runtime::default()),
                 installer: Mutex::new(()),
                 inference: Mutex::new(()),
+                preview: Mutex::new(capture::Preview::default()),
             }));
             Ok(())
         })
@@ -544,6 +553,7 @@ mod orchestration_tests {
             runtime: Mutex::new(Runtime::default()),
             installer: Mutex::new(()),
             inference: Mutex::new(()),
+            preview: Mutex::new(capture::Preview::default()),
         })
     }
     #[test]
