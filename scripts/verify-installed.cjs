@@ -13,11 +13,10 @@ const invoke=(command,args)=>page.evaluate(({command,args})=>window.__TAURI_INTE
   await page.waitForFunction(async()=>(await window.__TAURI_INTERNALS__.invoke('get_recording_status')).state==='idle',undefined,{timeout:60000});
   await page.locator('.side-tools').getByRole('button',{name:'New recording',exact:true}).click();
   await page.locator('.mic-trigger').click();
-  await page.locator('.mic-menu select').selectOption('');
-  await page.getByRole('button',{name:'Done',exact:true}).click();
+  await page.getByRole('group',{name:'Microphone options',exact:true}).getByRole('button',{name:'No microphone',exact:true}).click();
   await page.locator('.source-trigger').click();
   await page.getByLabel('Include system audio',{exact:true}).uncheck();
-  await page.getByRole('button',{name:'Done',exact:true}).click();
+  await page.keyboard.press('Escape');
   ownsRecording=true;await page.getByRole('button',{name:'Record',exact:true}).click();
   await page.getByRole('button',{name:'Stop',exact:true}).waitFor();
   result.sessionId=(await invoke('get_recording_status')).sessionId;

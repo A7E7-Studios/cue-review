@@ -187,12 +187,20 @@ fn rename_project(s: CmdState<'_>, id: String, name: String) -> Result<Project, 
     s.store.rename_project(&id, &name)
 }
 #[tauri::command]
-fn list_sessions(s: CmdState<'_>, project_id: String) -> Result<Vec<Session>, String> {
-    s.store.sessions(Some(&project_id))
+fn list_sessions(s: CmdState<'_>, project_id: Option<String>) -> Result<Vec<Session>, String> {
+    s.store.sessions(project_id.as_deref())
 }
 #[tauri::command]
 fn rename_session(s: CmdState<'_>, id: String, name: String) -> Result<Session, String> {
     s.store.rename_session(&id, &name)
+}
+#[tauri::command]
+fn move_session(
+    s: CmdState<'_>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<Session, String> {
+    s.store.move_session(&id, project_id.as_deref())
 }
 #[tauri::command]
 fn get_session(s: CmdState<'_>, id: String) -> Result<Session, String> {
@@ -252,8 +260,8 @@ fn open_session_folder(s: CmdState<'_>, id: String) -> Result<(), String> {
 #[tauri::command]
 async fn start_recording(
     s: CmdState<'_>,
-    project_id: String,
-    name: String,
+    project_id: Option<String>,
+    name: Option<String>,
     source_id: String,
     microphone_id: Option<String>,
     system_audio: bool,
@@ -271,7 +279,9 @@ async fn start_recording(
             system_audio,
             fps: 30,
         };
-        let mut session = s.store.create_session(&project_id, &name, &config)?;
+        let mut session =
+            s.store
+                .create_session(project_id.as_deref(), name.as_deref(), &config)?;
         match capture::start_muted(
             config,
             &s.store.session_dir(&session.id)?,
@@ -324,7 +334,8 @@ fn finish_transcription(job: ProcessingJob) {
         .and_then(|_guard| transcribe::transcribe(&s.store, id));
     if let Ok(mut session) = s.store.session(id) {
         match &result {
-            Ok(_) => {
+            Ok(transcript) => {
+                Store::apply_auto_title(&mut session, transcript);
                 session.status = "ready".into();
                 session.error = None;
             }
@@ -502,6 +513,7 @@ pub fn run() {
             rename_project,
             list_sessions,
             rename_session,
+            move_session,
             get_session,
             get_transcript,
             get_markers,
@@ -598,8 +610,8 @@ mod orchestration_tests {
         let mut session = state
             .store
             .create_session(
-                &project.id,
-                "Interrupted source",
+                Some(&project.id),
+                Some("Interrupted source"),
                 &CaptureConfig {
                     source_id: "monitor:1".into(),
                     microphone_id: None,

@@ -49,6 +49,8 @@ Live snapshots use the PC microphone, or Windows loopback when no microphone is 
 
 Each session groups its metadata, final video, transcript, and evidence exports. Persist state transitions so a restart can identify interrupted recording or processing work. Write metadata atomically. Validate identifiers and resolve paths under the configured data directory. The agent interface should report errors on stderr and machine-readable results on stdout.
 
+Projects are optional metadata groups. New recordings may have `projectId: null` and appear immediately in Recents; assigning or removing a project leaves the session directory unchanged. Unnamed recordings carry `autoTitle: true` and receive a short title from the first nonempty transcript phrase. An explicit rename clears that flag. Legacy sessions default to manual titles and retain their existing project IDs, requiring no destructive migration.
+
 Launch dependencies with argument arrays rather than shell-generated command strings. Retain process handles, capture diagnostic output, stop recorders gracefully, and check exit status and output validity before declaring success. Killing an encoder may leave an unfinished container; intermediate recordings and logs should be retained for recovery.
 
 ## Dependency setup

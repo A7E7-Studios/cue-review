@@ -1052,6 +1052,7 @@ impl ActiveCapture {
         self.stopped = Some(duration);
         let mut failures = Vec::new();
         let mut delay = 0.0;
+        let mut device_capture = false;
         if let Some(mut audio) = self.audio.take() {
             if let Err(e) = audio.stop(duration) {
                 failures.push(e);
@@ -1076,6 +1077,7 @@ impl ActiveCapture {
                 window_title,
                 delay: process_delay,
             }) => {
+                device_capture = window_title.is_some();
                 delay = process_delay;
                 let mut child = child.into_inner().unwrap_or_else(|e| e.into_inner());
                 if let Some(title) = window_title {
@@ -1132,6 +1134,7 @@ impl ActiveCapture {
             delay,
             self.fps,
             self.device_audio,
+            device_capture,
         ) {
             failures.push(e);
         }
@@ -1237,13 +1240,32 @@ fn ready_process(
     epoch: Instant,
 ) -> Result<VideoCapture, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut decoded_delay = None;
     loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            return Err(format!(
-                "Capture could not start ({status}); see capture.log"
-            ));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "Capture could not start ({status}); see capture.log"
+                ))
+            }
+            Ok(None) => (),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
         }
-        if input.metadata().map(|m| m.len() >= 512).unwrap_or(false) {
+        let ready_delay = if window_title.is_some() {
+            let log = fs::read_to_string(input.with_file_name("capture.log")).unwrap_or_default();
+            latch_scrcpy_frame(&log, &mut decoded_delay, epoch.elapsed().as_secs_f64())
+        } else {
+            input
+                .metadata()
+                .ok()
+                .filter(|m| m.len() >= 512)
+                .map(|_| epoch.elapsed().as_secs_f64())
+        };
+        if let Some(delay) = ready_delay {
             if let Some(title) = window_title.as_ref() {
                 if let Ok(window) = Window::from_name(title) {
                     #[link(name = "user32")]
@@ -1269,7 +1291,7 @@ fn ready_process(
                 child: Mutex::new(child),
                 input,
                 window_title,
-                delay: epoch.elapsed().as_secs_f64(),
+                delay,
             });
         }
         if Instant::now() >= deadline {
@@ -1280,6 +1302,143 @@ fn ready_process(
         thread::sleep(Duration::from_millis(30));
     }
 }
+fn latch_scrcpy_frame(log: &str, latched: &mut Option<f64>, now: f64) -> Option<f64> {
+    // v4.1 emits this unbuffered line when uploading its first decoded frame.
+    // Window creation and Matroska flush timing do not identify that frame.
+    if latched.is_none()
+        && log.split_inclusive('\n').any(|line| {
+            if !line.ends_with('\n') {
+                return false;
+            }
+            let Some(size) = line.trim().strip_prefix("INFO: Texture: ") else {
+                return false;
+            };
+            let Some((width, height)) = size.split_once('x') else {
+                return false;
+            };
+            width.parse::<u32>().is_ok_and(|n| n > 0) && height.parse::<u32>().is_ok_and(|n| n > 0)
+        })
+    {
+        *latched = Some(now);
+    }
+    *latched
+}
+fn stream_starts(info: &serde_json::Value) -> Result<(f64, f64), String> {
+    let streams = info["streams"]
+        .as_array()
+        .ok_or("Device recording has no stream metadata")?;
+    let start = |kind| {
+        streams
+            .iter()
+            .find(|stream| stream["codec_type"].as_str() == Some(kind))
+            .and_then(|stream| stream["start_time"].as_str())
+            .and_then(|time| time.parse::<f64>().ok())
+            .filter(|time| time.is_finite())
+            .ok_or_else(|| format!("Device recording has no valid first {kind} timestamp"))
+    };
+    Ok((start("video")?, start("audio")?))
+}
+fn device_audio_filter(video_host_start: f64, video_pts: f64, audio_pts: f64) -> (f64, String) {
+    let audio_host_start = video_host_start + audio_pts - video_pts;
+    let filter = if audio_host_start >= 0.0 {
+        format!(
+            "asetpts=PTS-STARTPTS,adelay={:.6}:all=1,apad",
+            audio_host_start * 1000.0
+        )
+    } else {
+        format!(
+            "atrim=start={:.6},asetpts=PTS-STARTPTS,apad",
+            -audio_host_start
+        )
+    };
+    (audio_host_start, filter)
+}
+fn mapped_device_end(
+    info: &serde_json::Value,
+    video_host_start: f64,
+    fps: u32,
+) -> Result<f64, String> {
+    let streams = info["streams"]
+        .as_array()
+        .ok_or("Device recording has no streams")?;
+    let video = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "video")
+        .ok_or("Device recording has no video stream")?;
+    let video_index = video["index"]
+        .as_u64()
+        .ok_or("Device video has no stream index")?;
+    let video_start = video["start_time"]
+        .as_str()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .ok_or("Device video has no valid first timestamp")?;
+    let mut end = video_host_start;
+    let mut video_packet = false;
+    for packet in info["packets"]
+        .as_array()
+        .ok_or("Device recording has no packet timestamps")?
+    {
+        let Some(index) = packet["stream_index"].as_u64() else {
+            continue;
+        };
+        let Some(stream) = streams
+            .iter()
+            .find(|stream| stream["index"].as_u64() == Some(index))
+        else {
+            continue;
+        };
+        if !matches!(stream["codec_type"].as_str(), Some("video" | "audio")) {
+            continue;
+        }
+        let Some(pts) = packet["pts_time"]
+            .as_str()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+        else {
+            continue;
+        };
+        let duration = packet["duration_time"]
+            .as_str()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.0);
+        let minimum = if index == video_index {
+            video_packet = true;
+            1.0 / fps as f64
+        } else {
+            0.0
+        };
+        end = end.max(video_host_start + pts - video_start + duration.max(minimum));
+    }
+    if !video_packet {
+        return Err("Device recording has no usable video packet timestamps".into());
+    }
+    Ok(end)
+}
+fn metadata_device_end(info: &serde_json::Value, video_host_start: f64, fps: u32) -> Option<f64> {
+    let number = |value: &serde_json::Value| {
+        value
+            .as_str()?
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+    };
+    let start = number(&info["format"]["start_time"])?;
+    let duration = number(&info["format"]["duration"])?;
+    let video = info["streams"]
+        .as_array()?
+        .iter()
+        .find(|stream| stream["codec_type"] == "video")?;
+    let video_start = number(&video["start_time"])?;
+    if duration <= 0.0 || start + duration <= video_start {
+        return None;
+    }
+    // A finalized scrcpy Matroska trailer includes its last packet extent.
+    // Keep one output frame as a conservative presentation guard, without altering the anchor.
+    let end = video_host_start + start + duration - video_start + 1.0 / fps as f64;
+    end.is_finite().then_some(end)
+}
 fn finalize(
     folder: &Path,
     input: &Path,
@@ -1287,20 +1446,88 @@ fn finalize(
     delay: f64,
     fps: u32,
     device_audio: bool,
+    device_capture: bool,
 ) -> Result<(), String> {
-    let seconds = format!("{:.6}", duration.as_secs_f64().max(0.001));
     let mic = folder.join("mic.wav");
     let system = folder.join("system.wav");
     let audio = folder.join("audio.wav");
+    let mut timing = serde_json::json!({"videoHostStartMs":delay * 1000.0,"recordingStopMs":duration.as_secs_f64() * 1000.0});
+    let mut output_end = duration.as_secs_f64();
+    let native_timing = if device_capture {
+        let mut probe = deps::command("ffprobe")?;
+        probe
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=index,codec_type,start_time:format=start_time,duration",
+                "-of",
+                "json",
+            ])
+            .arg(input);
+        let output = output_with_timeout(probe, Duration::from_secs(10))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Device timestamps could not be read: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let mut info: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        let end = if let Some(end) = metadata_device_end(&info, delay, fps) {
+            timing["nativeExtentSource"] = serde_json::json!("containerMetadata");
+            end
+        } else {
+            let mut probe = deps::command("ffprobe")?;
+            probe
+                .args([
+                    "-v",
+                    "error",
+                    "-show_packets",
+                    "-show_entries",
+                    "stream=index,codec_type,start_time:packet=stream_index,pts_time,duration_time",
+                    "-of",
+                    "json",
+                ])
+                .arg(input);
+            let output = output_with_timeout(probe, Duration::from_secs(10))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Device packet timestamps could not be read: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            info = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+            timing["nativeExtentSource"] = serde_json::json!("packetTimestamps");
+            mapped_device_end(&info, delay, fps)?
+        };
+        timing["mappedNativeEndMs"] = serde_json::json!(end * 1000.0);
+        output_end = output_end.max(end);
+        Some(info)
+    } else {
+        None
+    };
+    timing["outputEndMs"] = serde_json::json!(output_end * 1000.0);
+    let seconds = format!("{:.6}", output_end.max(0.001));
     if device_audio {
+        let info = native_timing
+            .as_ref()
+            .ok_or("Device audio has no native timing information")?;
+        let (video_pts, audio_pts) = stream_starts(info)?;
+        let (audio_host_start, filter) = device_audio_filter(delay, video_pts, audio_pts);
+        timing["nativeVideoStartSeconds"] = serde_json::json!(video_pts);
+        timing["nativeAudioStartSeconds"] = serde_json::json!(audio_pts);
+        timing["deviceAudioHostStartMs"] = serde_json::json!(audio_host_start * 1000.0);
         let mut extract = deps::command("ffmpeg")?;
         extract
             .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
             .arg(input)
             .args([
                 "-vn",
+                "-map",
+                "0:a:0",
                 "-af",
-                &format!("adelay={}:all=1,apad", (delay * 1000.0).round() as u64),
+                &filter,
                 "-t",
                 &seconds,
                 "-ar",
@@ -1313,6 +1540,11 @@ fn finalize(
             .arg(&system);
         ffmpeg(extract)?;
     }
+    fs::write(
+        folder.join("capture-timing.json"),
+        serde_json::to_vec_pretty(&timing).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let mut mix = deps::command("ffmpeg")?;
     mix.args(["-y", "-hide_banner", "-loglevel", "error"]);
     match (mic.exists(), system.exists()) {
@@ -1328,6 +1560,9 @@ fn finalize(
         (false, false) => {
             mix.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono"]);
         }
+    }
+    if device_capture && mic.exists() && !system.exists() {
+        mix.args(["-af", "apad"]);
     }
     mix.args([
         "-t",
@@ -1383,6 +1618,117 @@ fn finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scrcpy_readiness_uses_first_complete_decoded_texture_line() {
+        let mut seen = None;
+        for log in [
+            "INFO: Renderer: direct3d11\n",
+            "INFO: Recording started\n",
+            "[server] INFO: Texture: 4128x2208\n",
+            "VERBOSE: Creating new texture: size=4128x2208\n",
+            "INFO: Texture: 0x2208\n",
+            "INFO: Texture: 4128x2208",
+        ] {
+            assert_eq!(latch_scrcpy_frame(log, &mut seen, 0.5), None);
+        }
+        assert_eq!(
+            latch_scrcpy_frame("INFO: Texture: 4128x2208\r\n", &mut seen, 0.6),
+            Some(0.6)
+        );
+        assert_eq!(
+            latch_scrcpy_frame("INFO: Texture: 2208x4128\n", &mut seen, 5.6),
+            Some(0.6)
+        );
+    }
+    #[test]
+    fn device_audio_preserves_native_offset_before_host_zero_trimming() {
+        let (offset, filter) = device_audio_filter(0.6, 0.0, 0.097);
+        assert!((offset - 0.697).abs() < 1e-9);
+        assert!(filter.contains("adelay=697.000000"));
+        let (offset, filter) = device_audio_filter(0.6, 0.1, 0.0);
+        assert!((offset - 0.5).abs() < 1e-9);
+        assert!(filter.contains("adelay=500.000000"));
+        assert!(!filter.contains("atrim"));
+        let (offset, filter) = device_audio_filter(0.05, 0.1, 0.0);
+        assert!((offset + 0.05).abs() < 1e-9);
+        assert!(filter.starts_with("atrim=start=0.050000,asetpts="));
+        assert_eq!(stream_starts(&serde_json::json!({"streams":[{"codec_type":"video","start_time":"0.0"},{"codec_type":"audio","start_time":"0.097"}]})).unwrap(), (0.0, 0.097));
+        assert!(stream_starts(&serde_json::json!({"streams":[{"codec_type":"video","start_time":"NaN"},{"codec_type":"audio","start_time":"0"}]})).is_err());
+    }
+    #[test]
+    fn device_tail_uses_packet_extent_without_changing_start_anchor() {
+        let info = serde_json::json!({"streams":[{"index":0,"codec_type":"video","start_time":"0.000"}],"packets":[{"stream_index":0,"pts_time":"0.000","duration_time":"0.001"},{"stream_index":0,"pts_time":"4.098","duration_time":"0.001"}]});
+        let end = mapped_device_end(&info, 0.645, 30).unwrap();
+        assert!((end - (0.645 + 4.098 + 1.0 / 30.0)).abs() < 1e-9);
+        let mut info = info;
+        info["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"index":1,"codec_type":"audio","start_time":"0.097"}));
+        info["packets"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"stream_index":1,"pts_time":"4.200","duration_time":"0.021"}));
+        assert!((mapped_device_end(&info, 0.645, 30).unwrap() - 4.866).abs() < 1e-9);
+        assert!(
+            mapped_device_end(&serde_json::json!({"streams":[],"packets":[]}), 0.6, 30).is_err()
+        );
+    }
+    #[test]
+    fn device_metadata_extent_requires_valid_trailer_times() {
+        let mut info = serde_json::json!({"streams":[{"index":0,"codec_type":"video","start_time":"0.0"}],"format":{"start_time":"0.0","duration":"4.198"}});
+        assert!(
+            (metadata_device_end(&info, 0.645, 30).unwrap() - (0.645 + 4.198 + 1.0 / 30.0)).abs()
+                < 1e-9
+        );
+        for invalid in ["N/A", "NaN", "0", "-1"] {
+            info["format"]["duration"] = serde_json::json!(invalid);
+            assert!(metadata_device_end(&info, 0.645, 30).is_none());
+        }
+        assert!(metadata_device_end(&serde_json::json!({}), 0.645, 30).is_none());
+    }
+    #[test]
+    #[ignore = "Compares metadata fastpath against retained native packet evidence from the three real Quest CLI recordings"]
+    fn actual_quest_metadata_extent_covers_retained_packet_extents() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("test-results/quest/latest-run.json")).unwrap(),
+        )
+        .unwrap();
+        let evidence = PathBuf::from(manifest["evidenceDir"].as_str().unwrap());
+        let mut comparisons = Vec::new();
+        for phase in [
+            "video-only-4s",
+            "pc-microphone-4s",
+            "device-audio-microphone-6s",
+        ] {
+            let read = |suffix| {
+                serde_json::from_slice::<serde_json::Value>(
+                    &fs::read(evidence.join(format!("{phase}.{suffix}"))).unwrap(),
+                )
+                .unwrap()
+            };
+            let metadata = read("native-video.mkv.probe.json");
+            let packets = read("native-packets.json");
+            let result = read("result.json");
+            let delay = result["captureTiming"]["videoHostStartMs"]
+                .as_f64()
+                .unwrap()
+                / 1000.0;
+            let fast = metadata_device_end(&metadata, delay, 30).unwrap();
+            let precise = mapped_device_end(&packets, delay, 30).unwrap();
+            assert!(
+                fast >= precise && fast - precise < 0.2,
+                "Metadata failed to conservatively cover real packets: {phase}"
+            );
+            comparisons.push(serde_json::json!({"phase":phase,"metadataMappedEndMs":fast*1000.0,"packetMappedEndMs":precise*1000.0,"conservativePaddingMs":(fast-precise)*1000.0}));
+        }
+        fs::write(
+            evidence.join("metadata-fastpath-comparison.json"),
+            serde_json::to_vec_pretty(&comparisons).unwrap(),
+        )
+        .unwrap();
+    }
     #[test]
     fn parses_only_video_devices() {
         assert_eq!(dshow_names("[dshow] \"Quest Link\" (video)\n[dshow] Alternative name \"@device\"\n[dshow] \"Mic\" (audio)"), vec!["Quest Link"]);

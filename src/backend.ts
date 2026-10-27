@@ -1,7 +1,7 @@
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 
 export interface Project { id: string; name: string; createdAt: string }
-export interface Session { id: string; projectId: string; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; microphoneId?: string; systemAudio?: boolean }
+export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean }
 export interface Word { text: string; startMs: number; endMs: number; seekMs?: number }
 export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
 export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string }
@@ -19,15 +19,16 @@ export const backend = {
   projects: () => call<Project[]>('list_projects'),
   createProject: (name: string) => call<Project>('create_project', { name }),
   renameProject: (id: string, name: string) => call<void>('rename_project', { id, name }),
-  sessions: (projectId: string) => call<Session[]>('list_sessions', { projectId }),
+  sessions: (projectId?: string|null) => call<Session[]>('list_sessions', { projectId:projectId??null }),
   session: (id: string) => call<Session>('get_session', { id }),
   renameSession: (id: string, name: string) => call<void>('rename_session', { id, name }),
+  moveSession: (id:string,projectId:string|null) => call<Session>('move_session',{id,projectId}),
   sources: () => call<CaptureSource[]>('list_sources'),
   microphones: () => call<Microphone[]>('list_microphones'),
   setup: () => call<SetupStatus>('get_setup_status'),
   installTranscription: () => call<void>('install_transcription'),
   status: () => call<RecordingStatus>('get_recording_status'),
-  start: (projectId: string, name: string, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
+  start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
   stop: () => call<Session>('stop_recording'),
   transcript: (id: string) => call<Transcript>('get_transcript', { id }),
   preview: (sourceId: string) => call<string>('source_preview', { sourceId }),

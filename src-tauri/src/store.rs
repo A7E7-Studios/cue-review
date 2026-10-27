@@ -115,7 +115,7 @@ impl Store {
                 .join("session.json");
             if path.is_file() {
                 let session: Session = read_json(&path)?;
-                if project.is_none_or(|id| session.project_id == id) {
+                if project.is_none_or(|id| session.project_id.as_deref() == Some(id)) {
                     entries.push(session);
                 }
             }
@@ -125,19 +125,23 @@ impl Store {
     }
     pub fn create_session(
         &self,
-        project: &str,
-        name: &str,
+        project: Option<&str>,
+        name: Option<&str>,
         config: &CaptureConfig,
     ) -> Result<Session, String> {
-        self.project(project)?;
-        let name = valid_name(name)?;
+        if let Some(project) = project {
+            self.project(project)?;
+        }
+        let auto_title = name.is_none();
+        let name = valid_name(name.unwrap_or("New recording"))?;
         let id = Uuid::new_v4().to_string();
         let folder = self.session_dir(&id)?;
         fs::create_dir(&folder).map_err(|e| e.to_string())?;
         let s = Session {
             id,
-            project_id: project.into(),
+            project_id: project.map(str::to_owned),
             name,
+            auto_title,
             created_at: chrono::Utc::now().to_rfc3339(),
             duration_ms: 0,
             status: "recording".into(),
@@ -153,9 +157,60 @@ impl Store {
     }
     pub fn rename_session(&self, id: &str, name: &str) -> Result<Session, String> {
         let mut s = self.session(id)?;
+        if matches!(s.status.as_str(), "recording" | "processing") {
+            return Err("Finish recording and processing before renaming this recording.".into());
+        }
         s.name = valid_name(name)?;
+        s.auto_title = false;
         self.save_session(&s)?;
         Ok(s)
+    }
+    pub fn move_session(&self, id: &str, project: Option<&str>) -> Result<Session, String> {
+        let mut session = self.session(id)?;
+        if matches!(session.status.as_str(), "recording" | "processing") {
+            return Err("Finish recording and processing before moving this recording.".into());
+        }
+        if let Some(project) = project {
+            self.project(project)?;
+        }
+        session.project_id = project.map(str::to_owned);
+        self.save_session(&session)?;
+        Ok(session)
+    }
+    pub fn apply_auto_title(session: &mut Session, transcript: &Transcript) {
+        if !session.auto_title {
+            return;
+        }
+        let phrase = transcript
+            .segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .find(|text| !text.is_empty())
+            .unwrap_or("");
+        let mut title = String::new();
+        for word in phrase.split_whitespace() {
+            let word: String = word.chars().filter(|c| !c.is_control()).collect();
+            if word.is_empty() {
+                continue;
+            }
+            let length =
+                title.chars().count() + usize::from(!title.is_empty()) + word.chars().count();
+            if length > 60 {
+                if title.is_empty() {
+                    title.extend(word.chars().take(60));
+                }
+                break;
+            }
+            if !title.is_empty() {
+                title.push(' ');
+            }
+            title.push_str(&word);
+        }
+        session.name = if title.is_empty() {
+            "Recording".into()
+        } else {
+            title
+        };
     }
     pub fn transcript(&self, id: &str) -> Result<Transcript, String> {
         self.session(id)?;
@@ -221,6 +276,89 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn video_only() -> CaptureConfig {
+        CaptureConfig {
+            source_id: "monitor:1".into(),
+            microphone_id: None,
+            system_audio: false,
+            fps: 30,
+        }
+    }
+    #[test]
+    fn unassigned_recordings_can_be_grouped_without_moving_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut session = store.create_session(None, None, &video_only()).unwrap();
+        assert!(session.project_id.is_none());
+        assert!(session.auto_title);
+        assert_eq!(session.name, "New recording");
+        assert!(store.projects().unwrap().is_empty());
+        assert_eq!(store.sessions(None).unwrap().len(), 1);
+        let project = store.create_project("Optional group").unwrap();
+        assert!(store.move_session(&session.id, Some(&project.id)).is_err());
+        assert!(store.rename_session(&session.id, "Custom").is_err());
+        session.status = "ready".into();
+        store.save_session(&session).unwrap();
+        let media = store.session_dir(&session.id).unwrap().join("retained.bin");
+        fs::write(&media, b"original recording bytes").unwrap();
+        let assigned = store.move_session(&session.id, Some(&project.id)).unwrap();
+        assert_eq!(assigned.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(assigned.folder_path, session.folder_path);
+        assert_eq!(store.sessions(Some(&project.id)).unwrap().len(), 1);
+        assert!(store.move_session(&session.id, Some("missing")).is_err());
+        let unassigned = store.move_session(&session.id, None).unwrap();
+        assert!(unassigned.project_id.is_none());
+        assert!(store.sessions(Some(&project.id)).unwrap().is_empty());
+        assert_eq!(fs::read(media).unwrap(), b"original recording bytes");
+    }
+    #[test]
+    fn legacy_project_sessions_keep_names_and_deserialize_without_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let project = store.create_project("Existing project").unwrap();
+        let session = store
+            .create_session(Some(&project.id), Some("Review"), &video_only())
+            .unwrap();
+        let mut legacy = serde_json::to_value(&session).unwrap();
+        legacy.as_object_mut().unwrap().remove("autoTitle");
+        write_json(
+            &store.session_dir(&session.id).unwrap().join("session.json"),
+            &legacy,
+        )
+        .unwrap();
+        let reopened = Store::open(dir.path().into()).unwrap();
+        let mut loaded = reopened.session(&session.id).unwrap();
+        assert_eq!(loaded.project_id.as_deref(), Some(project.id.as_str()));
+        assert!(!loaded.auto_title);
+        Store::apply_auto_title(&mut loaded, &Transcript::default());
+        assert_eq!(loaded.name, "Review");
+        assert_eq!(reopened.projects().unwrap()[0].name, "Existing project");
+    }
+    #[test]
+    fn automatic_titles_use_source_words_and_explicit_rename_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut session = store.create_session(None, None, &video_only()).unwrap();
+        let transcript = Transcript { segments: vec![Segment {
+            id:"s".into(), start_ms:0,end_ms:1000,
+            text:"  Fix\tthis button \n before opening the very complicated library settings menu please  ".into(),words:vec![],
+        }], ..Default::default() };
+        Store::apply_auto_title(&mut session, &transcript);
+        assert_eq!(
+            session.name,
+            "Fix this button before opening the very complicated library"
+        );
+        assert!(session.name.chars().count() <= 60);
+        session.status = "ready".into();
+        store.save_session(&session).unwrap();
+        let mut custom = store.rename_session(&session.id, "Review").unwrap();
+        assert!(!custom.auto_title);
+        Store::apply_auto_title(&mut custom, &transcript);
+        assert_eq!(custom.name, "Review");
+        let mut silent = store.create_session(None, None, &video_only()).unwrap();
+        Store::apply_auto_title(&mut silent, &Transcript::default());
+        assert_eq!(silent.name, "Recording");
+    }
     #[test]
     fn persistence_and_recovery() {
         let dir = tempfile::tempdir().unwrap();
@@ -229,8 +367,8 @@ mod tests {
         assert_eq!(p.name, "Project");
         let s = store
             .create_session(
-                &p.id,
-                "Review",
+                Some(&p.id),
+                Some("Review"),
                 &CaptureConfig {
                     source_id: "monitor:1".into(),
                     microphone_id: None,
@@ -254,8 +392,8 @@ mod tests {
         let p = store.create_project("P").unwrap();
         let mut s = store
             .create_session(
-                &p.id,
-                "S",
+                Some(&p.id),
+                Some("S"),
                 &CaptureConfig {
                     source_id: "monitor:1".into(),
                     microphone_id: None,

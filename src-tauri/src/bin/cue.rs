@@ -5,7 +5,7 @@ use cuereview_lib::{
     transcribe,
 };
 use std::{path::Path, time::Duration};
-const HELP:&str="CueReview — local agent access\n\ncue projects\ncue sessions [PROJECT_ID]\ncue info SESSION_ID\ncue transcript SESSION_ID [--json]\ncue find SESSION_ID --phrase TEXT\ncue frame SESSION_ID (--at-ms N | --phrase TEXT [--occurrence N]) [--output PATH]\ncue clip SESSION_ID --start-ms N --end-ms N [--output PATH]\ncue transcribe SESSION_ID\ncue setup [--install]\ncue sources\ncue microphones\ncue record --project ID --source ID --seconds N [--mic ID] [--system-audio] [--name TEXT]\n\nAll times are milliseconds. Frame/clip output is JSON with a local path.\nCUEREVIEW_DATA_DIR overrides the shared local storage root.\nNo network access is used except explicit setup --install.\n";
+const HELP:&str="CueReview — local agent access\n\ncue projects\ncue sessions [PROJECT_ID]\ncue info SESSION_ID\ncue transcript SESSION_ID [--json]\ncue find SESSION_ID --phrase TEXT\ncue frame SESSION_ID (--at-ms N | --phrase TEXT [--occurrence N]) [--output PATH]\ncue clip SESSION_ID --start-ms N --end-ms N [--output PATH]\ncue transcribe SESSION_ID\ncue setup [--install]\ncue sources\ncue microphones\ncue record [--project ID] --source ID --seconds N [--mic ID] [--system-audio] [--name TEXT]\n\nAll times are milliseconds. Frame/clip output is JSON with a local path.\nCUEREVIEW_DATA_DIR overrides the shared local storage root.\nNo network access is used except explicit setup --install.\n";
 fn option<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.iter()
         .position(|a| a == key)
@@ -106,8 +106,8 @@ fn run() -> Result<(), String> {
                 fps: 30,
             };
             let mut session = store.create_session(
-                required(&args, "--project")?,
-                option(&args, "--name").unwrap_or("Review"),
+                option(&args, "--project"),
+                option(&args, "--name"),
                 &config,
             )?;
             let result = (|| {
@@ -120,7 +120,8 @@ fn run() -> Result<(), String> {
                 stopped.and(video)?;
                 session.status = "processing".into();
                 store.save_session(&session)?;
-                transcribe::transcribe(&store, &session.id)?;
+                let transcript = transcribe::transcribe(&store, &session.id)?;
+                Store::apply_auto_title(&mut session, &transcript);
                 Ok::<(), String>(())
             })();
             session.status = if result.is_ok() { "ready" } else { "error" }.into();

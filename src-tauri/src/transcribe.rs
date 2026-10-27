@@ -823,8 +823,8 @@ mod tests {
         let project = store.create_project("VAD verification").unwrap();
         let mut session = store
             .create_session(
-                &project.id,
-                "Quiet mic",
+                Some(&project.id),
+                Some("Quiet mic"),
                 &crate::models::CaptureConfig {
                     source_id: "fixture".into(),
                     microphone_id: Some("fixture".into()),

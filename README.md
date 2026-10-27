@@ -2,7 +2,7 @@
 
 **Show it. Say it. Fix it.** A Windows desktop recorder for local, word-aligned review feedback.
 
-CueReview uses Tauri 2, React, and a small Rust backend. Record a display, application window, or supported Android/Quest source with microphone commentary. Review the original transcript beside the video, click a word to seek, add markers, and give an agent a local session reference. No account or hosted transcription service is involved.
+CueReview uses Tauri 2, React, and a small Rust backend. It opens directly into a fresh recording draft. Record a display, application window, or supported Android/Quest source with microphone commentary; no project or name is required. Review the original transcript beside the video, click a word to seek, add markers, and give an agent a local session reference. No account or hosted transcription service is involved.
 
 ## Run from source
 
@@ -13,7 +13,7 @@ npm ci
 npm run tauri dev
 ```
 
-On first use, open **Settings & local setup → Install local transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB). Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
+On first use, open **Settings → Install transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB). Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
 
 ```powershell
 winget install Gyan.FFmpeg
@@ -24,15 +24,18 @@ winget install Genymobile.scrcpy
 
 Restart the app after changing PATH. Accept the headset's USB debugging prompt, then refresh sources. A Meta Quest virtual camera entry does not establish that a headset is connected: USB devices must appear as `device` in `adb devices -l`. Sources can also fail when a window is minimized, protected content prevents capture, or Windows microphone permissions are disabled.
 
+If another tool manages the device on a nondefault ADB server, launch CueReview and its CLI with that server's `ADB_SERVER_SOCKET`, for example `$env:ADB_SERVER_SOCKET = 'tcp:127.0.0.1:5073'` before starting the executable. Use the existing server rather than resetting unrelated debugging sessions. Quest mirroring currently retains the original stereo view.
+
 Window recordings keep their initial canvas size. Resizing the source during capture crops or pads to that canvas; choose the desired window size before recording.
 
 ## Workflow
 
-1. Create a project and choose a source and microphone in the compact bottom controls.
+1. Open CueReview. A fresh unnamed recording is ready; source and microphone options open directly from the compact bottom controls.
 2. Press Record (`Ctrl+R`). Mute/unmute and add timestamped markers during capture. Compact mode keeps the recording controls available in a smaller window.
 3. Stop. The video is finalized and transcribed locally. Original media remains available if transcription fails; use Retry after fixing setup.
-4. Play the recording and click transcript words to seek. The standard model uses DTW alignment points for visual lookup, while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
-5. Copy for agent, or open the session folder.
+4. Find the recording in Recents. Its title is derived from the transcript; rename it or optionally add it to a project afterward. Grouping never moves the media files.
+5. Play the recording and click transcript words to seek. The transcript follows playback automatically. The standard model uses DTW alignment points for visual lookup, while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
+6. Copy for agent, or open the session folder.
 
 Before transcription, a local detector checks for speech. An explicit successful no-speech result produces an empty transcript; detector failures remain actionable errors. When speech is present, the original audio goes through Whisper without cutting silence or changing its word-to-time mapping. Speech detection and recognition are imperfect, particularly with mixed speech/noise; review the transcript alongside the recording. Raw model output and detector diagnostics are retained when produced.
 
@@ -81,5 +84,7 @@ Use a dedicated `CUEREVIEW_DATA_DIR` for desktop verification. The review script
 `scripts/verify-recovery.cjs` launches and closes its own isolated app instance, verifies interrupted-session recovery and missing-model retry, then checks real transcription and marker persistence after relaunch. It uses the pipeline fixture and already installed models, preserving the source media and the normal app's data.
 
 `scripts/verify-failures.cjs` checks actual missing-tool and failed-process paths using copied media and invalid test models. `scripts/verify-alignment.cjs` adds ten seconds of silence before the known speech and verifies that phrase-based frame retrieval selects the spoken scene after a red-to-blue video transition. Both use isolated data directories.
+
+`scripts/verify-device-ui.cjs` requires `CUEREVIEW_TEST_DEVICE` set to an authorized ADB serial. It launches an isolated app, records without creating a project or entering a name, checks direct device menus and playback, and assigns/unassigns an optional group without changing the media. Set `ADB_SERVER_SOCKET` too when the device belongs to a nondefault server.
 
 See [architecture](docs/ARCHITECTURE.md) and the [verification checklist](docs/VERIFICATION.md) for boundaries and remaining hardware validation. Passing display capture does not establish Android/Quest correctness. Device-to-PC-microphone alignment needs hardware measurement, and recordings should be checked before relying on millisecond-level cross-device alignment.

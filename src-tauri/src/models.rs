@@ -12,8 +12,11 @@ pub struct Project {
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
-    pub project_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub name: String,
+    #[serde(default)]
+    pub auto_title: bool,
     pub created_at: String,
     pub duration_ms: u64,
     pub status: String,

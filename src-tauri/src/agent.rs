@@ -41,6 +41,10 @@ pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String
     session.error = None;
     store.save_session(&session)?;
     let result = crate::transcribe::transcribe(store, id);
+    session = store.session(id)?;
+    if let Ok(transcript) = &result {
+        Store::apply_auto_title(&mut session, transcript);
+    }
     session.status = if result.is_ok() { "ready" } else { "error" }.into();
     session.error = result.as_ref().err().cloned();
     store.save_session(&session)?;
@@ -324,8 +328,8 @@ mod tests {
         let project = store.create_project("P").unwrap();
         let session = store
             .create_session(
-                &project.id,
-                "S",
+                Some(&project.id),
+                Some("S"),
                 &crate::models::CaptureConfig {
                     source_id: "monitor:1".into(),
                     microphone_id: None,
@@ -396,8 +400,8 @@ mod tests {
         let project = store.create_project("Boundary").unwrap();
         let mut session = store
             .create_session(
-                &project.id,
-                "Video only",
+                Some(&project.id),
+                Some("Video only"),
                 &crate::models::CaptureConfig {
                     source_id: "test".into(),
                     microphone_id: None,

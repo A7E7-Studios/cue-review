@@ -90,28 +90,26 @@ async function verifyWord(word, index, label) {
 async function verifyNativeSourceControls() {
   await page.locator('.side-tools').getByRole('button', { name: 'New recording', exact: true }).click();
   await page.locator('.mic-trigger').click();
-  await page.getByLabel('Input device').selectOption('');
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('group', { name: 'Microphone options', exact: true }).getByRole('button', { name: 'No microphone', exact: true }).click();
   await page.locator('.source-trigger').click();
   await page.getByRole('button', { name: 'Refresh capture devices', exact: true }).click();
   // Device enumeration is asynchronous; a second real invocation completes after
   // the UI request has been queued, and the bounded UI pause permits its render.
   const sources = await invoke('list_sources');
   await delay(600);
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.locator('.mic-trigger').click();
-  const selectedMicrophone = await page.getByLabel('Input device').inputValue();
-  if (selectedMicrophone !== '') throw Error('Native source refresh re-enabled a microphone after No microphone was chosen');
+  const selectedMicrophone = await page.getByRole('group', { name: 'Microphone options', exact: true }).getByRole('button', { name: 'No microphone', exact: true }).getAttribute('aria-pressed');
+  if (selectedMicrophone !== 'true') throw Error('Native source refresh re-enabled a microphone after No microphone was chosen');
   result.checks.noMicrophoneAfterNativeRefresh = { selectedMicrophone, status: (await invoke('get_recording_status')).state };
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.keyboard.press('Escape');
   await shot('native-no-microphone-after-refresh');
   const unavailable = sources.find(source => !source.available);
   if (unavailable) {
     await page.locator('.source-trigger').click();
-    await page.getByLabel('Screen, window, or device').selectOption(unavailable.id);
+    await page.getByRole('group', { name: 'Capture sources', exact: true }).getByRole('button', { name: `${unavailable.name} · unavailable`, exact: true }).click();
     await page.getByRole('heading', { name: 'Capture source unavailable', exact: true }).waitFor();
     if (!(await page.getByRole('button', { name: 'Record', exact: true }).isDisabled())) throw Error('Unavailable native source can start recording');
-    await page.getByRole('button', { name: 'Done', exact: true }).click();
     await page.keyboard.press('Control+r');
     await page.getByRole('alert').waitFor();
     if ((await invoke('get_recording_status')).state !== 'idle') throw Error('Unavailable-source keyboard shortcut started capture');
@@ -136,7 +134,7 @@ async function verifyNativeSourceControls() {
     if (JSON.stringify(originalHashes) !== JSON.stringify(result.sourceMediaHashes)) throw Error('Fixture copy failed checksum verification');
     const createdAt = new Date().toISOString();
     fs.writeFileSync(path.join(dataRoot, 'projects', `${projectId}.json`), JSON.stringify({ id: projectId, name: 'Isolated recovery verification', createdAt }));
-    fs.writeFileSync(path.join(sessionDir, 'session.json'), JSON.stringify({ ...metadata, id: sessionId, projectId, name: 'Recovery audit fixture', createdAt, status: 'processing', videoPath: null, folderPath: sessionDir, error: null }));
+    fs.writeFileSync(path.join(sessionDir, 'session.json'), JSON.stringify({ ...metadata, id: sessionId, projectId, name: 'Recovery audit fixture', autoTitle: false, createdAt, status: 'processing', videoPath: null, folderPath: sessionDir, error: null }));
     result.sessionId = sessionId;
     result.initialFixtureStatus = 'processing';
     childLog = fs.openSync(path.join(output, 'owned-app.log'), 'a');
