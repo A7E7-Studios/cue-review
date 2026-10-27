@@ -591,6 +591,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cpal",
+ "dunce",
  "hound",
  "image",
  "reqwest 0.12.28",

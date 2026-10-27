@@ -275,13 +275,25 @@ fn get_agent_handoff(s: CmdState<'_>, id: String) -> Result<String, String> {
 }
 #[tauri::command]
 fn open_session_folder(s: CmdState<'_>, id: String) -> Result<(), String> {
-    s.store.session(&id)?;
-    let folder = s.store.session_dir(&id)?;
+    let folder = session_folder_for_shell(&s.store, &id)?;
     Command::new("explorer.exe")
-        .arg(folder)
+        .arg(&folder)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Could not open {} in File Explorer: {e}", folder.display()))?;
     Ok(())
+}
+fn session_folder_for_shell(store: &Store, id: &str) -> Result<std::path::PathBuf, String> {
+    store.session(id)?;
+    // A packaged launcher can redirect LocalAppData for its child processes.
+    // Explorer is outside that context, so give it the physical filesystem path
+    // in a shell-compatible form rather than the virtualized logical path.
+    let folder = store.session_dir(id)?;
+    dunce::canonicalize(&folder).map_err(|e| {
+        format!(
+            "The recording folder {} is unavailable: {e}",
+            folder.display()
+        )
+    })
 }
 #[tauri::command]
 async fn start_recording(
@@ -566,6 +578,32 @@ pub fn run() {
 #[cfg(test)]
 mod orchestration_tests {
     use super::*;
+    #[test]
+    fn shell_folder_resolves_the_physical_path_and_preserves_spaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("recordings with spaces")).unwrap();
+        let session = store
+            .create_session(
+                None,
+                None,
+                &CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: None,
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        let folder = session_folder_for_shell(&store, &session.id).unwrap();
+        assert_eq!(
+            folder,
+            dunce::canonicalize(store.session_dir(&session.id).unwrap()).unwrap()
+        );
+        assert!(folder.join("session.json").is_file());
+        assert!(!folder.to_string_lossy().starts_with(r"\\?\"));
+        assert!(session_folder_for_shell(&store, "../outside").is_err());
+        assert!(session_folder_for_shell(&store, &uuid::Uuid::new_v4().to_string()).is_err());
+    }
     fn state(root: std::path::PathBuf) -> Shared {
         Arc::new(AppState {
             store: Store::open(root).unwrap(),
