@@ -27,6 +27,8 @@ Windows Graphics Capture may emit frames only when the image changes. Stopping m
 
 scrcpy records encoded device streams with device timestamps. Those timestamps preserve device audio/video alignment; they do not automatically synchronize a separately captured PC microphone. The implementation must account for device startup latency and document any remaining alignment limit. ADB authorization and a connected device are required. Quest compatibility must be checked on the actual headset rather than inferred from Android support.
 
+Previews use a continuous MJPEG response over an ephemeral loopback listener with a random per-stream URL token. There is no screenshot polling or per-frame React state update. Windows capture pushes JPEG frames directly; device previews run the installed matching scrcpy server in video-only raw-stream mode on a unique ADB forward and decode H.264 with FFmpeg. Cameras use a continuous DirectShow/FFmpeg capture. Only the latest frame is retained if the viewer falls behind. Preview resolution is bounded independently of recording resolution. Starting a recording keeps the existing preview stream; switching sources or entering review stops its owned resources. Frontend start/stop operations are ordered, and stale stop IDs cannot terminate a newer stream. Source errors reach the UI through a Tauri channel. Meta/Oculus Quest virtual-camera filters are excluded from enumeration in favor of authorized USB devices.
+
 ## Local transcription
 
 Convert the transcription input to mono, 16 kHz signed 16-bit PCM WAV. Run the local `whisper-cli` with a locally stored model and full JSON output. A multilingual model supports automatic language selection; an English-only model should only be selected for English recordings.

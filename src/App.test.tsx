@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { Marker, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
 
-const mocks=vi.hoisted(()=>({backend:{projects:vi.fn(),sessions:vi.fn(),session:vi.fn(),transcript:vi.fn(),markers:vi.fn(),setup:vi.fn(),status:vi.fn(),sources:vi.fn(),microphones:vi.fn(),preview:vi.fn(),createProject:vi.fn(),renameProject:vi.fn(),renameSession:vi.fn(),moveSession:vi.fn(),start:vi.fn(),stop:vi.fn(),addMarker:vi.fn(),handoff:vi.fn(),openFolder:vi.fn(),mute:vi.fn(),retry:vi.fn(),installTranscription:vi.fn()},setTheme:vi.fn().mockResolvedValue(undefined),setAlwaysOnTop:vi.fn().mockResolvedValue(undefined),setSize:vi.fn().mockResolvedValue(undefined),setMinSize:vi.fn().mockResolvedValue(undefined)}));
+const mocks=vi.hoisted(()=>({backend:{projects:vi.fn(),sessions:vi.fn(),session:vi.fn(),transcript:vi.fn(),markers:vi.fn(),setup:vi.fn(),status:vi.fn(),sources:vi.fn(),microphones:vi.fn(),preview:vi.fn(),stopPreview:vi.fn(),createProject:vi.fn(),renameProject:vi.fn(),renameSession:vi.fn(),moveSession:vi.fn(),start:vi.fn(),stop:vi.fn(),addMarker:vi.fn(),handoff:vi.fn(),openFolder:vi.fn(),mute:vi.fn(),retry:vi.fn(),installTranscription:vi.fn()},setTheme:vi.fn().mockResolvedValue(undefined),setAlwaysOnTop:vi.fn().mockResolvedValue(undefined),setSize:vi.fn().mockResolvedValue(undefined),setMinSize:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('./backend',()=>({backend:mocks.backend,videoUrl:(path:string)=>`asset://${path}`}));
 vi.mock('@tauri-apps/api/core',()=>({isTauri:()=>true}));
 vi.mock('@tauri-apps/api/window',()=>({getCurrentWindow:()=>({setTheme:mocks.setTheme,setAlwaysOnTop:mocks.setAlwaysOnTop,setSize:mocks.setSize,setMinSize:mocks.setMinSize,innerSize:async()=>({width:1280,height:820}),scaleFactor:async()=>1})}));
@@ -32,7 +32,8 @@ beforeEach(()=>{
   backend.setup.mockImplementation(async()=>({...setup}));
   backend.sources.mockResolvedValue([{id:'display1',name:'Display 1',kind:'display',available:true},{id:'quest1',name:'Quest USB',kind:'quest',available:true}]);
   backend.microphones.mockResolvedValue([{id:'mic1',name:'Studio microphone'},{id:'mic2',name:'Headset microphone'}]);
-  backend.preview.mockResolvedValue('data:image/png;base64,cHJldmlldw==');
+  backend.preview.mockImplementation(async(_source:string,id:string)=>({id,url:'http://127.0.0.1:9999/live'}));
+  backend.stopPreview.mockResolvedValue(undefined);
   backend.transcript.mockImplementation(async()=>structuredClone(transcript));
   backend.markers.mockImplementation(async()=>markers.map(item=>({...item})));
   backend.createProject.mockImplementation(async(name:string)=>{const project={id:'p2',name,createdAt:timestamp};projects.push(project);return project;});
@@ -68,6 +69,22 @@ async function chooseSource(user:TestUser,name:string) {
 }
 
 describe('keyboard interaction',()=>{
+  it('keeps one continuous preview through recording startup and stops it for review',async()=>{
+    const user=await ready();await screen.findByRole('img',{name:'Live preview of Display 1'});
+    const id=backend.preview.mock.calls[0][1];
+    await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
+    expect(backend.preview).toHaveBeenCalledTimes(1);expect(backend.stopPreview).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button',{name:'Stop'}));
+    await waitFor(()=>expect(backend.stopPreview).toHaveBeenCalledWith(id));
+  });
+  it('reconnects a failed stream when the current source is selected again',async()=>{
+    const user=await ready();await screen.findByRole('img',{name:'Live preview of Display 1'});
+    act(()=>backend.preview.mock.calls[0][2]('Preview disconnected'));
+    await screen.findByText('Preview disconnected');
+    await user.click(screen.getByRole('button',{name:'Display 1'}));await chooseSource(user,'Display 1');
+    expect(await screen.findByRole('img',{name:'Live preview of Display 1'})).toBeVisible();
+    expect(backend.preview).toHaveBeenCalledTimes(2);
+  });
   it('opens device choices directly, focuses the selected option, and restores focus on Escape',async()=>{
     const user=await ready();
     const mic=screen.getByRole('button',{name:'Studio microphone'});
@@ -387,10 +404,10 @@ describe('local setup recovery and request races',()=>{
     await user.click(screen.getByRole('button',{name:'Stop'}));
     expect(backend.stop).toHaveBeenCalledTimes(1);
   });
-  it('removes the last preview frame after a failed poll instead of presenting stale imagery as live',async()=>{
+  it('removes the last preview frame when the stream reports a failure',async()=>{
     await ready();
     expect(await screen.findByRole('img',{name:'Live preview of Display 1'})).toBeVisible();
-    backend.preview.mockRejectedValue(new Error('Preview connection lost. Reconnect the selected device.'));
+    act(()=>backend.preview.mock.calls.at(-1)![2]('Preview connection lost. Reconnect the selected device.'));
     expect(await screen.findByText('Preview connection lost. Reconnect the selected device.',{}, {timeout:2200})).toBeVisible();
     expect(screen.queryByRole('img',{name:'Live preview of Display 1'})).not.toBeInTheDocument();
   });
@@ -435,13 +452,13 @@ describe('local setup recovery and request races',()=>{
     expect(backend.installTranscription).toHaveBeenCalledTimes(2);
   });
   it('ignores an old source preview that arrives after the user selects another source',async()=>{
-    let resolveOld!:(value:string)=>void;
-    backend.preview.mockImplementation((sourceId:string)=>sourceId==='display1'?new Promise<string>(resolve=>{resolveOld=resolve;}):Promise.resolve('data:image/png;base64,cXVlc3Q='));
+    let resolveOld!:(value:{id:string;url:string})=>void;
+    backend.preview.mockImplementation((sourceId:string,id:string)=>sourceId==='display1'?new Promise<{id:string;url:string}>(resolve=>{resolveOld=resolve;}):Promise.resolve({id,url:'http://127.0.0.1:9999/quest'}));
     const user=await ready();await user.click(screen.getByRole('button',{name:'Display 1'}));await chooseSource(user,'Quest USB');
     const image=await screen.findByRole('img',{name:'Live preview of Quest USB'});
-    expect(image).toHaveAttribute('src','data:image/png;base64,cXVlc3Q=');
-    await act(async()=>resolveOld('data:image/png;base64,b2xk'));
-    expect(image).toHaveAttribute('src','data:image/png;base64,cXVlc3Q=');
+    expect(image).toHaveAttribute('src','http://127.0.0.1:9999/quest');
+    await act(async()=>resolveOld({id:'old',url:'http://127.0.0.1:9999/old'}));
+    expect(image).toHaveAttribute('src','http://127.0.0.1:9999/quest');
   });
   it('does not let an old session response replace a newly prepared recording',async()=>{
     let resolveOld!:(value:Session)=>void;backend.session.mockImplementationOnce(()=>new Promise<Session>(resolve=>{resolveOld=resolve;}));

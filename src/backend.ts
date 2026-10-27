@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
+import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 
 export interface Project { id: string; name: string; createdAt: string }
 export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean }
@@ -14,6 +14,11 @@ export interface Marker { id: string; timeMs: number; label: string }
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error('Open CueReview as a desktop app to access your recordings and capture devices. Run npm run tauri dev.');
   return invoke<T>(command, args);
+}
+// Preserve start/stop order when switching sources before startup has finished.
+let previewQueue:Promise<unknown>=Promise.resolve();
+function previewOperation<T>(operation:()=>Promise<T>):Promise<T> {
+  const next=previewQueue.then(operation,operation);previewQueue=next.catch(()=>{});return next;
 }
 export const backend = {
   projects: () => call<Project[]>('list_projects'),
@@ -31,7 +36,11 @@ export const backend = {
   start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
   stop: () => call<Session>('stop_recording'),
   transcript: (id: string) => call<Transcript>('get_transcript', { id }),
-  preview: (sourceId: string) => call<string>('source_preview', { sourceId }),
+  preview: (sourceId: string, id:string, onError:(error:string)=>void) => {
+    const errors=new Channel<string>();errors.onmessage=onError;
+    return previewOperation(()=>call<{id:string;url:string}>('start_preview', { sourceId,id,errors }));
+  },
+  stopPreview: (id:string) => previewOperation(()=>call<void>('stop_preview',{id})),
   openFolder: (id: string) => call<void>('open_session_folder', { id }),
   markers: (id: string) => call<Marker[]>('get_markers', { id }),
   addMarker: (id: string, timeMs: number, label: string) => call<Marker>('add_marker', { id, timeMs, label }),

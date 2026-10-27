@@ -2,6 +2,7 @@ pub mod agent;
 pub mod capture;
 pub mod deps;
 pub mod models;
+pub mod preview;
 pub mod store;
 pub mod transcribe;
 
@@ -30,7 +31,7 @@ struct AppState {
     runtime: Mutex<Runtime>,
     installer: Mutex<()>,
     inference: Mutex<()>,
-    preview: Mutex<capture::Preview>,
+    preview: Mutex<preview::Preview>,
 }
 type Shared = Arc<AppState>;
 type CmdState<'a> = tauri::State<'a, Shared>;
@@ -228,13 +229,30 @@ async fn list_microphones() -> Result<Vec<Microphone>, String> {
     blocking(capture::microphones).await
 }
 #[tauri::command]
-async fn source_preview(s: CmdState<'_>, source_id: String) -> Result<String, String> {
+async fn start_preview(
+    s: CmdState<'_>,
+    id: String,
+    source_id: String,
+    errors: tauri::ipc::Channel<String>,
+) -> Result<preview::StreamInfo, String> {
     let s = s.inner().clone();
     blocking(move || {
-        s.preview
-            .lock()
-            .map_err(|e| e.to_string())?
-            .frame(&source_id)
+        s.preview.lock().map_err(|e| e.to_string())?.start(
+            id,
+            &source_id,
+            Arc::new(move |error| {
+                let _ = errors.send(error);
+            }),
+        )
+    })
+    .await
+}
+#[tauri::command]
+async fn stop_preview(s: CmdState<'_>, id: String) -> Result<(), String> {
+    let s = s.inner().clone();
+    blocking(move || {
+        s.preview.lock().map_err(|e| e.to_string())?.stop(&id);
+        Ok(())
     })
     .await
 }
@@ -496,7 +514,7 @@ pub fn run() {
                 runtime: Mutex::new(Runtime::default()),
                 installer: Mutex::new(()),
                 inference: Mutex::new(()),
-                preview: Mutex::new(capture::Preview::default()),
+                preview: Mutex::new(preview::Preview::default()),
             }));
             Ok(())
         })
@@ -529,7 +547,8 @@ pub fn run() {
             add_marker,
             list_sources,
             list_microphones,
-            source_preview,
+            start_preview,
+            stop_preview,
             get_setup_status,
             install_transcription,
             get_agent_handoff,
@@ -553,7 +572,7 @@ mod orchestration_tests {
             runtime: Mutex::new(Runtime::default()),
             installer: Mutex::new(()),
             inference: Mutex::new(()),
-            preview: Mutex::new(capture::Preview::default()),
+            preview: Mutex::new(preview::Preview::default()),
         })
     }
     #[test]

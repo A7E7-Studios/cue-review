@@ -12,7 +12,7 @@
   "app": {
     "windows": [{ "label": "main", "title": "CueReview", "width": 1280, "height": 820, "minWidth": 640, "minHeight": 480, "backgroundColor": "#ffffff" }],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost http://127.0.0.1:* data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost",
       "assetProtocol": { "enable": true, "scope": ["$LOCALDATA/CueReview/sessions/**"] }
     }
   },

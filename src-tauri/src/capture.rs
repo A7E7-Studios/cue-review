@@ -158,7 +158,12 @@ fn dshow_names(text: &str) -> Vec<String> {
     text.lines()
         .filter(|l| l.contains("(video)"))
         .filter_map(|l| l.split('"').nth(1).map(str::to_owned))
+        .filter(|name| !is_quest_virtual_camera(name))
         .collect()
+}
+fn is_quest_virtual_camera(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("meta quest") || name.starts_with("oculus quest")
 }
 
 pub fn microphones() -> Result<Vec<Microphone>, String> {
@@ -188,7 +193,7 @@ struct NativeFlags {
     error: SharedError,
     ready: mpsc::SyncSender<Result<(), String>>,
     preview: bool,
-    preview_frames: Option<Arc<PreviewFrames>>,
+    preview_sink: Option<crate::preview::FrameSink>,
 }
 struct NativeCapture {
     flags: NativeFlags,
@@ -307,15 +312,29 @@ impl GraphicsCaptureApiHandler for NativeCapture {
     ) -> Result<(), String> {
         let result = (|| {
             if self.flags.preview {
-                if let Some(frames) = &self.flags.preview_frames {
+                if let Some(sink) = &self.flags.preview_sink {
                     let (width, height) = (frame.width(), frame.height());
-                    let buffer = frame.buffer().map_err(|e| e.to_string())?;
-                    let mut packed = Vec::new();
-                    let bytes = ImageEncoder::new(ImageFormat::Png, ImageEncoderPixelFormat::Bgra8)
-                        .map_err(|e| e.to_string())?
-                        .encode(buffer.as_nopadding_buffer(&mut packed), width, height)
-                        .map_err(|e| e.to_string())?;
-                    *frames.image.lock().map_err(|e| e.to_string())? = Some(preview_url(&bytes));
+                    let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
+                    let target_width = (width as f64 * scale).round().max(1.0) as u32;
+                    let target_height = (height as f64 * scale).round().max(1.0) as u32;
+                    let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
+                    let stride = buffer.row_pitch() as usize;
+                    let raw = buffer.as_raw_buffer();
+                    let mut packed = vec![0u8; target_width as usize * target_height as usize * 4];
+                    for y in 0..target_height as usize {
+                        let row = y * height as usize / target_height as usize * stride;
+                        for x in 0..target_width as usize {
+                            let from = row + x * width as usize / target_width as usize * 4;
+                            let to = (y * target_width as usize + x) * 4;
+                            packed[to..to + 4].copy_from_slice(&raw[from..from + 4]);
+                        }
+                    }
+                    let bytes =
+                        ImageEncoder::new(ImageFormat::Jpeg, ImageEncoderPixelFormat::Bgra8)
+                            .map_err(|e| e.to_string())?
+                            .encode(&packed, target_width, target_height)
+                            .map_err(|e| e.to_string())?;
+                    sink(bytes);
                 } else {
                     frame
                         .save_as_image(&self.flags.path, ImageFormat::Png)
@@ -370,7 +389,7 @@ impl GraphicsCaptureApiHandler for NativeCapture {
     fn on_closed(&mut self) -> Result<(), String> {
         if !self.flags.preview {
             fail(&self.flags.error, "Capture source closed during recording");
-        } else if self.flags.preview_frames.is_some() {
+        } else if self.flags.preview_sink.is_some() {
             fail(
                 &self.flags.error,
                 "Preview source closed. Choose another source.",
@@ -426,116 +445,45 @@ fn native_start(
     Err("Unknown native capture source".into())
 }
 
-const PREVIEW_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
-struct PreviewFrames {
-    image: Mutex<Option<String>>,
-    requested: Mutex<Instant>,
+pub struct NativePreview {
+    control: Option<CaptureControl<NativeCapture, String>>,
+    pub error: SharedError,
 }
-struct PreviewSession {
-    source: String,
-    frames: Arc<PreviewFrames>,
-    error: SharedError,
-    stop: mpsc::Sender<()>,
-    worker: Option<JoinHandle<()>>,
-}
-impl Drop for PreviewSession {
+impl Drop for NativePreview {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(control) = self.control.take() {
+            let _ = control.stop();
         }
     }
 }
-/// Reuse a native capture session across UI polls instead of flashing the OS
-/// capture indicator for every screenshot. The lease also expires on static
-/// screens when the UI stops requesting previews.
-#[derive(Default)]
-pub struct Preview {
-    native: Option<PreviewSession>,
+pub fn stream_preview(
+    source: &str,
+    sink: crate::preview::FrameSink,
+) -> Result<NativePreview, String> {
+    let error: SharedError = Arc::default();
+    let (ready, first) = mpsc::sync_channel(1);
+    let control = native_start(
+        source,
+        NativeFlags {
+            path: PathBuf::new(),
+            fps: 30,
+            epoch: Instant::now(),
+            error: error.clone(),
+            ready,
+            preview: true,
+            preview_sink: Some(sink),
+        },
+    )?;
+    let preview = NativePreview {
+        control: Some(control),
+        error,
+    };
+    first.recv_timeout(Duration::from_secs(8)).map_err(|_| {
+        "Preview timed out. Restore the selected window and try again.".to_string()
+    })??;
+    Ok(preview)
 }
-impl Preview {
-    pub fn frame(&mut self, source: &str) -> Result<String, String> {
-        if !source.starts_with("monitor:") && !source.starts_with("window:") {
-            self.native = None;
-            return preview(source);
-        }
-        let reuse = self.native.as_ref().is_some_and(|session| {
-            session.source == source
-                && session
-                    .worker
-                    .as_ref()
-                    .is_some_and(|worker| !worker.is_finished())
-        });
-        if !reuse {
-            self.native = None;
-            let frames = Arc::new(PreviewFrames {
-                image: Mutex::new(None),
-                requested: Mutex::new(Instant::now()),
-            });
-            let error: SharedError = Arc::default();
-            let (ready, first) = mpsc::sync_channel(1);
-            let control = native_start(
-                source,
-                NativeFlags {
-                    path: PathBuf::new(),
-                    fps: 2,
-                    epoch: Instant::now(),
-                    error: error.clone(),
-                    ready,
-                    preview: true,
-                    preview_frames: Some(frames.clone()),
-                },
-            )?;
-            let initialized = first
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| {
-                    "Preview timed out. Restore the selected window and try again.".to_string()
-                })
-                .and_then(|result| result);
-            if let Err(error) = initialized {
-                let _ = control.stop();
-                return Err(error);
-            }
-            let (stop, stopped) = mpsc::channel();
-            let lease = frames.clone();
-            let worker = thread::spawn(move || {
-                loop {
-                    match stopped.recv_timeout(Duration::from_millis(250)) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => (),
-                    }
-                    if lease
-                        .requested
-                        .lock()
-                        .map_or(true, |last| last.elapsed() >= PREVIEW_IDLE_TIMEOUT)
-                    {
-                        break;
-                    }
-                }
-                let _ = control.stop();
-            });
-            self.native = Some(PreviewSession {
-                source: source.into(),
-                frames,
-                error,
-                stop,
-                worker: Some(worker),
-            });
-        }
-        let session = self.native.as_ref().ok_or("Preview could not start")?;
-        *session.frames.requested.lock().map_err(|e| e.to_string())? = Instant::now();
-        if let Some(error) = session.error.lock().map_err(|e| e.to_string())?.clone() {
-            return Err(error);
-        }
-        session
-            .frames
-            .image
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone()
-            .ok_or("No preview frame available".into())
-    }
-}
+
 fn preview_url(bytes: &[u8]) -> String {
     format!(
         "data:image/png;base64,{}",
@@ -588,7 +536,7 @@ pub fn preview(source_id: &str) -> Result<String, String> {
                 error: Arc::default(),
                 ready: tx,
                 preview: true,
-                preview_frames: None,
+                preview_sink: None,
             },
         )?;
         let captured = rx
@@ -1102,7 +1050,7 @@ pub fn start_muted(
                     error: capture.error.clone(),
                     ready,
                     preview: false,
-                    preview_frames: None,
+                    preview_sink: None,
                 },
             )?;
             let initialized = rx
@@ -1295,7 +1243,7 @@ impl Drop for ActiveCapture {
     }
 }
 
-fn output_with_timeout(
+pub(crate) fn output_with_timeout(
     mut command: std::process::Command,
     timeout: Duration,
 ) -> Result<Output, String> {
@@ -1752,81 +1700,13 @@ fn finalize(
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "Verifies persistent native preview reuse, recording coexistence, and idle cleanup on the actual display"]
-    fn actual_preview_reuses_capture_and_expires() {
-        let folder = PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap())
-            .join("persistent-preview");
-        fs::create_dir_all(&folder).unwrap();
-        let source = sources()
-            .unwrap()
-            .into_iter()
-            .find(|source| source.kind == "display")
-            .unwrap();
-        let mut preview = Preview::default();
-        let first = preview.frame(&source.id).unwrap();
-        let image = base64::engine::general_purpose::STANDARD
-            .decode(first.split_once(',').unwrap().1)
-            .unwrap();
-        let decoded = image::load_from_memory(&image).unwrap();
-        assert!(decoded.width() > 100 && decoded.height() > 100);
-        let frames = preview.native.as_ref().unwrap().frames.clone();
-        for _ in 0..5 {
-            thread::sleep(Duration::from_millis(1200));
-            assert!(preview
-                .frame(&source.id)
-                .unwrap()
-                .starts_with("data:image/png;base64,"));
-            assert!(
-                Arc::ptr_eq(&frames, &preview.native.as_ref().unwrap().frames),
-                "Preview restarted its capture session"
-            );
-        }
-        let mut recording = start(
-            CaptureConfig {
-                source_id: source.id.clone(),
-                microphone_id: None,
-                system_audio: false,
-                fps: 30,
-            },
-            &folder,
-        )
-        .unwrap();
-        thread::sleep(Duration::from_millis(800));
-        recording.stop().unwrap();
-        preview.frame(&source.id).unwrap();
-        assert!(
-            Arc::ptr_eq(&frames, &preview.native.as_ref().unwrap().frames),
-            "Recording restarted the preview"
-        );
-        thread::sleep(PREVIEW_IDLE_TIMEOUT + Duration::from_secs(1));
-        assert!(
-            preview
-                .native
-                .as_ref()
-                .unwrap()
-                .worker
-                .as_ref()
-                .unwrap()
-                .is_finished(),
-            "Idle preview kept capturing"
-        );
-        preview.frame(&source.id).unwrap();
-        assert!(!Arc::ptr_eq(
-            &frames,
-            &preview.native.as_ref().unwrap().frames
-        ));
-        let next_frames = preview.native.as_ref().unwrap().frames.clone();
-        assert!(preview.frame("window:0").is_err());
-        assert!(preview.native.is_none());
+    fn quest_virtual_filters_are_not_offered_as_cameras() {
+        let text = "[dshow] \"Meta Quest 3\" (video)\n[dshow] \"Meta Quest Pro\" (video)\n[dshow] \"Oculus Quest 2\" (video)\n[dshow] \"HD Pro Webcam C920\" (video)";
+        assert_eq!(dshow_names(text), vec!["HD Pro Webcam C920"]);
         assert_eq!(
-            Arc::strong_count(&next_frames),
-            1,
-            "Previous source remained active after source switch"
+            adb_sources("serial device model:Quest_3")[0].name,
+            "Quest 3"
         );
-        fs::write(folder.join("verification.json"), serde_json::to_vec_pretty(&serde_json::json!({
-            "passed":true,"pollsReusingOneCapture":5,"previewWidth":decoded.width(),"previewHeight":decoded.height(),
-            "recordingCoexists":true,"idleCaptureStopped":true,"idlePreviewRestarts":true,"sourceChangeReleasedCapture":true
-        })).unwrap()).unwrap();
     }
     #[test]
     fn scrcpy_readiness_uses_first_complete_decoded_texture_line() {
@@ -2989,7 +2869,7 @@ mod tests {
                 error: error.clone(),
                 ready,
                 preview: false,
-                preview_frames: None,
+                preview_sink: None,
             },
         )
         .unwrap();

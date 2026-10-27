@@ -33,6 +33,7 @@ export default function App() {
   const [markers,setMarkers] = useState<Marker[]>([]);
   const [preview,setPreview] = useState('');
   const [previewError,setPreviewError] = useState('');
+  const [previewRevision,setPreviewRevision] = useState(0);
   const [error,setError] = useState('');
   const [notice,setNotice] = useState('');
   const [busy,setBusy] = useState(false);
@@ -58,6 +59,7 @@ export default function App() {
   const runtimeState = useRef<RecordingStatus['state']>('idle');
   const restoredSize = useRef<{width:number;height:number}|null>(null);
   const recording = status.state === 'recording';
+  const previewEnabled = draft || recording;
   const processing = session?.status === 'processing' || status.state === 'processing';
   const locked = recording || busy;
   const project = projects.find(item => item.id === projectId);
@@ -143,11 +145,12 @@ export default function App() {
   },[session?.id,session?.status,refreshProjects,report]);
   useEffect(()=>{
     setPreview('');setPreviewError('');
-    if(!sourceId||(!draft&&!recording)||!source?.available)return;
-    let alive=true;let polling=false;
-    const poll=async()=>{if(polling)return;polling=true;try{const frame=await backend.preview(sourceId);if(alive){setPreview(frame);setPreviewError('');}}catch(problem){if(alive){setPreview('');setPreviewError(errorMessage(problem));}}finally{polling=false;}};
-    void poll();const timer=setInterval(poll,1200);return()=>{alive=false;clearInterval(timer);};
-  },[sourceId,draft,recording,source?.available]);
+    if(!sourceId||!previewEnabled||!source?.available)return;
+    let alive=true;let failed=false;const id=crypto.randomUUID();
+    const fail=(problem:unknown)=>{failed=true;if(alive){setPreview('');setPreviewError(errorMessage(problem));}};
+    void backend.preview(sourceId,id,fail).then(stream=>{if(alive&&!failed){setPreview(stream.url);setPreviewError('');}}).catch(fail);
+    return()=>{alive=false;void backend.stopPreview(id).catch(()=>{});};
+  },[sourceId,previewEnabled,source?.available,previewRevision]);
   useEffect(()=>{if(currentLine.current) currentLine.current.scrollIntoView({behavior:'smooth',block:'nearest'});},[followIndex]);
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
   useEffect(()=>{
@@ -285,7 +288,7 @@ export default function App() {
           <button className="capture-setting mic-trigger" ref={microphoneTrigger} title={microphoneUnavailable?'Selected microphone unavailable. Reconnect it or choose another input.':undefined} disabled={busy} aria-expanded={menu==='microphone'} onClick={()=>setMenu(menu==='microphone'?'':'microphone')}><Icon name="mic"/><span>{microphoneUnavailable?'Microphone unavailable':muted&&microphoneId?'Muted':microphone?.name||'No microphone'}</span>{recording&&!muted&&microphoneId&&!microphoneUnavailable&&<meter className="audio-meter" min="0" max="1" value={status.audioLevel||0} aria-label="Microphone audio level"/>}<Icon name="chevron" style={{transform:'rotate(90deg)'}}/></button>
           {recording&&<button className="capture-marker" aria-label="Add marker" title="Add marker (M)" onClick={addMarker}><Icon name="marker"/></button>}
           <button className={`record-button ${recording?'is-recording':''}`} disabled={busy||processing||loading||(!recording&&(!source?.available||microphoneUnavailable))} onClick={()=>void record()} title="Start / stop recording (Ctrl+R)"><span className="record-dot"/>{busy?'Please wait…':recording?'Stop':processing?'Transcribing…':'Record'}</button>
-          {menu==='source'&&<div className="popover source-menu"><div className="popover-title">Capture source<button aria-label="Refresh capture devices" onClick={()=>void refreshDevices().catch(report)}><Icon name="refresh"/></button></div><div className="option-list" role="group" aria-label="Capture sources">{sourceOptions.map(item=><button className={`option-button ${sourceId===item.id?'selected':''}`} aria-pressed={sourceId===item.id} aria-label={`${item.name}${!item.available?' · unavailable':''}`} key={item.id} onClick={()=>{setSourceId(item.id);if(!draft)prepare();setMenu('');sourceTrigger.current?.focus();}}><span>{item.name}{!item.available&&<small>Unavailable</small>}</span>{sourceId===item.id&&<Icon name="check"/>}</button>)}</div>{source?.detail&&<p className="option-note">{source.detail}</p>}<label className="check"><input type="checkbox" checked={systemAudio} onChange={event=>setSystemAudio(event.target.checked)}/>{source?.kind==='android'||source?.kind==='quest'?'Include device audio':'Include system audio'}</label></div>}
+          {menu==='source'&&<div className="popover source-menu"><div className="popover-title">Capture source<button aria-label="Refresh capture devices" onClick={()=>void refreshDevices().then(()=>setPreviewRevision(value=>value+1)).catch(report)}><Icon name="refresh"/></button></div><div className="option-list" role="group" aria-label="Capture sources">{sourceOptions.map(item=><button className={`option-button ${sourceId===item.id?'selected':''}`} aria-pressed={sourceId===item.id} aria-label={`${item.name}${!item.available?' · unavailable':''}`} key={item.id} onClick={()=>{setSourceId(item.id);setPreviewRevision(value=>value+1);if(!draft)prepare();setMenu('');sourceTrigger.current?.focus();}}><span>{item.name}{!item.available&&<small>Unavailable</small>}</span>{sourceId===item.id&&<Icon name="check"/>}</button>)}</div>{source?.detail&&<p className="option-note">{source.detail}</p>}<label className="check"><input type="checkbox" checked={systemAudio} onChange={event=>setSystemAudio(event.target.checked)}/>{source?.kind==='android'||source?.kind==='quest'?'Include device audio':'Include system audio'}</label></div>}
           {menu==='microphone'&&<div className="popover mic-menu"><div className="popover-title">Microphone<button disabled={recording} aria-label="Refresh microphones" onClick={()=>void refreshDevices().catch(report)}><Icon name="refresh"/></button></div><div className="option-list" role="group" aria-label="Microphone options"><button className={`option-button ${microphoneId===''?'selected':''}`} aria-pressed={microphoneId===''} disabled={recording} onClick={()=>{setMicrophoneId('');setMenu('');microphoneTrigger.current?.focus();}}>No microphone{microphoneId===''&&<Icon name="check"/>}</button>{microphoneUnavailable&&<button className="option-button selected" aria-pressed="true" disabled={recording}>Previously selected microphone · unavailable</button>}{microphones.map(item=><button className={`option-button ${microphoneId===item.id?'selected':''}`} aria-pressed={microphoneId===item.id} disabled={recording} key={item.id} onClick={()=>{setMicrophoneId(item.id);setMenu('');microphoneTrigger.current?.focus();}}>{item.name}{microphoneId===item.id&&<Icon name="check"/>}</button>)}</div>{microphoneUnavailable&&<p className="option-note">Reconnect the selected microphone and refresh microphones, choose another input, or select No microphone.</p>}<label className="check"><input type="checkbox" checked={muted} onChange={async event=>{const next=event.target.checked;try{if(recording)await backend.mute(next);setMuted(next);}catch(problem){report(problem);}}}/>Mute microphone</label></div>}
         </div>
       </main>
