@@ -8,8 +8,9 @@ import { backend, videoUrl } from './backend';
 import type { CaptureSource, Marker, Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
 import { activeSegment, activeWord, errorMessage, formatTime, seekTime, segmentSeekMs, wordSeekMs } from './review';
 import { Icon } from './icons';
+import { Sidebar } from './Sidebar';
 
-type Dialog = {kind:'project'|'renameProject'|'renameSession'|'marker';id?:string;value:string};
+type Dialog = {kind:'project'|'renameProject'|'renameSession'|'marker';id?:string;sessionId?:string;value:string};
 const EMPTY_TRANSCRIPT: Transcript = {segments:[]};
 function dateLabel(value: string) { return new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 
@@ -17,8 +18,6 @@ export default function App() {
   const [theme,setTheme] = useState(() => localStorage.getItem('cuereview.theme') || 'light');
   const [projects,setProjects] = useState<Project[]>([]);
   const [sessions,setSessions] = useState<Session[]>([]);
-  const [projectId,setProjectId] = useState<string|null>(null);
-  const [sidebarView,setSidebarView] = useState<'recents'|'projects'>('recents');
   const [session,setSession] = useState<Session|null>(null);
   const [draft,setDraft] = useState(true);
   const [sources,setSources] = useState<CaptureSource[]>([]);
@@ -42,7 +41,6 @@ export default function App() {
   const [menu,setMenu] = useState('');
   const [dialog,setDialog] = useState<Dialog|null>(null);
   const [collapsed,setCollapsed] = useState(()=>window.innerWidth<700);
-  const [closedProjects,setClosedProjects] = useState<Set<string>>(new Set());
   const [compact,setCompact] = useState(false);
   const [time,setTime] = useState(0);
   const [duration,setDuration] = useState(0);
@@ -52,7 +50,6 @@ export default function App() {
   const video = useRef<HTMLVideoElement>(null);
   const sourceTrigger = useRef<HTMLButtonElement>(null);
   const microphoneTrigger = useRef<HTMLButtonElement>(null);
-  const projectTrigger = useRef<HTMLButtonElement>(null);
   const currentLine = useRef<HTMLDivElement>(null);
   const selection = useRef(0);
   const actionEpoch = useRef(0);
@@ -62,7 +59,7 @@ export default function App() {
   const previewEnabled = draft || recording;
   const processing = session?.status === 'processing' || status.state === 'processing';
   const locked = recording || busy;
-  const project = projects.find(item => item.id === projectId);
+  const project = projects.find(item => item.id === session?.projectId);
   const source:CaptureSource|undefined = sources.find(item => item.id === sourceId) || (sourceId ? {id:sourceId,name:'Previously selected source',kind:'display',available:false,detail:'The previously selected capture source is no longer available. Reconnect it and refresh, or choose another source.'} : undefined);
   const microphone = microphones.find(item => item.id === microphoneId);
   const microphoneUnavailable = !!microphoneId&&!microphone;
@@ -92,7 +89,7 @@ export default function App() {
       const next = await backend.session(id);
       const [text,cues] = await Promise.all([backend.transcript(id),backend.markers(id)]);
       if(request !== selection.current) return;
-      setSession(next);setProjectId(next.projectId);setTranscript(text);setMarkers(cues);setDraft(false);setTime(0);setPlaying(false);setDuration(next.durationMs);
+      setSession(next);setTranscript(text);setMarkers(cues);setDraft(false);setTime(0);setPlaying(false);setDuration(next.durationMs);
       if(next.status==='recording'){if(next.sourceId)setSourceId(next.sourceId);setMicrophoneId(next.microphoneId||'');setSystemAudio(next.systemAudio||false);}
     } catch(problem) { if(request===selection.current) report(problem); }
     finally { if(request===selection.current) setLoading(false); }
@@ -154,14 +151,14 @@ export default function App() {
   useEffect(()=>{if(currentLine.current) currentLine.current.scrollIntoView({behavior:'smooth',block:'nearest'});},[followIndex]);
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
   useEffect(()=>{
-    if(!['source','microphone','project'].includes(menu))return;
-    const panel=document.querySelector(`.${menu==='source'?'source-menu':menu==='microphone'?'mic-menu':'project-menu'}`);
+    if(!['source','microphone'].includes(menu))return;
+    const panel=document.querySelector(`.${menu==='source'?'source-menu':'mic-menu'}`);
     (panel?.querySelector<HTMLElement>('.option-button[aria-pressed="true"]:not(:disabled)')||panel?.querySelector<HTMLElement>('.option-button:not(:disabled)'))?.focus();
-    const close=(event:PointerEvent)=>{if(event.target instanceof Element&&!event.target.closest('.popover,.capture-setting,.project-picker'))setMenu('');};
+    const close=(event:PointerEvent)=>{if(event.target instanceof Element&&!event.target.closest('.popover,.capture-setting'))setMenu('');};
     document.addEventListener('pointerdown',close);return()=>document.removeEventListener('pointerdown',close);
   },[menu]);
 
-  const prepare = useCallback(()=>{if(locked)return;selection.current++;setLoading(false);setDraft(true);setProjectId(null);setSession(null);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setPlaying(false);setTime(0);setMenu('');},[locked]);
+  const prepare = useCallback(()=>{if(locked)return;selection.current++;setLoading(false);setDraft(true);setSession(null);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setPlaying(false);setTime(0);setMenu('');},[locked]);
   const seek=useCallback((ms:number)=>{const next=seekTime(ms,duration);if(video.current)video.current.currentTime=next/1000;setTime(next);},[duration]);
   const play=useCallback(async()=>{if(!video.current||draft||recording)return;try{if(video.current.paused)await video.current.play();else video.current.pause();}catch(problem){report(problem);}},[draft,recording,report]);
   const toggleCompact=useCallback(async()=>{
@@ -181,18 +178,18 @@ export default function App() {
       else {
         if(!source?.available)throw new Error(source?.detail||'Choose an available screen, window, or connected device first.');
         if(microphoneUnavailable)throw new Error('The selected microphone is unavailable. Reconnect it and refresh microphones, choose another input, or select No microphone.');
-        const next=await backend.start(draft?projectId:null,null,sourceId,microphoneId||null,systemAudio,muted);
-        setSession(next);setProjectId(next.projectId);setDraft(false);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);runtimeState.current='recording';setStatus({state:'recording',sessionId:next.id,elapsedMs:0});setTime(0);setPlaying(false);await refreshProjects();
+        const next=await backend.start(null,null,sourceId,microphoneId||null,systemAudio,muted);
+        setSession(next);setDraft(false);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);runtimeState.current='recording';setStatus({state:'recording',sessionId:next.id,elapsedMs:0});setTime(0);setPlaying(false);await refreshProjects();
       }
     }catch(problem){report(problem);}finally{setBusy(false);}
-  },[busy,processing,loading,recording,projectId,sourceId,source?.available,source?.detail,draft,muted,microphoneId,microphoneUnavailable,systemAudio,refreshProjects,compact,toggleCompact,report]);
+  },[busy,processing,loading,recording,sourceId,source?.available,source?.detail,muted,microphoneId,microphoneUnavailable,systemAudio,refreshProjects,compact,toggleCompact,report]);
   const addMarker=useCallback(()=>{if(!session)return;setDialog({kind:'marker',id:session.id,value:''});},[session]);
   useEffect(()=>{
     const key=(event:KeyboardEvent)=>{
+      if(event.defaultPrevented || (event.target instanceof Element && event.target.closest('[role=menu]')))return;
       if(event.key==='Escape'){
         if(menu==='source')sourceTrigger.current?.focus();
         if(menu==='microphone')microphoneTrigger.current?.focus();
-        if(menu==='project')projectTrigger.current?.focus();
         setMenu('');setDialog(null);return;
       }
       if(dialog||menu==='setup')return;
@@ -211,7 +208,10 @@ export default function App() {
   const submitDialog=async(event:FormEvent)=>{
     event.preventDefault();if(!dialog)return;const name=dialog.value.trim();if(!name&&dialog.kind!=='marker')return;setBusy(true);setError('');
     try {
-      if(dialog.kind==='project'){const next=await backend.createProject(name);if(draft)setProjectId(next.id);setSidebarView('projects');await refreshProjects();}
+      if(dialog.kind==='project'){
+        const next=await backend.createProject(name);setDialog(null);await refreshProjects();
+        if(dialog.sessionId){const moved=await backend.moveSession(dialog.sessionId,next.id);setSession(current=>current?.id===moved.id?{...current,projectId:moved.projectId}:current);await refreshProjects();}
+      }
       if(dialog.kind==='renameProject'){await backend.renameProject(dialog.id!,name);await refreshProjects();}
       if(dialog.kind==='renameSession'){await backend.renameSession(dialog.id!,name);if(session && session.id===dialog.id)setSession({...session,name});await refreshProjects();}
       if(dialog.kind==='marker'){const marker=await backend.addMarker(dialog.id!,recording?status.elapsedMs||0:time,name||'Review this moment');setMarkers(items=>[...items,marker].sort((a,b)=>a.timeMs-b.timeMs));setNotice('Marker saved');}
@@ -219,46 +219,37 @@ export default function App() {
     }catch(problem){report(problem);}finally{setBusy(false);}
   };
   const copyHandoff=async()=>{if(!session)return;setBusy(true);try{const text=await backend.handoff(session.id);await navigator.clipboard.writeText(text);setNotice('Agent instructions copied');setMenu('');}catch(problem){report(problem);}finally{setBusy(false);}};
-  const assignProject=async(id:string|null)=>{
-    setMenu('');projectTrigger.current?.focus();
-    if(draft){setProjectId(id);return;}
-    if(!session||locked||processing)return;
+  const moveSession=async(id:string,sectionId:string|null):Promise<boolean>=>{
+    const item=sessions.find(item=>item.id===id);
+    if(!item||locked||['recording','processing'].includes(item.status))return false;
+    if(item.projectId===sectionId)return true;
     setBusy(true);setError('');
-    try{const moved=await backend.moveSession(session.id,id);setSession(moved);setProjectId(moved.projectId);await refreshProjects();}
-    catch(problem){report(problem);}finally{setBusy(false);}
+    try{const moved=await backend.moveSession(id,sectionId);setSession(current=>current?.id===moved.id?{...current,projectId:moved.projectId}:current);await refreshProjects();return true;}
+    catch(problem){report(problem);return false;}finally{setBusy(false);}
   };
   const retry=async()=>{if(!session)return;setBusy(true);try{await backend.retry(session.id);setSession({...session,status:'processing',error:undefined});runtimeState.current='processing';setStatus({state:'processing',sessionId:session.id});setError('');}catch(problem){report(problem);}finally{setBusy(false);}};
   const install=async()=>{setInstalling(true);setError('');try{await backend.installTranscription();setSetup(await backend.setup());setNotice('Transcription tools installed');}catch(problem){report(problem);}finally{setInstalling(false);}};
   const selectTheme=()=>setTheme(current=>current==='dark'?'light':'dark');
   const utilityControls=<div className="utility-controls"><button title={`Use ${theme==='dark'?'light':'dark'} theme`} aria-label={`Use ${theme==='dark'?'light':'dark'} theme`} onClick={selectTheme}><Icon name={theme==='dark'?'sun':'moon'}/></button><button aria-label="Settings" title="Settings" onClick={()=>setMenu(menu==='setup'?'':'setup')}><Icon name="settings"/></button></div>;
 
-  const renderSession=(item:Session)=><button className={`session ${session?.id===item.id&&!draft?'active':''}`} disabled={locked} key={item.id} onClick={()=>void openSession(item.id)} onDoubleClick={()=>setDialog({kind:'renameSession',id:item.id,value:item.name})}>
-    <span>{item.name}</span><small>{dateLabel(item.createdAt)} · {item.status==='recording'?'Recording':item.status==='processing'?'Processing…':formatTime(item.durationMs)}</small>
-  </button>;
   const sourceOptions=sourceId&&!sources.some(item=>item.id===sourceId)&&source?[source,...sources]:sources;
 
   return <div className={`app ${compact?'compact':''}`}>
     <div className={`shell ${collapsed?'sidebar-collapsed':''}`}>
-      <aside className="sidebar" aria-label="Projects and sessions">
-        <div className="side-tools"><button aria-label="Collapse sidebar" onClick={()=>setCollapsed(true)}><Icon name="panel"/></button><button disabled={locked} onClick={prepare} title="New recording (Ctrl+N)"><Icon name="plus"/>New recording</button></div>
-        <div className="library-tabs"><button aria-pressed={sidebarView==='recents'} onClick={()=>setSidebarView('recents')}>Recents</button><button aria-pressed={sidebarView==='projects'} onClick={()=>setSidebarView('projects')}>Projects</button></div>
-        <div className="project-list">
-          {sidebarView==='recents'?<div className="recent-list">{sessions.map(renderSession)}{!sessions.length&&!loading&&<p className="side-empty">No recordings</p>}</div>:projects.map(item=><div className="project" key={item.id}>
-            <div className="project-row"><button className="project-toggle" aria-expanded={!closedProjects.has(item.id)} onClick={()=>setClosedProjects(current=>{const next=new Set(current);if(next.has(item.id))next.delete(item.id);else next.add(item.id);return next;})}><Icon name="chevron" style={{transform:closedProjects.has(item.id)?'':'rotate(90deg)'}}/><span>{item.name}</span></button><button className="project-options" disabled={locked} aria-label={`Rename project ${item.name}`} onClick={()=>setDialog({kind:'renameProject',id:item.id,value:item.name})}><Icon name="more"/></button></div>
-            {!closedProjects.has(item.id)&&<div>{sessions.filter(itemSession=>itemSession.projectId===item.id).map(renderSession)}{!sessions.some(itemSession=>itemSession.projectId===item.id)&&<p className="empty-project">No recordings</p>}</div>}
-          </div>)}
-        </div>
-        <div className="side-bottom"><button className="new-project" disabled={locked} onClick={()=>setDialog({kind:'project',value:''})}><Icon name="plus"/>New project</button>{!collapsed&&!compact&&utilityControls}</div>
-      </aside>
+      <Sidebar sections={projects} sessions={sessions} activeId={draft?undefined:session?.id} locked={locked} loading={loading}
+        utilities={!collapsed&&!compact?utilityControls:null} onCollapse={()=>setCollapsed(true)} onNew={prepare}
+        onOpen={id=>void openSession(id)} onRename={item=>setDialog({kind:'renameSession',id:item.id,value:item.name})}
+        onRenameSection={item=>setDialog({kind:'renameProject',id:item.id,value:item.name})}
+        onCreateSection={sessionId=>setDialog({kind:'project',sessionId,value:''})} onMove={moveSession}/>
       <main className="content">
         <header className="session-header">
           <div className="session-heading">
-            <div className="title-row"><button className="show-sidebar" aria-label={collapsed?'Show sidebar':'Show projects'} onClick={()=>setCollapsed(!collapsed)}><Icon name="panel"/></button><h1>{draft?'New recording':<button title="Rename recording" disabled={recording||processing||busy} onClick={()=>setDialog({kind:'renameSession',id:session?.id,value:session?.name||''})}>{session?.name||'Recording'}</button>}</h1>{recording&&<span className="live-dot"/>}</div>
-            <div className="meta"><button className="project-picker" ref={projectTrigger} aria-label={`Project: ${project?.name||'No project'}`} disabled={locked||processing} aria-expanded={menu==='project'} onClick={()=>setMenu(menu==='project'?'':'project')}>{project?.name||'Add to project'}<Icon name="chevron" style={{transform:'rotate(90deg)'}}/></button>{!draft&&<><span>·</span><span>{session&&dateLabel(session.createdAt)}</span><span>·</span><span>{recording?formatTime(status.elapsedMs||0):formatTime(session?.durationMs||0)}</span></>}</div>
+            <div className="title-row"><button className="show-sidebar" aria-label={collapsed?'Show sidebar':'Hide sidebar'} onClick={()=>setCollapsed(!collapsed)}><Icon name="panel"/></button><h1>{draft?'New recording':<button title="Rename recording" disabled={recording||processing||busy} onClick={()=>setDialog({kind:'renameSession',id:session?.id,value:session?.name||''})}>{session?.name||'Recording'}</button>}</h1>{recording&&<span className="live-dot"/>}</div>
+            {!draft&&<div className="meta">{project&&<><span>{project.name}</span><span>·</span></>}<span>{session&&dateLabel(session.createdAt)}</span><span>·</span><span>{recording?formatTime(status.elapsedMs||0):formatTime(session?.durationMs||0)}</span></div>}
           </div>
           <div className="header-actions">{(collapsed||compact)&&utilityControls}{recording?<button title={compact?'Restore workspace':'Compact recording mode'} onClick={()=>void toggleCompact()}><Icon name="compact"/>{compact?'Expand':'Compact'}</button>:session&&<><button className="folder-button" title="Open recording folder" aria-label="Open recording folder" onClick={()=>void backend.openFolder(session.id).catch(report)}><Icon name="folder"/></button><button disabled={busy||processing} onClick={()=>void copyHandoff()}>Copy for agent<Icon name="arrow"/></button></>}</div>
         </header>
-        {menu==='project'&&<div className="popover project-menu"><div className="popover-title">Project</div><div className="option-list" role="group" aria-label="Project options"><button className={`option-button ${!projectId?'selected':''}`} aria-pressed={!projectId} onClick={()=>void assignProject(null)}>No project{!projectId&&<Icon name="check"/>}</button>{projects.map(item=><button className={`option-button ${projectId===item.id?'selected':''}`} aria-pressed={projectId===item.id} key={item.id} onClick={()=>void assignProject(item.id)}>{item.name}{projectId===item.id&&<Icon name="check"/>}</button>)}</div></div>}
+
         {error&&!dialog&&menu!=='setup'&&<div className="error-banner" role="alert"><Icon name="warning"/><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}><Icon name="close"/></button></div>}
         {setup&&!setup.ready&&!recording&&<div className="setup-banner"><span>Transcription needs setup.</span><button onClick={()=>setMenu('setup')}>Review setup<Icon name="arrow"/></button></div>}
         <div className={`review ${focusVideo?'focus-video':''}`}>
@@ -294,7 +285,7 @@ export default function App() {
       </main>
     </div>
     {menu==='setup'&&<div className="modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)setMenu('');}}><section className="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title"><div className="dialog-title"><h2 id="setup-title">Settings</h2><button aria-label="Close settings" onClick={()=>setMenu('')}><Icon name="close"/></button></div><label className="appearance">Appearance<select value={theme} onChange={event=>setTheme(event.target.value)}><option value="light">Light</option><option value="dark">Dark</option></select></label><h3>Transcription</h3>{error&&<p className="dialog-error" role="alert">{error}</p>}{setup?<><p>{setup.ready?'Ready to transcribe on this computer.':'Complete setup to transcribe recordings on this computer.'}</p>{setup.dependencies?.map(item=><div className="dependency" key={item.name}><Icon name={item.available?'check':'warning'}/><div><strong>{item.name}</strong><small>{item.detail||item.path||(item.available?'Available':'Missing')}</small></div></div>)}{setup.issues.map((issue,index)=><p className="setup-issue" key={index}>{issue}</p>)}{(!setup.modelReady||setup.dependencies?.some(item=>(item.name==='whisper-cli'||item.name==='whisper-vad-speech-segments')&&!item.available))&&<button className="primary" disabled={installing} onClick={()=>void install()}>{installing?'Downloading speech tools…':'Install transcription'}</button>}{installing&&<p className="option-note" role="status">Downloading the speech model and tools. This may take a few minutes.</p>}<button className="check-setup" onClick={()=>void backend.setup().then(setSetup).catch(report)}><Icon name="refresh"/>Check again</button></>:<p>Start the desktop app to inspect installed recording tools.</p>}<p className="settings-shortcuts">Ctrl+N new recording · Ctrl+R record / stop<br/>Space play / pause · ← → seek 5 seconds · M add marker</p></section></div>}
-    {dialog&&<div className="modal-backdrop"><form className="name-dialog" role="dialog" aria-modal="true" aria-labelledby="name-title" onSubmit={event=>void submitDialog(event)}><h2 id="name-title">{dialog.kind==='project'?'New project':dialog.kind==='renameProject'?'Rename project':dialog.kind==='marker'?'Add marker':'Recording name'}</h2>{error&&<p className="dialog-error" role="alert">{error}</p>}<label>{dialog.kind==='marker'?'Note':'Name'}<input autoFocus maxLength={160} value={dialog.value} onChange={event=>setDialog({...dialog,value:event.target.value})}/></label><div className="dialog-actions"><button type="button" onClick={()=>setDialog(null)}>Cancel</button><button className="primary" disabled={busy||(!dialog.value.trim()&&dialog.kind!=='marker')} type="submit">{busy?'Saving…':'Save'}</button></div></form></div>}
+    {dialog&&<div className="modal-backdrop"><form className="name-dialog" role="dialog" aria-modal="true" aria-labelledby="name-title" onSubmit={event=>void submitDialog(event)}><h2 id="name-title">{dialog.kind==='project'?'New section':dialog.kind==='renameProject'?'Rename section':dialog.kind==='marker'?'Add marker':'Recording name'}</h2>{error&&<p className="dialog-error" role="alert">{error}</p>}<label>{dialog.kind==='marker'?'Note':'Name'}<input autoFocus maxLength={160} value={dialog.value} onChange={event=>setDialog({...dialog,value:event.target.value})}/></label><div className="dialog-actions"><button type="button" onClick={()=>setDialog(null)}>Cancel</button><button className="primary" disabled={busy||(!dialog.value.trim()&&dialog.kind!=='marker')} type="submit">{busy?'Saving…':'Save'}</button></div></form></div>}
     {notice&&<div className="toast" role="status">{notice}</div>}
   </div>;
 }

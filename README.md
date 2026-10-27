@@ -35,7 +35,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 1. Open CueReview. A fresh unnamed recording is ready; source and microphone options open directly from the compact bottom controls.
 2. Press Record (`Ctrl+R`). Mute/unmute and add timestamped markers during capture. Compact mode keeps the recording controls available in a smaller window.
 3. Stop. The video is finalized and transcribed locally. Original media remains available if transcription fails; use Retry after fixing setup.
-4. Find the recording in Recents. Its title is derived from the transcript; rename it or optionally add it to a project afterward. Grouping never moves the media files.
+4. Find the recording in Recents. Its title is derived from the transcript. Drag it into a sidebar section, or right-click and choose **Move to section**. Sections are optional categories in the same list; drag back to Recents to ungroup. Grouping never moves the media files.
 5. Play the recording and click transcript words to seek. The transcript follows playback automatically. The standard model uses DTW alignment points for visual lookup, while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
 6. Copy for agent, or open the session folder.
 

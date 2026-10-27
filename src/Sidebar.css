@@ -1,0 +1,35 @@
+.recording-list { flex: 1; overflow: auto; scrollbar-width: thin; margin: 0 -5px; padding: 0 5px; }
+.recording-section { margin-bottom: 18px; border-radius: 6px; outline: 1px solid transparent; outline-offset: 2px; }
+.section-heading { display: flex; align-items: center; min-height: 28px; margin-bottom: 3px; color: var(--muted); font-size: 11px; }
+.section-toggle { flex: 1; min-width: 0; justify-content: flex-start; padding: 4px 6px; font-size: 11px; font-weight: 500; }
+.section-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.section-toggle svg { width: 10px; height: 10px; color: var(--faint); }
+.section-options, .session-options { padding: 3px; color: var(--muted); opacity: 0; }
+.section-options svg, .session-options svg { width: 13px; height: 13px; }
+.section-heading:hover .section-options, .section-heading:focus-within .section-options,
+.session-row:hover .session-options, .session-row:focus-within .session-options,
+.session-options[aria-expanded=true] { opacity: 1; }
+.recents-heading { padding: 4px 7px; font-weight: 500; }
+.session-row { display: flex; position: relative; align-items: center; border-radius: 5px; min-height: 31px; margin-bottom: 1px; }
+.session-row:hover { background: var(--hover); }
+.session-row.active { background: var(--active); }
+.session-row.dragging { opacity: .45; }
+.session { display: flex; justify-content: flex-start; gap: 5px; width: 100%; min-width: 0; text-align: left; padding: 6px 27px 6px 9px; min-height: 31px; font-size: 12px; color: var(--muted); }
+.session > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session.active { color: var(--text); }
+.session small { font-size: 10px; color: var(--faint); margin-left: auto; }
+.section-sessions .session { padding-left: 22px; }
+.session-options { position: absolute; right: 4px; top: 5px; }
+.session-options:disabled { visibility: hidden; }
+.side-empty { padding: 4px 9px; font-size: 11px; color: var(--faint); }
+.section-sessions .side-empty { padding-left: 22px; }
+.drop-target { background: var(--active); outline-color: var(--accent); }
+.new-section { color: var(--muted); font-size: 11px; justify-content: flex-start; padding: 6px; }
+.new-section svg { width: 12px; height: 12px; }
+.sidebar-menu { position: fixed; z-index: 25; width: 224px; padding: 5px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; box-shadow: var(--shadow); font-size: 12px; }
+.sidebar-menu button { width: 100%; text-align: left; justify-content: flex-start; padding: 6px 8px; min-height: 30px; overflow-wrap: anywhere; }
+.sidebar-menu button > svg { width: 12px; height: 12px; }
+.sidebar-menu button:not(.menu-separated) > svg:last-child { margin-left: auto; }
+.sidebar-menu .menu-separated { border-top: 1px solid var(--line); border-radius: 0; margin-top: 4px; padding-top: 9px; }
+.sidebar-menu-title { font-size: 11px; color: var(--faint); padding: 5px 8px 7px; }
+.section-destinations { max-height: 192px; overflow: auto; scrollbar-width: thin; }

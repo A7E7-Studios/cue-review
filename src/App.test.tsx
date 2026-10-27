@@ -54,7 +54,7 @@ async function ready() {
 }
 async function review() {
   const user=await ready();
-  await user.click(within(screen.getByLabelText('Projects and sessions')).getByRole('button',{name:/Review Alpha/}));
+  await user.click(within(screen.getByLabelText('Recordings')).getByRole('button',{name:/Review Alpha/}));
   await screen.findByRole('button',{name:'Seek to here at 0:02'});
   return user;
 }
@@ -115,11 +115,11 @@ describe('keyboard interaction',()=>{
   });
   it('scopes recording shortcuts outside naming and settings dialogs while allowing Escape',async()=>{
     const user=await ready();
-    await user.click(screen.getByRole('button',{name:'New project'}));
+    await user.click(screen.getByRole('button',{name:'New section'}));
     screen.getByRole('button',{name:'Cancel'}).focus();
     await user.keyboard('{Control>}r{/Control}');
     expect(backend.start).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog',{name:'New project'})).toBeVisible();
+    expect(screen.getByRole('dialog',{name:'New section'})).toBeVisible();
     await user.keyboard('{Escape}');
     await user.click(screen.getByRole('button',{name:'Settings'}));
     screen.getByRole('button',{name:'Close settings'}).focus();
@@ -147,27 +147,100 @@ describe('project and session workflows',()=>{
     await screen.findByRole('button',{name:'Stop'});
     expect(backend.start).toHaveBeenCalledWith(null,null,'display1','mic1',false,false);
   });
-  it('lists all recordings in newest-first Recents regardless of optional projects',async()=>{
-    sessions=[newSession(),{...newSession('s2'),projectId:null,name:'Recent ungrouped',createdAt:'2026-10-28T10:00:00Z'}];
+  it('shows sections and newest-first ungrouped Recents together without duplicate rows or tabs',async()=>{
+    sessions=[newSession(),{...newSession('s2'),projectId:null,name:'Older recent'}, {...newSession('s3'),projectId:null,name:'Newest recent',createdAt:'2026-10-28T10:00:00Z'}];
     await ready();
-    const sidebar=within(screen.getByLabelText('Projects and sessions'));
-    expect(sidebar.getByRole('button',{name:'Recents'})).toHaveAttribute('aria-pressed','true');
-    const buttons=sidebar.getAllByRole('button',{name:/Review Alpha|Recent ungrouped/});
-    expect(buttons[0]).toHaveTextContent('Recent ungrouped');expect(buttons[1]).toHaveTextContent('Review Alpha');
-    expect(backend.sessions).toHaveBeenCalledWith();
+    expect(within(screen.getByRole('region',{name:'Section: Project Alpha'})).getByRole('button',{name:'Review Alpha'})).toBeVisible();
+    const recents=within(screen.getByRole('region',{name:'Recents'}));
+    expect(recents.queryByRole('button',{name:'Review Alpha'})).not.toBeInTheDocument();
+    expect(recents.getAllByRole('button',{name:/recent$/}).map(item=>item.textContent)).toEqual(['Newest recent','Older recent']);
+    expect(screen.queryByRole('button',{name:'Projects'})).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
   });
-  it('groups and ungroups an existing recording without changing its transcript',async()=>{
+  it('moves an existing recording through its menu without changing playback or transcript',async()=>{
     sessions=[{...newSession(),projectId:null}];
     const user=await review();
-    await user.click(screen.getByRole('button',{name:'Project: No project'}));
-    await user.click(within(screen.getByRole('group',{name:'Project options'})).getByRole('button',{name:'Project Alpha'}));
-    await screen.findByRole('button',{name:'Project: Project Alpha'});
+    await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));
+    const media=document.querySelector('video');
+    await user.click(screen.getByRole('button',{name:'Recording options'}));
+    await user.click(screen.getByRole('menuitem',{name:'Move to section'}));
+    await user.click(screen.getByRole('menuitem',{name:'Project Alpha'}));
+    await waitFor(()=>expect(within(screen.getByRole('region',{name:'Section: Project Alpha'})).getByRole('button',{name:'Review Alpha'})).toBeEnabled());
     expect(backend.moveSession).toHaveBeenLastCalledWith('s1','p1');
-    await user.click(screen.getByRole('button',{name:'Project: Project Alpha'}));
-    await user.click(within(screen.getByRole('group',{name:'Project options'})).getByRole('button',{name:'No project'}));
-    await screen.findByRole('button',{name:'Project: No project'});
+    expect(document.querySelector('video')).toBe(media);expect(media?.currentTime).toBe(2.5);
+    await user.click(screen.getByRole('button',{name:'Recording options'}));
+    await user.click(screen.getByRole('menuitem',{name:'Move to section'}));
+    await user.click(screen.getByRole('menuitem',{name:'Recents'}));
+    await waitFor(()=>expect(within(screen.getByRole('region',{name:'Recents'})).getByRole('button',{name:'Review Alpha'})).toBeEnabled());
     expect(backend.moveSession).toHaveBeenLastCalledWith('s1',null);
     expect(screen.getByRole('button',{name:'Seek to here at 0:02'})).toBeVisible();
+  });
+  it('drags into a collapsed section and back to Recents while keeping the current recording open',async()=>{
+    sessions=[newSession(),{...newSession('s2'),projectId:null,name:'Another recording'}];
+    const user=await review();
+    await user.click(screen.getByRole('button',{name:'Project Alpha'}));
+    const dataTransfer={setData:vi.fn(),effectAllowed:'',dropEffect:''};
+    fireEvent.dragStart(screen.getByRole('button',{name:'Another recording'}),{dataTransfer});
+    const section=screen.getByRole('region',{name:'Section: Project Alpha'});
+    fireEvent.dragOver(section,{dataTransfer});expect(section).toHaveClass('drop-target');
+    fireEvent.drop(section,{dataTransfer});
+    await waitFor(()=>expect(within(section).getByRole('button',{name:'Another recording'})).toBeEnabled());
+    expect(backend.moveSession).toHaveBeenLastCalledWith('s2','p1');
+    expect(screen.getByRole('button',{name:'Project Alpha'})).toHaveAttribute('aria-expanded','true');
+    expect(screen.getByRole('heading',{level:1})).toHaveTextContent('Review Alpha');
+    fireEvent.dragStart(screen.getByRole('button',{name:'Another recording'}),{dataTransfer});
+    fireEvent.drop(screen.getByRole('region',{name:'Recents'}),{dataTransfer});
+    await waitFor(()=>expect(within(screen.getByRole('region',{name:'Recents'})).getByRole('button',{name:'Another recording'})).toBeEnabled());
+    expect(backend.moveSession).toHaveBeenLastCalledWith('s2',null);
+  });
+  it('preserves the source section when moving fails and ignores external drags',async()=>{
+    const user=await review();
+    const recents=screen.getByRole('region',{name:'Recents'});
+    fireEvent.drop(recents,{dataTransfer:{getData:()=> 's1'}});
+    expect(backend.moveSession).not.toHaveBeenCalled();
+    backend.moveSession.mockRejectedValueOnce('Unable to update recording.');
+    await user.click(screen.getByRole('button',{name:'Recording options'}));
+    await user.click(screen.getByRole('menuitem',{name:'Move to section'}));
+    await user.click(screen.getByRole('menuitem',{name:'Recents'}));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to update recording');
+    expect(within(screen.getByRole('region',{name:'Section: Project Alpha'})).getByRole('button',{name:'Review Alpha'})).toBeVisible();
+  });
+  it('supports right-click and keyboard move menus without invoking recording shortcuts',async()=>{
+    const user=await review();
+    const row=within(screen.getByRole('complementary',{name:'Recordings'})).getByRole('button',{name:'Review Alpha'});
+    fireEvent.contextMenu(row);
+    expect(screen.getByRole('menuitem',{name:'Move to section'})).toHaveFocus();
+    await user.keyboard('{Control>}r{/Control}');expect(backend.start).not.toHaveBeenCalled();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('menuitem',{name:'Recents'})).toHaveFocus();
+    await user.keyboard('{Escape}');expect(row).toHaveFocus();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+  it('creates a section directly from a recording menu and moves only that recording',async()=>{
+    const user=await review();
+    await user.click(screen.getByRole('button',{name:'Recording options'}));
+    await user.click(screen.getByRole('menuitem',{name:'Move to section'}));
+    await user.click(screen.getByRole('menuitem',{name:'New section'}));
+    await user.type(screen.getByLabelText('Name'),'New category');await user.click(screen.getByRole('button',{name:'Save'}));
+    await waitFor(()=>expect(within(screen.getByRole('region',{name:'Section: New category'})).getByRole('button',{name:'Review Alpha'})).toBeEnabled());
+    expect(backend.moveSession).toHaveBeenCalledWith('s1','p2');
+  });
+  it('remembers collapsed sections and keeps orphaned recordings reachable',async()=>{
+    localStorage.setItem('cuereview.closedSections','["p1"]');
+    sessions.push({...newSession('s2'),projectId:'missing',name:'Orphaned recording'});
+    const user=await ready();
+    expect(screen.getByRole('button',{name:'Project Alpha'})).toHaveAttribute('aria-expanded','false');
+    expect(within(screen.getByRole('complementary',{name:'Recordings'})).queryByRole('button',{name:'Review Alpha'})).not.toBeInTheDocument();
+    expect(within(screen.getByRole('region',{name:'Recents'})).getByRole('button',{name:'Orphaned recording'})).toBeVisible();
+    await user.click(screen.getByRole('button',{name:'Project Alpha'}));
+    expect(JSON.parse(localStorage.getItem('cuereview.closedSections')!)).toEqual([]);
+  });
+  it('prevents moving recordings that are still processing',async()=>{
+    sessions=[{...newSession(),status:'processing'}];await ready();
+    expect(screen.getByRole('button',{name:'Recording options'})).toBeDisabled();
+    const row=within(screen.getByRole('complementary',{name:'Recordings'})).getByRole('button',{name:/Review Alpha/});
+    expect(row).toHaveAttribute('draggable','false');
+    fireEvent.contextMenu(row);expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
   it('keeps theme and settings available when the project sidebar is collapsed',async()=>{
     const user=await ready();
@@ -178,18 +251,18 @@ describe('project and session workflows',()=>{
     await user.click(screen.getByRole('button',{name:'Settings'}));
     expect(screen.getByRole('dialog',{name:'Settings'})).toBeVisible();
   });
-  it('creates a project, keeps it selected, and renames it through the tree',async()=>{
+  it('creates and renames a section without changing the fresh recording category',async()=>{
     const user=await ready();
-    await user.click(screen.getByRole('button',{name:'New project'}));
+    await user.click(screen.getByRole('button',{name:'New section'}));
     await user.type(screen.getByLabelText('Name'),'Beta product');await user.click(screen.getByRole('button',{name:'Save'}));
-    await screen.findByRole('button',{name:'Project: Beta product'});
+    await screen.findByRole('button',{name:'Beta product'});
     expect(backend.createProject).toHaveBeenCalledWith('Beta product');
-    await user.click(screen.getByRole('button',{name:'Rename project Beta product'}));
+    await user.click(screen.getByRole('button',{name:'Rename section Beta product'}));
     await user.clear(screen.getByLabelText('Name'));await user.type(screen.getByLabelText('Name'),'Beta review');await user.click(screen.getByRole('button',{name:'Save'}));
-    await screen.findByRole('button',{name:'Rename project Beta review'});
+    await screen.findByRole('button',{name:'Rename section Beta review'});
     expect(backend.renameProject).toHaveBeenCalledWith('p2','Beta review');
     await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
-    expect(backend.start).toHaveBeenCalledWith('p2',null,'display1','mic1',false,false);
+    expect(backend.start).toHaveBeenCalledWith(null,null,'display1','mic1',false,false);
   });
   it('loads and renames an existing session without losing its transcript',async()=>{
     const user=await review();
@@ -206,7 +279,7 @@ describe('recording and processing',()=>{
     const user=await ready();
     await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
     await user.click(screen.getByRole('button',{name:'Stop'}));await screen.findByRole('button',{name:'Transcribing…'});
-    const sidebar=within(screen.getByLabelText('Projects and sessions'));
+    const sidebar=within(screen.getByLabelText('Recordings'));
     await user.click(sidebar.getByRole('button',{name:/Review Alpha/}));
     await screen.findByRole('button',{name:'Seek to here at 0:02'});
     sessions=sessions.map(item=>item.id==='s2'?{...item,name:'Background transcript title',status:'ready'}:item);status={state:'idle'};
@@ -331,7 +404,7 @@ describe('review handoff',()=>{
   it('seeks and highlights an aligned word after leading silence instead of its coarse legacy interval',async()=>{
     sessions=[{...newSession(),durationMs:20000}];
     transcript={segments:[{id:'aligned',text:'When',startMs:0,endMs:1300,words:[{text:'When',startMs:0,endMs:1300,seekMs:10220}]}]};
-    const user=await ready();await user.click(within(screen.getByLabelText('Projects and sessions')).getByRole('button',{name:/Review Alpha/}));
+    const user=await ready();await user.click(within(screen.getByLabelText('Recordings')).getByRole('button',{name:/Review Alpha/}));
     const word=await screen.findByRole('button',{name:'Seek to When at 0:10'});
     expect(word).not.toHaveAttribute('aria-current');
     const media=document.querySelector('video')!;
@@ -362,7 +435,7 @@ describe('review handoff',()=>{
   });
   it('retries a failed transcript and returns to usable review after processing',async()=>{
     sessions=[{...newSession(),status:'error',error:'Speech model not found'}];transcript={segments:[],error:'Speech model not found'};
-    const user=await ready();await user.click(within(screen.getByLabelText('Projects and sessions')).getByRole('button',{name:/Review Alpha/}));
+    const user=await ready();await user.click(within(screen.getByLabelText('Recordings')).getByRole('button',{name:/Review Alpha/}));
     await user.click(await screen.findByRole('button',{name:'Retry transcription'}));
     expect(backend.retry).toHaveBeenCalledWith('s1');
     expect(screen.getByRole('button',{name:'Transcribing…'})).toBeDisabled();
@@ -462,8 +535,8 @@ describe('local setup recovery and request races',()=>{
   });
   it('does not let an old session response replace a newly prepared recording',async()=>{
     let resolveOld!:(value:Session)=>void;backend.session.mockImplementationOnce(()=>new Promise<Session>(resolve=>{resolveOld=resolve;}));
-    const user=await ready();await user.click(within(screen.getByLabelText('Projects and sessions')).getByRole('button',{name:/Review Alpha/}));
-    await user.click(within(screen.getByLabelText('Projects and sessions')).getByRole('button',{name:'New recording'}));
+    const user=await ready();await user.click(within(screen.getByLabelText('Recordings')).getByRole('button',{name:/Review Alpha/}));
+    await user.click(within(screen.getByLabelText('Recordings')).getByRole('button',{name:'New recording'}));
     await act(async()=>resolveOld(newSession()));
     expect(screen.getByRole('heading',{level:1})).toHaveTextContent('New recording');
     expect(screen.getByRole('button',{name:'Record'})).toBeEnabled();
