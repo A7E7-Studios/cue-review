@@ -65,11 +65,11 @@ fn run() -> Result<(), String> {
                     .unwrap_or("1")
                     .parse::<usize>()
                     .map_err(|_| "Occurrence must be a positive integer.")?;
-                matches
+                let matched = matches
                     .iter()
                     .find(|m| m.occurrence == occurrence)
-                    .ok_or("Phrase occurrence was not found.")?
-                    .start_ms
+                    .ok_or("Phrase occurrence was not found.")?;
+                matched.seek_ms.unwrap_or(matched.start_ms)
             } else {
                 number(&args, "--at-ms")?
             };

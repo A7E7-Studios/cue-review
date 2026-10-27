@@ -31,6 +31,9 @@ pub struct Word {
     pub text: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    /// Model alignment point for visual lookup, not an invented word boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seek_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -241,6 +241,24 @@ describe('recording and processing',()=>{
 });
 
 describe('review handoff',()=>{
+  it('seeks and highlights an aligned word after leading silence instead of its coarse legacy interval',async()=>{
+    sessions=[{...newSession(),durationMs:20000}];
+    transcript={segments:[{id:'aligned',text:'When',startMs:0,endMs:1300,words:[{text:'When',startMs:0,endMs:1300,seekMs:10220}]}]};
+    const user=await ready();await user.click(within(screen.getByLabelText('Projects and sessions')).getByRole('button',{name:/Review Alpha/}));
+    const word=await screen.findByRole('button',{name:'Seek to When at 0:10'});
+    expect(word).not.toHaveAttribute('aria-current');
+    const media=document.querySelector('video')!;
+    media.currentTime=.7;fireEvent.timeUpdate(media);
+    expect(word).not.toHaveAttribute('aria-current');
+    await user.click(screen.getByRole('button',{name:'Seek to 0:10'}));
+    expect(media.currentTime).toBe(10.22);
+    expect(word).toHaveAttribute('aria-current','true');
+    media.currentTime=11;fireEvent.timeUpdate(media);
+    expect(word).not.toHaveAttribute('aria-current');
+    await user.click(word);
+    expect(media.currentTime).toBe(10.22);
+    expect(word).toHaveAttribute('aria-current','true');
+  });
   it('seeks the real media time from a word, persists a marker there, and copies the backend handoff',async()=>{
     const user=await review();
     await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));
@@ -267,6 +285,45 @@ describe('review handoff',()=>{
 });
 
 describe('local setup recovery and request races',()=>{
+  it.each(['mic2',''])('preserves a vanished microphone, blocks recording, and allows explicit recovery with %s',async(replacement)=>{
+    const user=await ready();
+    backend.microphones.mockResolvedValue([{id:'mic2',name:'Headset microphone'}]);
+    await user.click(screen.getByRole('button',{name:'Display 1'}));
+    await user.click(screen.getByRole('button',{name:'Refresh capture devices'}));
+    await screen.findByRole('button',{name:'Microphone unavailable'});
+    expect(screen.getByRole('button',{name:'Record'})).toBeDisabled();
+    expect(screen.queryByRole('button',{name:'No microphone'})).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button',{name:'Done'}));
+    await user.keyboard('{Control>}r{/Control}');
+    expect(backend.start).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('selected microphone is unavailable');
+    await user.click(screen.getByRole('button',{name:'Microphone unavailable'}));
+    expect(screen.getByLabelText('Input device')).toHaveValue('mic1');
+    expect(screen.getByRole('option',{name:'Previously selected microphone · unavailable'})).toBeInTheDocument();
+    expect(screen.getByText('Reconnect the selected microphone and refresh microphones, choose another input, or select No microphone.')).toBeVisible();
+    await user.selectOptions(screen.getByLabelText('Input device'),replacement);
+    await user.click(screen.getByRole('button',{name:'Done'}));
+    expect(screen.getByRole('button',{name:'Record'})).toBeEnabled();
+    await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
+    expect(backend.start).toHaveBeenCalledWith('p1','New recording','display1',replacement||null,false,false);
+  });
+  it('keeps Stop available when a restored recording microphone is unavailable',async()=>{
+    sessions=[{...newSession(),status:'recording'}];status={state:'recording',sessionId:'s1',elapsedMs:3000};
+    backend.microphones.mockResolvedValue([]);
+    backend.stop.mockResolvedValue({...sessions[0],status:'processing'});
+    const user=userEvent.setup();render(<App/>);
+    await screen.findByRole('button',{name:'Microphone unavailable'});
+    expect(screen.getByRole('button',{name:'Stop'})).toBeEnabled();
+    await user.click(screen.getByRole('button',{name:'Stop'}));
+    expect(backend.stop).toHaveBeenCalledTimes(1);
+  });
+  it('removes the last preview frame after a failed poll instead of presenting stale imagery as live',async()=>{
+    await ready();
+    expect(await screen.findByRole('img',{name:'Live preview of Display 1'})).toBeVisible();
+    backend.preview.mockRejectedValue(new Error('Preview connection lost. Reconnect the selected device.'));
+    expect(await screen.findByText('Preview connection lost. Reconnect the selected device.',{}, {timeout:2200})).toBeVisible();
+    expect(screen.queryByRole('img',{name:'Live preview of Display 1'})).not.toBeInTheDocument();
+  });
   it('allows selecting an offline device to read its recovery guidance without starting capture',async()=>{
     backend.sources.mockResolvedValue([{id:'display1',name:'Display 1',kind:'display',available:true},{id:'quest-offline',name:'Quest disconnected',kind:'quest',available:false,detail:'Reconnect the USB cable and authorize USB debugging on the headset, then refresh.'}]);
     const user=await ready();await user.click(screen.getByRole('button',{name:'Display 1'}));

@@ -4,6 +4,7 @@ $cueExe = Join-Path $taskRoot 'src-tauri\target\debug\cue.exe'
 $env:CUEREVIEW_DATA_DIR = Join-Path $taskRoot '.local\pipeline-data'
 $env:CUEREVIEW_MODEL = Join-Path $env:LOCALAPPDATA 'CueReview\models\ggml-base.bin'
 $env:CUEREVIEW_VAD_MODEL = Join-Path $env:LOCALAPPDATA 'CueReview\models\ggml-silero-v6.2.0.bin'
+$env:CUEREVIEW_DTW_MODEL = 'base'
 $env:PATH = (Join-Path $env:LOCALAPPDATA 'CueReview\tools\whisper-b5454') + ';' + $env:PATH
 $projectId = [guid]::NewGuid().ToString()
 $sessionId = [guid]::NewGuid().ToString()

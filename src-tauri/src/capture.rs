@@ -2305,4 +2305,237 @@ mod tests {
             "Selected-window recording contained the covering window: minimum luma {minimum}"
         );
     }
+    #[test]
+    #[ignore = "Stops an owned native source before readiness and immediately after start, then verifies a fresh capture"]
+    fn actual_immediate_stop_then_restart() {
+        use std::ffi::c_void;
+        #[repr(C)]
+        struct Message {
+            hwnd: *mut c_void,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+            time: u32,
+            x: i32,
+            y: i32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn CreateWindowExW(
+                ex: u32,
+                class: *const u16,
+                title: *const u16,
+                style: u32,
+                x: i32,
+                y: i32,
+                width: i32,
+                height: i32,
+                parent: *mut c_void,
+                menu: *mut c_void,
+                instance: *mut c_void,
+                param: *mut c_void,
+            ) -> *mut c_void;
+            fn DestroyWindow(window: *mut c_void) -> i32;
+            fn UpdateWindow(window: *mut c_void) -> i32;
+            fn PeekMessageW(
+                message: *mut Message,
+                window: *mut c_void,
+                min: u32,
+                max: u32,
+                remove: u32,
+            ) -> i32;
+            fn TranslateMessage(message: *const Message) -> i32;
+            fn DispatchMessageW(message: *const Message) -> isize;
+        }
+        struct OwnedWindow(*mut c_void);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                unsafe {
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+        let pump = || {
+            let mut message: Message = unsafe { std::mem::zeroed() };
+            unsafe {
+                while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, 1) != 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        };
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let title: Vec<u16> = "CueReview immediate-stop verification\0"
+            .encode_utf16()
+            .collect();
+        let window = OwnedWindow(unsafe {
+            CreateWindowExW(
+                0x08000000,
+                class.as_ptr(),
+                title.as_ptr(),
+                0x90000006,
+                220,
+                220,
+                320,
+                180,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        });
+        assert!(!window.0.is_null());
+        unsafe {
+            UpdateWindow(window.0);
+        }
+        pump();
+        let source_id = format!("window:{}", window.0 as usize);
+        let folder = PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap())
+            .join("immediate-stop");
+        fs::create_dir_all(&folder).unwrap();
+        let usable_video = |path: &Path| {
+            let mut command = deps::command("ffprobe").unwrap();
+            command
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_type:format=duration",
+                    "-of",
+                    "json",
+                ])
+                .arg(path);
+            let output = output_with_timeout(command, Duration::from_secs(5)).unwrap();
+            if !output.status.success() {
+                return false;
+            }
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            value["streams"][0]["codec_type"] == "video"
+                && value["format"]["duration"]
+                    .as_str()
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .is_some_and(|duration| duration > 0.0)
+        };
+        let mut phases = Vec::new();
+        let before = folder.join(format!("before-readiness-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&before).unwrap();
+        let epoch = Instant::now();
+        let error: SharedError = Arc::default();
+        let (ready, _receiver) = mpsc::sync_channel(1);
+        let control = native_start(
+            &source_id,
+            NativeFlags {
+                path: before.join("native-video.mp4"),
+                fps: 30,
+                epoch,
+                error: error.clone(),
+                ready,
+                preview: false,
+            },
+        )
+        .unwrap();
+        // Halt before inspecting the callback so a future frame cannot race the observation.
+        control.halt_handle().store(true, Ordering::Relaxed);
+        let had_frame = control.callback().lock().first_frame.is_some();
+        let mut early = ActiveCapture {
+            epoch,
+            stopped: None,
+            folder: before.clone(),
+            video: Some(VideoCapture::Native(control)),
+            audio: None,
+            muted: Arc::default(),
+            level: Arc::new(AtomicU32::new(0)),
+            error,
+            fps: 30,
+            device_audio: false,
+        };
+        let began = Instant::now();
+        let stopped = early.stop();
+        let stop_ms = began.elapsed().as_millis();
+        let usable = usable_video(&before.join("video.mp4"));
+        phases.push(serde_json::json!({"phase":"before-readiness","folder":before,"hadFrameAtStop":had_frame,"stopMs":stop_ms,"usableVideo":usable,"error":stopped.as_ref().err()}));
+        fs::write(
+            folder.join("immediate-stop-verification.json"),
+            serde_json::to_vec_pretty(&phases).unwrap(),
+        )
+        .unwrap();
+        assert!(stop_ms < 5000, "Stopping before readiness hung");
+        assert!(
+            usable || stopped.is_err(),
+            "An unusable recording was reported as successful"
+        );
+        if !had_frame {
+            assert!(
+                stopped.is_err(),
+                "A capture without frames needs an explicit error"
+            );
+        }
+        let immediate = folder.join("after-readiness");
+        let began = Instant::now();
+        let mut active = start(
+            CaptureConfig {
+                source_id: source_id.clone(),
+                microphone_id: None,
+                system_audio: false,
+                fps: 30,
+            },
+            &immediate,
+        )
+        .unwrap();
+        let start_ms = began.elapsed().as_millis();
+        let began = Instant::now();
+        let stopped = active.stop();
+        let stop_ms = began.elapsed().as_millis();
+        let usable = usable_video(&immediate.join("video.mp4"));
+        phases.push(serde_json::json!({"phase":"after-readiness","startMs":start_ms,"stopMs":stop_ms,"usableVideo":usable,"error":stopped.as_ref().err()}));
+        fs::write(
+            folder.join("immediate-stop-verification.json"),
+            serde_json::to_vec_pretty(&phases).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            start_ms < 10000 && stop_ms < 5000,
+            "Immediate start/stop exceeded its bound"
+        );
+        assert!(
+            usable || stopped.is_err(),
+            "An unusable immediate recording was reported as successful"
+        );
+        let next = folder.join("subsequent-capture");
+        let mut active = start(
+            CaptureConfig {
+                source_id,
+                microphone_id: None,
+                system_audio: false,
+                fps: 30,
+            },
+            &next,
+        )
+        .unwrap();
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until {
+            pump();
+            thread::sleep(Duration::from_millis(2));
+        }
+        let began = Instant::now();
+        active.stop().unwrap();
+        let stop_ms = began.elapsed().as_millis();
+        let usable = usable_video(&next.join("video.mp4"));
+        phases.push(serde_json::json!({"phase":"subsequent-capture","stopMs":stop_ms,"usableVideo":usable,"error":serde_json::Value::Null}));
+        fs::write(
+            folder.join("immediate-stop-verification.json"),
+            serde_json::to_vec_pretty(&phases).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            stop_ms < 5000 && usable,
+            "Immediate stop prevented a subsequent successful capture"
+        );
+        assert!(
+            before.join("audio.wav").exists(),
+            "Early failure diagnostics were removed"
+        );
+    }
 }

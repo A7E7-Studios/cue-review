@@ -28,7 +28,7 @@ fn ps_quote(value: &str) -> String {
 fn handoff_text(name: &str, id: &str, exe: &Path, root: &Path, folder: &Path) -> String {
     let command = format!("& {}", ps_quote(&exe.to_string_lossy()));
     let session = ps_quote(id);
-    format!("Review CueReview session {id} ({name}) locally. Run these commands in PowerShell.\n\nUse the same local data directory as the app:\n$env:CUEREVIEW_DATA_DIR = {}\n\nRead word timestamps:\n{command} transcript {session} --json\n\nFind a visual reference (replace the example phrase):\n{command} find {session} --phrase 'here'\n\nInspect its frame:\n{command} frame {session} --phrase 'here' --occurrence 1\n\nExport a clip using millisecond bounds from the transcript:\n{command} clip {session} --start-ms START_MS --end-ms END_MS\n\nSession folder: {}\nThe CLI is installed beside CueReview; use its full path as shown. Word timestamps are model estimates; inspect surrounding frames when ambiguous.",ps_quote(&root.to_string_lossy()),folder.display())
+    format!("Review CueReview session {id} ({name}) locally. Run these commands in PowerShell.\n\nUse the same local data directory as the app:\n$env:CUEREVIEW_DATA_DIR = {}\n\nRead word timestamps:\n{command} transcript {session} --json\n\nFind a visual reference (replace the example phrase):\n{command} find {session} --phrase 'here'\n\nInspect its frame:\n{command} frame {session} --phrase 'here' --occurrence 1\n\nExport a clip using millisecond bounds from the transcript:\n{command} clip {session} --start-ms START_MS --end-ms END_MS\n\nSession folder: {}\nThe CLI is installed beside CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous.",ps_quote(&root.to_string_lossy()),folder.display())
 }
 pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String> {
     let mut session = store.session(id)?;
@@ -53,6 +53,8 @@ pub struct PhraseMatch {
     pub occurrence: usize,
     pub start_ms: u64,
     pub end_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seek_ms: Option<u64>,
     pub text: String,
 }
 fn normalized(s: &str) -> String {
@@ -86,6 +88,7 @@ pub fn find(transcript: &Transcript, phrase: &str) -> Result<Vec<PhraseMatch>, S
                 occurrence: result.len() + 1,
                 start_ms: group[0].start_ms,
                 end_ms: group.last().unwrap().end_ms,
+                seek_ms: group[0].seek_ms,
                 text: group
                     .iter()
                     .map(|w| w.text.as_str())
@@ -270,6 +273,7 @@ mod tests {
                         text: "Click".into(),
                         start_ms: 0,
                         end_ms: 10,
+                        seek_ms: Some(5),
                     }],
                 },
                 Segment {
@@ -281,12 +285,14 @@ mod tests {
                         text: "here,".into(),
                         start_ms: 11,
                         end_ms: 20,
+                        seek_ms: None,
                     }],
                 },
             ],
             ..Default::default()
         };
         let m = find(&t, "click HERE").unwrap();
+        assert_eq!(m[0].seek_ms, Some(5));
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].start_ms, 0);
         assert_eq!(m[0].end_ms, 20);
@@ -346,21 +352,25 @@ mod tests {
                         text: "Click".into(),
                         start_ms: 100,
                         end_ms: 200,
+                        seek_ms: None,
                     },
                     Word {
                         text: "here.".into(),
                         start_ms: 200,
                         end_ms: 300,
+                        seek_ms: None,
                     },
                     Word {
                         text: "Click".into(),
                         start_ms: 2000,
                         end_ms: 2100,
+                        seek_ms: None,
                     },
                     Word {
                         text: "here!".into(),
                         start_ms: 2100,
                         end_ms: 2200,
+                        seek_ms: None,
                     },
                 ],
             }],

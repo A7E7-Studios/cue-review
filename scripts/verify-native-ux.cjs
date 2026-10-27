@@ -26,9 +26,10 @@ async function review(){
  const sid=JSON.parse(fs.readFileSync('test-results/pipeline-verification.json','utf8')).sessionId;
  const original=await invoke('get_session',{id:sid});const project=(await invoke('list_projects')).find(p=>p.id===original.projectId);
  await page.locator('.session').filter({hasText:original.name}).click();await page.locator('.word').filter({hasText:/^here,$/}).click();
- const seek=await page.locator('video').evaluate(v=>v.currentTime);if(Math.abs(seek-4.7)>.1)throw Error('Seek failed '+seek);result.checks.seek=seek;
+ const transcript=await invoke('get_transcript',{id:sid});const here=transcript.segments.flatMap(s=>s.words).find(w=>/^here,$/.test(w.text));if(!here)throw Error('Fixture has no expected here word');const expectedSeekMs=here.seekMs??here.startMs;
+ const seek=await page.locator('video').evaluate(v=>v.currentTime);if(Math.abs(seek*1000-expectedSeekMs)>100)throw Error('Seek failed '+seek);result.checks.seek=seek;
  await page.getByRole('button',{name:'Add marker',exact:true}).click();await page.getByRole('textbox',{name:'Note'}).fill('Inspect details panel');await page.getByRole('button',{name:'Save',exact:true}).click();
- const markers=await invoke('get_markers',{id:sid});if(!markers.some(m=>m.label==='Inspect details panel'&&Math.abs(m.timeMs-4700)<100))throw Error('Marker persistence failed');result.checks.marker=true;
+ const markers=await invoke('get_markers',{id:sid});if(!markers.some(m=>m.label==='Inspect details panel'&&Math.abs(m.timeMs-expectedSeekMs)<100))throw Error('Marker persistence failed');result.checks.marker=true;
  await page.getByRole('button',{name:'Copy for agent',exact:true}).click();await page.getByText('Agent instructions copied',{exact:true}).last().waitFor();
  const clipboard=execFileSync('powershell.exe',['-NoProfile','-Command','Get-Clipboard -Raw'],{encoding:'utf8',windowsHide:true});const handoff=await invoke('get_agent_handoff',{id:sid});if(clipboard.replace(/\r\n/g,'\n').trim()!==handoff.replace(/\r\n/g,'\n').trim())throw Error('Native clipboard handoff mismatch');result.checks.clipboard=true;
  const rateButton=page.getByRole('button',{name:/^Playback speed /});while((await page.locator('video').evaluate(v=>v.playbackRate))!==1)await rateButton.click();await rateButton.click();result.checks.playbackRate=await page.locator('video').evaluate(v=>v.playbackRate);if(result.checks.playbackRate!==1.5)throw Error('Speed failed');

@@ -1,7 +1,7 @@
 use crate::{
     deps,
     models::{Segment, Transcript, Word},
-    store::{read_json, Store},
+    store::{atomic_write, Store},
 };
 use serde_json::Value;
 use std::{
@@ -17,6 +17,36 @@ use std::{
 const DECODING_OPTIONS: &[&str] = &[
     "-l", "auto", "-ojf", "-ng", "-mc", "0", "-nf", "-nth", "0.3",
 ];
+fn dtw_preset(custom_model: bool, requested: Option<&str>) -> Result<Option<String>, String> {
+    let preset = if custom_model {
+        requested
+    } else {
+        Some("base")
+    };
+    match preset {
+        None => Ok(None),
+        Some(name) if matches!(name, "tiny" | "tiny.en" | "base" | "base.en" | "small" | "small.en" | "medium" | "medium.en" | "large.v1" | "large.v2" | "large.v3" | "large.v3.turbo") => Ok(Some(name.into())),
+        Some(_) => Err("CUEREVIEW_DTW_MODEL must name a supported Whisper alignment preset (for example base or base.en).".into()),
+    }
+}
+fn alignment_options(command: &mut std::process::Command) -> Result<(), String> {
+    let requested = std::env::var("CUEREVIEW_DTW_MODEL").ok();
+    if let Some(preset) = dtw_preset(
+        std::env::var_os("CUEREVIEW_MODEL").is_some(),
+        requested.as_deref(),
+    )? {
+        command.args(["-dtw", &preset, "-nfa"]);
+    }
+    Ok(())
+}
+fn token_anchor(token: &Value) -> Option<u64> {
+    // CLI serializes this integer centisecond count as a JSON float.
+    let time = token["t_dtw"].as_f64()?;
+    if !time.is_finite() || time < 0.0 || time.fract() != 0.0 || time >= u64::MAX as f64 {
+        return None;
+    }
+    (time as u64).checked_mul(10)
+}
 
 /// Keep raw whisper output beside normalized words: timings are model estimates,
 /// never synthesized by evenly dividing a sentence.
@@ -52,10 +82,14 @@ pub fn parse_whisper(value: &Value) -> Result<Transcript, String> {
                         text: raw.trim().into(),
                         start_ms: start,
                         end_ms: end,
+                        seek_ms: token_anchor(token),
                     });
                 } else if let Some(last) = words.last_mut() {
                     last.text.push_str(raw);
                     last.end_ms = last.end_ms.max(end);
+                    if last.seek_ms.is_none() {
+                        last.seek_ms = token_anchor(token);
+                    }
                 }
             }
         }
@@ -193,6 +227,23 @@ fn empty_transcript() -> Transcript {
         ..Default::default()
     }
 }
+fn accept_whisper_output(prefix: &Path, folder: &Path) -> Result<Transcript, String> {
+    let fresh = prefix.with_extension("json");
+    let bytes = fs::read(&fresh).map_err(|error| format!(
+        "The speech runtime produced no readable fresh transcript ({}: {error}). Reinstall local transcription and retry; see transcription.log. Previous raw output was retained.",
+        fresh.display()
+    ))?;
+    let raw: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "Invalid fresh transcript {}: {error}. Previous raw output was retained.",
+            fresh.display()
+        )
+    })?;
+    let transcript = parse_whisper(&raw)?;
+    atomic_write(&folder.join("whisper.json"), &bytes)?;
+    let _ = fs::remove_file(fresh);
+    Ok(transcript)
+}
 /// Only scratch files are written here; final session transcript files are untouched.
 pub fn transcribe_snapshot(
     source: &Path,
@@ -211,6 +262,8 @@ pub fn transcribe_snapshot(
         return Ok(empty_transcript());
     }
     let mut whisper = deps::command("whisper-cli")?;
+    alignment_options(&mut whisper)?;
+    let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
     whisper
         .arg("-m")
         .arg(deps::model_path())
@@ -218,10 +271,9 @@ pub fn transcribe_snapshot(
         .arg(&speech)
         .args(DECODING_OPTIONS)
         .args(["-t", "2", "-of"])
-        .arg(folder.join("whisper"));
+        .arg(&prefix);
     run_live(whisper, &folder.join("transcription.log"), cancel)?;
-    let raw: Value = read_json(&folder.join("whisper.json"))?;
-    parse_whisper(&raw)
+    accept_whisper_output(&prefix, folder)
 }
 /// Replace the overlapping provisional tail, retaining words wholly before the snapshot.
 pub fn merge_live(
@@ -235,7 +287,10 @@ pub fn merge_live(
         let words: Vec<_> = segment
             .words
             .iter()
-            .filter(|w| w.end_ms <= start_ms)
+            .filter(|w| {
+                w.seek_ms
+                    .map_or(w.end_ms <= start_ms, |seek| seek < start_ms)
+            })
             .cloned()
             .collect();
         if let (Some(first), Some(last)) = (words.first(), words.last()) {
@@ -258,11 +313,24 @@ pub fn merge_live(
             .into_iter()
             .filter_map(|word| {
                 let start = word.start_ms.saturating_add(start_ms);
-                let end = word.end_ms.saturating_add(start_ms).min(end_ms);
-                (start < end && start < end_ms).then_some(Word {
+                let raw_end = word.end_ms.saturating_add(start_ms);
+                let seek_ms = word
+                    .seek_ms
+                    .and_then(|seek| seek.checked_add(start_ms))
+                    .filter(|seek| *seek < end_ms);
+                // Alignment decides inclusion when present. Preserve its raw interval
+                // rather than manufacturing a boundary from an unrelated estimate.
+                let (include, end) = if word.seek_ms.is_some() {
+                    (seek_ms.is_some(), raw_end)
+                } else {
+                    let end = raw_end.min(end_ms);
+                    (start < end && start < end_ms, end)
+                };
+                include.then_some(Word {
                     text: word.text,
                     start_ms: start,
                     end_ms: end,
+                    seek_ms,
                 })
             })
             .collect();
@@ -337,6 +405,8 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         return Ok(transcript);
     }
     let mut whisper = deps::command("whisper-cli")?;
+    alignment_options(&mut whisper)?;
+    let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
     whisper
         .arg("-m")
         .arg(deps::model_path())
@@ -344,17 +414,134 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         .arg(speech)
         .args(DECODING_OPTIONS)
         .arg("-of")
-        .arg(folder.join("whisper"));
+        .arg(&prefix);
     run_logged(whisper, &folder.join("transcription.log"))?;
-    let raw: Value = read_json(&folder.join("whisper.json"))?;
-    let transcript = parse_whisper(&raw)?;
+    let transcript = accept_whisper_output(&prefix, &folder)?;
     store.save_transcript(id, &transcript)?;
     Ok(transcript)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::read_json;
     use serde_json::json;
+    #[test]
+    fn successful_process_cannot_reuse_old_or_malformed_output() {
+        let folder = tempfile::tempdir().unwrap();
+        let canonical = folder.path().join("whisper.json");
+        let original = br#"{"transcription":[{"text":"old","tokens":[{"text":" old","offsets":{"from":10,"to":20}}]}]}"#;
+        fs::write(&canonical, original).unwrap();
+        let prefix = folder
+            .path()
+            .join(format!("whisper-{}", uuid::Uuid::new_v4()));
+        // A genuine successful subprocess that writes no transcript, like an
+        // incompatible runtime exiting successfully after printing usage.
+        let mut no_output = std::process::Command::new(std::env::current_exe().unwrap());
+        no_output.arg("--list");
+        run_logged(no_output, &folder.path().join("transcription.log")).unwrap();
+        assert!(accept_whisper_output(&prefix, folder.path())
+            .unwrap_err()
+            .contains("fresh transcript"));
+        assert_eq!(fs::read(&canonical).unwrap(), original);
+        let fresh = prefix.with_extension("json");
+        for malformed in [
+            b"{broken".as_slice(),
+            br#"{"transcription":[{"text":"untimed","tokens":[]}]}"#,
+        ] {
+            fs::write(&fresh, malformed).unwrap();
+            assert!(accept_whisper_output(&prefix, folder.path()).is_err());
+            assert_eq!(fs::read(&canonical).unwrap(), original);
+            assert_eq!(fs::read(&fresh).unwrap(), malformed);
+        }
+        let valid = b"{\n  \"transcription\": []\n}\n";
+        fs::write(&fresh, valid).unwrap();
+        assert!(accept_whisper_output(&prefix, folder.path())
+            .unwrap()
+            .segments
+            .is_empty());
+        assert_eq!(fs::read(&canonical).unwrap(), valid);
+        assert!(!fresh.exists());
+    }
+    #[test]
+    fn anchors_preserve_raw_intervals_and_old_transcripts() {
+        let raw = json!({"transcription":[{"text":"click here", "tokens":[
+            {"text":" click","offsets":{"from":0,"to":1300},"t_dtw":1022.0},
+            {"text":" he","offsets":{"from":1300,"to":1400},"t_dtw":-1},
+            {"text":"re","offsets":{"from":1400,"to":1500},"t_dtw":1040},
+            {"text":".","offsets":{"from":1500,"to":1500},"t_dtw":1050}
+        ]}]});
+        let transcript = parse_whisper(&raw).unwrap();
+        let words = &transcript.segments[0].words;
+        assert_eq!(
+            (words[0].start_ms, words[0].end_ms, words[0].seek_ms),
+            (0, 1300, Some(10220))
+        );
+        assert_eq!(
+            (
+                words[1].text.as_str(),
+                words[1].start_ms,
+                words[1].end_ms,
+                words[1].seek_ms
+            ),
+            ("here.", 1300, 1500, Some(10400))
+        );
+        let old: Word =
+            serde_json::from_value(json!({"text":"old","startMs":10,"endMs":20})).unwrap();
+        assert_eq!(old.seek_ms, None);
+        assert!(serde_json::to_value(old).unwrap().get("seekMs").is_none());
+        for invalid in [
+            json!(-1),
+            json!(1.5),
+            json!("1022"),
+            json!(null),
+            json!(u64::MAX),
+            json!(1e30),
+        ] {
+            assert_eq!(token_anchor(&json!({"t_dtw":invalid})), None);
+        }
+        assert_eq!(token_anchor(&json!({"t_dtw":0.0})), Some(0));
+    }
+    #[test]
+    fn custom_models_require_an_explicit_alignment_preset() {
+        assert_eq!(dtw_preset(false, None).unwrap().as_deref(), Some("base"));
+        assert_eq!(dtw_preset(true, None).unwrap(), None);
+        assert_eq!(
+            dtw_preset(true, Some("base.en")).unwrap().as_deref(),
+            Some("base.en")
+        );
+        assert!(dtw_preset(true, Some("guessed-file-name")).is_err());
+    }
+    #[test]
+    fn live_anchors_control_overlap_and_preserve_zero_duration_words() {
+        let mut previous = sample_transcript(&[("old", 0, 1300)]);
+        previous.segments[0].words[0].seek_ms = Some(10220);
+        let mut update = sample_transcript(&[
+            ("When", 0, 0),
+            ("outside", 0, 1000),
+            ("overflow", 0, 0),
+            ("bad interval", 10000, 11000),
+        ]);
+        update.segments[0].words[0].seek_ms = Some(5220);
+        update.segments[0].words[1].seek_ms = Some(7000);
+        update.segments[0].words[2].seek_ms = Some(u64::MAX);
+        update.segments[0].words[3].seek_ms = Some(6000);
+        let merged = merge_live(&previous, update, 5000, 12000);
+        let words: Vec<_> = merged.segments.iter().flat_map(|s| &s.words).collect();
+        assert_eq!(words.len(), 2);
+        assert_eq!(
+            (
+                words[0].text.as_str(),
+                words[0].start_ms,
+                words[0].end_ms,
+                words[0].seek_ms
+            ),
+            ("When", 5000, 5000, Some(10220))
+        );
+        assert_eq!(
+            (words[1].start_ms, words[1].end_ms, words[1].seek_ms),
+            (15000, 16000, Some(11000))
+        );
+    }
     #[test]
     fn detector_requires_explicit_consistent_count() {
         assert_eq!(vad_count("\nDetected 0 speech segments:\n").unwrap(), 0);
@@ -420,6 +607,7 @@ mod tests {
                         text: w.0.into(),
                         start_ms: w.1,
                         end_ms: w.2,
+                        seek_ms: None,
                     })
                     .collect(),
             }],
@@ -606,6 +794,7 @@ mod tests {
             transcribe_snapshot(&fixture.join("delayed-speech.wav"), output.path(), &cancel)
                 .unwrap();
         let mut baseline = deps::command("whisper-cli").unwrap();
+        alignment_options(&mut baseline).unwrap();
         baseline
             .arg("-m")
             .arg(deps::model_path())
@@ -659,5 +848,52 @@ mod tests {
             !folder.join("whisper.json").exists(),
             "Skipped ASR must not fabricate raw output"
         );
+    }
+    #[test]
+    #[ignore = "Requires installed base model/DTW preset and delayed, quiet, short-word fixtures in test-results"]
+    fn actual_dtw_anchors_keep_delayed_and_quiet_word_context() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let delayed = transcribe_snapshot(
+            &root.join("test-results/vad-experiment/delayed-speech.wav"),
+            output.path(),
+            &cancel,
+        )
+        .unwrap();
+        let first = &delayed.segments[0].words[0];
+        assert_eq!(first.text, "When");
+        assert!((10000..10500).contains(&first.seek_ms.unwrap()));
+        let raw: Value = read_json(&output.path().join("whisper.json")).unwrap();
+        let raw_first = &raw["transcription"][0]["tokens"][1];
+        assert_eq!(
+            first.start_ms,
+            raw_first["offsets"]["from"].as_u64().unwrap()
+        );
+        assert_eq!(first.end_ms, raw_first["offsets"]["to"].as_u64().unwrap());
+        let phrase = crate::agent::find(&delayed, "click here").unwrap();
+        assert!((14000..15000).contains(&phrase[0].seek_ms.unwrap()));
+        let original_anchor = first.seek_ms.unwrap();
+        let shifted = merge_live(&Transcript::default(), delayed, 30000, 51000);
+        assert_eq!(
+            shifted.segments[0].words[0].seek_ms,
+            Some(original_anchor + 30000)
+        );
+        for (fixture, phrase) in [
+            (
+                "test-results/silence-check/quiet-speech.wav",
+                "When I open the library",
+            ),
+            ("test-results/vad-experiment/short-fast-No.wav", "No"),
+            ("test-results/vad-experiment/short-fast-Stop.wav", "Stop"),
+        ] {
+            let source = root.join(fixture);
+            let wav = hound::WavReader::open(&source).unwrap();
+            let duration = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
+            let transcript = transcribe_snapshot(&source, output.path(), &cancel).unwrap();
+            let found = crate::agent::find(&transcript, phrase).unwrap();
+            assert!(!found.is_empty(), "Lost {phrase}");
+            assert!(found[0].seek_ms.unwrap() < duration);
+        }
     }
 }

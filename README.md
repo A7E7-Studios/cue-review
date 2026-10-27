@@ -31,7 +31,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 1. Create a project and choose a source and microphone in the compact bottom controls.
 2. Press Record (`Ctrl+R`). Mute/unmute and add timestamped markers during capture. Compact mode keeps the recording controls available in a smaller window.
 3. Stop. The video is finalized and transcribed locally. Original media remains available if transcription fails; use Retry after fixing setup.
-4. Play the recording and click transcript words to seek. Word timestamps are model estimates, not guaranteed exact alignment. Original Whisper JSON is retained for inspection.
+4. Play the recording and click transcript words to seek. The standard model uses DTW alignment points for visual lookup, while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
 5. Copy for agent, or open the session folder.
 
 Before transcription, a local detector checks for speech. An explicit successful no-speech result produces an empty transcript; detector failures remain actionable errors. When speech is present, the original audio goes through Whisper without cutting silence or changing its word-to-time mapping. Speech detection and recognition are imperfect, particularly with mixed speech/noise; review the transcript alongside the recording. Raw model output and detector diagnostics are retained when produced.
@@ -41,6 +41,8 @@ During recording, local transcription updates in short batches from the latest 3
 ## Storage and agent CLI
 
 Default storage is `%LOCALAPPDATA%\CueReview`. Projects and sessions are plain JSON files; each session directory contains `video.mp4`, audio tracks, `session.json`, `transcript.txt`, `transcript.json`, raw `whisper.json` when recognition ran, and markers when present. Speech detector output is retained in `vad.txt` and `vad.log`. Original native/device capture tracks are retained for recovery. `CUEREVIEW_DATA_DIR` changes this root; `CUEREVIEW_MODEL` and `CUEREVIEW_VAD_MODEL` can select compatible local speech and detection models.
+
+Each word retains its original `startMs`/`endMs` and may include `seekMs`, an estimated alignment point used by word clicks and phrase-based frame retrieval. Existing transcripts without this field still work. Custom speech models use their original intervals unless `CUEREVIEW_DTW_MODEL` explicitly names a compatible alignment preset, such as `base` or `base.en`; the preset is never inferred from a custom filename. The standard installed base model enables alignment automatically.
 
 The Windows package includes `cue.exe` beside the application. Copy for agent uses its absolute path, so adding it to PATH is optional.
 
@@ -77,5 +79,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib capture::tests -- --includ
 Use a dedicated `CUEREVIEW_DATA_DIR` for desktop verification. The review script expects the pipeline fixture in that same directory (launching the test app against `.local/pipeline-data` satisfies this). `scripts/verify-native-ux.cjs` checks review controls and compact mode; `scripts/verify-installed.cjs` additionally requires `CUEREVIEW_TEST_PID` to identify the exact test process for its safe-close check. Test recordings are stopped on script failure.
 
 `scripts/verify-recovery.cjs` launches and closes its own isolated app instance, verifies interrupted-session recovery and missing-model retry, then checks real transcription and marker persistence after relaunch. It uses the pipeline fixture and already installed models, preserving the source media and the normal app's data.
+
+`scripts/verify-failures.cjs` checks actual missing-tool and failed-process paths using copied media and invalid test models. `scripts/verify-alignment.cjs` adds ten seconds of silence before the known speech and verifies that phrase-based frame retrieval selects the spoken scene after a red-to-blue video transition. Both use isolated data directories.
 
 See [architecture](docs/ARCHITECTURE.md) and the [verification checklist](docs/VERIFICATION.md) for boundaries and remaining hardware validation. Passing display capture does not establish Android/Quest correctness. Device-to-PC-microphone alignment needs hardware measurement, and recordings should be checked before relying on millisecond-level cross-device alignment.

@@ -49,7 +49,7 @@ async function closeOwned() {
 async function launchOwned() {
   try { const response = await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(600) }); if (response.ok) throw Error('CDP9225 is already occupied; refusing to attach to an unowned app'); }
   catch (error) { if (error.message.includes('already occupied')) throw error; }
-  const env = { ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: testModel, CUEREVIEW_VAD_MODEL: vadModel, WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'webview-profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9225', PATH: `${path.join(normalLocal, 'tools', 'whisper-b5454')};${process.env.PATH}` };
+  const env = { ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: testModel, CUEREVIEW_VAD_MODEL: vadModel, CUEREVIEW_DTW_MODEL: process.env.CUEREVIEW_DTW_MODEL || 'base', WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'webview-profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9225', PATH: `${path.join(normalLocal, 'tools', 'whisper-b5454')};${process.env.PATH}` };
   child = spawn(executable, [], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', childLog, childLog] });
   result.ownedPids.push(child.pid);
   let connected = false;
@@ -83,8 +83,9 @@ async function verifyWord(word, index, label) {
   const button = page.locator('.word').nth(index);
   await button.click();
   const actualSeconds = await page.locator('video').evaluate(video => video.currentTime);
-  if (Math.abs(actualSeconds * 1000 - word.startMs) > 100) throw Error(`${label} word seek mismatch: ${actualSeconds}s vs ${word.startMs}ms`);
-  return { text: word.text, expectedMs: word.startMs, actualSeconds };
+  const expectedMs = word.seekMs ?? word.startMs;
+  if (Math.abs(actualSeconds * 1000 - expectedMs) > 100) throw Error(`${label} word seek mismatch: ${actualSeconds}s vs ${expectedMs}ms`);
+  return { text: word.text, expectedMs, originalStartMs: word.startMs, actualSeconds };
 }
 async function verifyNativeSourceControls() {
   await page.locator('.side-tools').getByRole('button', { name: 'New recording', exact: true }).click();
@@ -160,8 +161,8 @@ async function verifyNativeSourceControls() {
     if (words.length < 6 || !transcript.segments.some(segment => /library|click|toolbar/i.test(segment.text))) throw Error('Real Whisper did not recover the expected known speech');
     await page.locator('.word').last().waitFor();
     result.checks.realWhisperRetry = { status: ready.status, transcriptStatus: transcript.status, wordCount: words.length, text: transcript.segments.map(segment => segment.text).join(' '), mediaHashes: assertMedia(originalHashes) };
-    const earlyIndex = words.findIndex(word => word.startMs > 0);
-    const lateIndex = words.findLastIndex(word => word.startMs < ready.durationMs - 200);
+    const earlyIndex = 0;
+    const lateIndex = words.findLastIndex(word => (word.seekMs ?? word.startMs) < ready.durationMs - 200);
     result.checks.earlySeek = await verifyWord(words[earlyIndex], earlyIndex, 'Early');
     result.checks.lateSeek = await verifyWord(words[lateIndex], lateIndex, 'Late');
     await page.getByRole('button', { name: 'Add marker', exact: true }).click();
@@ -174,7 +175,7 @@ async function verifyNativeSourceControls() {
     await launchOwned();
     const reopened = await invoke('get_session', { id: sessionId });
     const reopenedMarkers = await invoke('get_markers', { id: sessionId });
-    if (reopened.status !== 'ready' || JSON.stringify(savedMarkers) !== JSON.stringify(reopenedMarkers) || !reopenedMarkers.some(marker => marker.label === 'Recovered late-word marker' && marker.timeMs === words[lateIndex].startMs)) throw Error('Recovered session or marker did not survive owned-app relaunch');
+    if (reopened.status !== 'ready' || JSON.stringify(savedMarkers) !== JSON.stringify(reopenedMarkers) || !reopenedMarkers.some(marker => marker.label === 'Recovered late-word marker' && marker.timeMs === (words[lateIndex].seekMs ?? words[lateIndex].startMs))) throw Error('Recovered session or marker did not survive owned-app relaunch');
     await page.getByRole('button', { name: /Recovered late-word marker/ }).click();
     result.checks.markerAfterRelaunch = { status: reopened.status, markers: reopenedMarkers, actualVideoSeconds: await page.locator('video').evaluate(video => video.currentTime), mediaHashes: assertMedia(originalHashes) };
     await shot('relaunch-persisted-marker');

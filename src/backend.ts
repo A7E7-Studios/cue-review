@@ -2,7 +2,7 @@ import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 
 export interface Project { id: string; name: string; createdAt: string }
 export interface Session { id: string; projectId: string; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; microphoneId?: string; systemAudio?: boolean }
-export interface Word { text: string; startMs: number; endMs: number }
+export interface Word { text: string; startMs: number; endMs: number; seekMs?: number }
 export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
 export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string }
 export interface CaptureSource { id: string; name: string; kind: 'display' | 'window' | 'android' | 'quest' | 'camera'; available: boolean; detail?: string }
