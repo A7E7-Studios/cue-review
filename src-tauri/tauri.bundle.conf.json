@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "resources": { "target/release/cue.exe": "cue.exe" }
+  }
+}
