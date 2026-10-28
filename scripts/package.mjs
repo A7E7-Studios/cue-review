@@ -58,7 +58,23 @@ mkdirSync(dirname(configPath), { recursive: true });
 writeFileSync(configPath, JSON.stringify(config, null, 2));
 const buildArgs = ['node_modules/@tauri-apps/cli/tauri.js', 'build', '--config', configPath];
 if (target) buildArgs.push('--target', target);
+if (process.platform === 'darwin') buildArgs.push('--no-bundle');
 run(process.execPath, buildArgs);
+if (process.platform === 'darwin') {
+  // Sign after the final compilation so both Cargo binaries and resource helpers
+  // already have valid signatures when Tauri signs the enclosing app bundle.
+  const binaries = [join(releaseDir, 'cuereview'), cli];
+  if (speechReady) binaries.push(...['whisper-cli', 'whisper-vad-speech-segments'].map(name => join(speechDir, name)));
+  for (const binary of binaries) {
+    run('codesign', ['--force', '--sign', '-', binary]);
+    run('codesign', ['--verify', '--strict', binary]);
+  }
+  // Binary patching would invalidate the signatures above. This app ships only
+  // DMG on macOS and does not need Tauri's per-bundle updater marker.
+  const bundleArgs = ['node_modules/@tauri-apps/cli/tauri.js', 'bundle', '--config', configPath, '--no-binary-patching'];
+  if (target) bundleArgs.push('--target', target);
+  run(process.execPath, bundleArgs);
+}
 function filesIn(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? filesIn(join(dir, entry.name)) : [join(dir, entry.name)]);
 }

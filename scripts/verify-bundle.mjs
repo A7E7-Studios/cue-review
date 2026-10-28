@@ -49,6 +49,9 @@ try {
     run('codesign', ['--verify', '--deep', '--strict', app]);
     resourceDir = join(app, 'Contents/Resources');
     cli = join(resourceDir, 'cue');
+    for (const binary of [join(app, 'Contents/MacOS/cuereview'), join(app, 'Contents/MacOS/cue'), cli, ...['whisper-cli', 'whisper-vad-speech-segments'].map(name => join(resourceDir, 'tools/whisper-b5454', name))]) {
+      run('codesign', ['--verify', '--strict', binary]);
+    }
   } else throw new Error(`Unsupported host: ${process.platform}`);
   if (!existsSync(cli)) throw new Error(`Bundled CLI is missing: ${cli}`);
   run(cli, ['--help']);
