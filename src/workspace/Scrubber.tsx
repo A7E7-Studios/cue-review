@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import type { KeyboardEvent, PointerEvent } from 'react';
 import { NAMES } from './types';
 import type { ScrubberProps } from './types';
-import { keyboardSeek, pointerToMs, positionText, speechRuns, takeTicks, toPercent } from './scrubber.ts';
+import { keyboardSeek, pointerToMs, positionText, speechRuns, takeTicks, toPercent } from './scrubberGeometry';
 import './workspace.css';
 
 /**

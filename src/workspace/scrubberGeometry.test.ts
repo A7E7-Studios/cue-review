@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { keyboardSeek, pointerToMs, positionText, speechRuns, takeTicks, toPercent } from './scrubber.ts';
+import { keyboardSeek, pointerToMs, positionText, speechRuns, takeTicks, toPercent } from './scrubberGeometry';
 
 describe('scrubber geometry', () => {
   it('maps time to a clamped percentage of the track', () => {

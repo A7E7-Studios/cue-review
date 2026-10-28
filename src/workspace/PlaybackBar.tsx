@@ -2,7 +2,7 @@ import { Icon } from '../icons';
 import { formatTime } from '../review';
 import { shortcut } from '../chrome/windowApi';
 import type { Platform } from '../chrome/windowApi';
-import { Scrubber } from './Scrubber.tsx';
+import { Scrubber } from './Scrubber';
 import { NAMES } from './types';
 import type { PlaybackBarProps } from './types';
 import './workspace.css';
