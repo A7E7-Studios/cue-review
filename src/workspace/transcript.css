@@ -54,7 +54,9 @@
 .cr-row.is-current { background: var(--color-current-row); border-radius: var(--radius-current-row); }
 .cr-row.is-match-current { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 45%, transparent); }
 .cr-row-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.cr-row-text { margin: 0; color: var(--color-transcript); font-size: var(--font-size-transcript); line-height: var(--line-height-transcript); overflow-wrap: anywhere; }
+/* The word gap is widened a little (--size-transcript-word-gap) so the spoken-word pill fits beside
+   each word with the space next to it still visible. */
+.cr-row-text { margin: 0; color: var(--color-transcript); font-size: var(--font-size-transcript); line-height: var(--line-height-transcript); word-spacing: var(--size-transcript-word-gap); overflow-wrap: anywhere; }
 .cr-row.is-past .cr-row-text { color: var(--color-transcript-past); }
 .cr-row.is-current .cr-row-text { color: var(--color-text); }
 .cr-row.is-current .word.upcoming { color: var(--color-transcript-past); }
@@ -68,24 +70,37 @@
 .cr-row-time:disabled { background: transparent; color: var(--color-text-tertiary); opacity: 1; cursor: default; }
 .cr-row.is-current .cr-row-time { color: var(--color-accent-text); font-weight: 700; }
 
-/* Words keep their layout box (padding and margin cancel out) so moving the
-   spoken pill never reflows the line. */
+/* Words are inline text, so a long token wraps with the sentence. The pill is painted by ::before,
+   --size-spoken-pill-x into the word gap on each side and 1px above and below the text: it takes no
+   room, so moving it never reflows the line. --word-bg is opaque because the word's own background
+   (each line of a wrapped token) and the pill overlap. */
 .cr-transcript .word {
-  display: inline; margin: -1px -3px; padding: 1px 3px; border: 0; border-radius: var(--radius-pill);
-  background: transparent; color: inherit; font: inherit; line-height: inherit; letter-spacing: inherit;
-  text-align: left; vertical-align: baseline; cursor: pointer;
+  --word-bg: transparent;
+  position: relative; z-index: 0; display: inline; border-radius: var(--radius-pill);
+  background: var(--word-bg); color: inherit; cursor: pointer; outline: none;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+.cr-transcript .word::before {
+  content: ''; position: absolute; z-index: -1; inset: -1px calc(-1 * var(--size-spoken-pill-x));
+  max-height: calc(var(--size-transcript-text-box) + 2px);
+  border-radius: var(--radius-pill); background: var(--word-bg); pointer-events: none;
 }
 .cr-transcript .segment-text {
   display: inline; margin: 0; padding: 0; border: 0; border-radius: 4px;
   background: transparent; color: inherit; font: inherit; line-height: inherit; letter-spacing: inherit;
   text-align: left; cursor: pointer; overflow-wrap: anywhere;
 }
-.cr-transcript .word:hover:not(:disabled), .cr-transcript .segment-text:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); color: inherit; }
-.cr-transcript .word:disabled, .cr-transcript .segment-text:disabled { background: transparent; color: inherit; opacity: 1; cursor: text; }
-.cr-transcript .word.found, .cr-find-mark { background: color-mix(in srgb, var(--color-meter-high) 45%, transparent); color: inherit; }
-.cr-find-mark { padding: 0 1px; border-radius: 3px; }
-.cr-transcript .word.spoken, .cr-transcript .word.spoken:hover { background: var(--color-accent); color: var(--color-on-accent); }
-.cr-transcript .word:focus-visible, .cr-transcript .segment-text:focus-visible, .cr-row-time:focus-visible {
+.cr-transcript .segment-text:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); color: inherit; }
+.cr-transcript .word:hover:not([aria-disabled='true']) { --word-bg: var(--color-word-hover); }
+.cr-transcript .word[aria-disabled='true'] { cursor: text; }
+.cr-transcript .segment-text:disabled { background: transparent; color: inherit; opacity: 1; cursor: text; }
+.cr-transcript .word.found { --word-bg: var(--color-word-found); }
+.cr-find-mark { background: color-mix(in srgb, var(--color-meter-high) 45%, transparent); color: inherit; padding: 0 1px; border-radius: 3px; }
+.cr-transcript .word.spoken, .cr-transcript .word.spoken:hover { --word-bg: var(--color-accent); color: var(--color-on-accent); }
+.cr-transcript .word:focus-visible { z-index: 1; }
+.cr-transcript .word:focus-visible::before { box-shadow: 0 0 0 2px var(--color-focus); }
+.cr-transcript .word.spoken:focus-visible::before { box-shadow: inset 0 0 0 1.5px var(--color-on-accent), 0 0 0 2px var(--color-focus); }
+.cr-transcript .segment-text:focus-visible, .cr-row-time:focus-visible {
   position: relative; z-index: 1; outline: 2px solid var(--color-focus); outline-offset: 1px;
 }
 

@@ -13,7 +13,7 @@ export interface PlaybackBarViewProps extends PlaybackBarProps {
 }
 
 /** Review controls: scrubber, play, time, speed, focus and the Record more pill (decision 6). */
-export function PlaybackBar({ timeMs, durationMs, segments, takes, onSeek, playing, canPlay, onTogglePlay, speed, onCycleSpeed, focused, onToggleFocus, recordMoreDisabled, onRecordMore, platform }: PlaybackBarViewProps) {
+export function PlaybackBar({ timeMs, durationMs, segments, takes, onSeek, playing, canPlay, onTogglePlay, speed, onCycleSpeed, focused, onToggleFocus, recordMoreDisabled, recordMoreBusy = false, onRecordMore, platform }: PlaybackBarViewProps) {
   const record = shortcut('r', platform);
   return <div className="cr-playback" role="group" aria-label={NAMES.playback}>
     <Scrubber timeMs={timeMs} durationMs={durationMs} segments={segments} takes={takes} onSeek={onSeek}/>
@@ -28,7 +28,7 @@ export function PlaybackBar({ timeMs, durationMs, segments, takes, onSeek, playi
         <Icon name={focused ? 'panel' : 'expand'} strokeWidth={1.8}/>
       </button>
       <span className="cr-control-divider" aria-hidden="true"/>
-      <button type="button" className="cr-btn cr-dark-pill" title={`${NAMES.recordMore} (${record.label}): continue this session as a new take`} aria-keyshortcuts={record.aria} disabled={recordMoreDisabled} onClick={onRecordMore}>
+      <button type="button" className="cr-btn cr-dark-pill" title={`${NAMES.recordMore} (${record.label}): continue this session as a new take`} aria-keyshortcuts={record.aria} disabled={recordMoreDisabled} aria-disabled={recordMoreBusy || undefined} onClick={recordMoreBusy ? undefined : onRecordMore}>
         <span className="cr-record-dot" aria-hidden="true"/>{NAMES.recordMore}
       </button>
     </div>

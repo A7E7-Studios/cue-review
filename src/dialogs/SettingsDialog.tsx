@@ -63,6 +63,9 @@ export function normalizeVocabulary(text: string): VocabularyResult {
   return { vocabulary: joined };
 }
 
+/** The bundled typeface's notice. The full licence ships in the app as public/licenses/Figtree-OFL.txt (dist/licenses). */
+export const FONT_CREDIT = 'Figtree typeface © 2022 The Figtree Project Authors, used under the SIL Open Font License 1.1. The licence text is included with the app as licenses/Figtree-OFL.txt.';
+
 const message = (problem: unknown) => typeof problem === 'string' ? problem : problem instanceof Error ? problem.message : String(problem);
 const has = (setup: SetupStatus, names: string[]) => names.every(name => setup.dependencies?.some(item => item.name === name && item.available));
 
@@ -167,5 +170,7 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
         <dd><span aria-hidden="true">{row.keys.map(key => <kbd key={key}>{key}</kbd>)}</span><span className="settings-sr-only">{row.spoken}</span></dd>
       </div>)}</dl>
     </section>
+
+    <p className="settings-about">{FONT_CREDIT}</p>
   </Dialog>;
 }

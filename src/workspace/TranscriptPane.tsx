@@ -63,6 +63,12 @@ interface RowProps {
 const Row = memo(function Row({ segment, index, live, tail, inert, current, past, spoken, entry, needle, match, matchCurrent, seek }: RowProps) {
   const at = segmentSeekMs(segment);
   const tab = (item: string) => entry === item ? 0 : -1;
+  // Words are role=button spans: Enter and Space activate them as they would a <button>.
+  const activate = (event: KeyboardEvent<HTMLSpanElement>, ms: number) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    if (!event.repeat) seek(ms);
+  };
   const className = ['cr-row', current && 'is-current', past && 'is-past', live && 'is-live', tail && 'is-tail', match && 'is-match', matchCurrent && 'is-match-current'].filter(Boolean).join(' ');
   return <div className={className} data-row={index}>
     <button type="button" className="cr-row-time" data-item={`${index}:t`} tabIndex={tab('t')} disabled={inert} aria-label={NAMES.seekTo(formatTime(at))} onClick={() => seek(at)}>{formatTime(at)}</button>
@@ -73,10 +79,12 @@ const Row = memo(function Row({ segment, index, live, tail, inert, current, past
             const ms = wordSeekMs(word);
             const spokenNow = spoken === wordIndex;
             const classes = ['word', spokenNow && 'spoken', current && spoken >= 0 && wordIndex > spoken && 'upcoming', needle && word.text.toLowerCase().includes(needle) && 'found'].filter(Boolean).join(' ');
+            // A <button> lays out as one unbreakable box; an inline role=button wraps with the sentence.
             return <Fragment key={wordIndex}>
               {wordIndex > 0 && ' '}
-              <button type="button" className={classes} data-item={`${index}:${wordIndex}`} tabIndex={tab(String(wordIndex))} disabled={inert}
-                aria-label={NAMES.seekToWord(word.text, formatTime(ms))} aria-current={spokenNow ? 'true' : undefined} onClick={() => seek(ms)}>{word.text}</button>
+              <span role="button" className={classes} data-item={`${index}:${wordIndex}`} tabIndex={inert ? -1 : tab(String(wordIndex))} aria-disabled={inert || undefined}
+                aria-label={NAMES.seekToWord(word.text, formatTime(ms))} aria-current={spokenNow ? 'true' : undefined}
+                onClick={inert ? undefined : () => seek(ms)} onKeyDown={inert ? undefined : event => activate(event, ms)}>{word.text}</span>
             </Fragment>;
           })
           : <button type="button" className="segment-text" data-item={`${index}:s`} tabIndex={tab('s')} disabled={inert} onClick={() => seek(at)}>
@@ -102,7 +110,7 @@ function visibleIn(element: Element, box: Element) {
 }
 
 /** The transcript column (decisions 4, 10 and 12). */
-export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false }: TranscriptPaneProps) {
+export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false }: TranscriptPaneProps) {
   const recording = mode === 'recording';
   const segments = transcript.segments;
   const liveIndex = recording ? liveTake?.index ?? 1 : undefined;
@@ -179,7 +187,7 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
     if (!target || !key || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const all = [...(scroller.current?.querySelectorAll<HTMLElement>('[data-item]:not(:disabled)') ?? [])];
+    const all = [...(scroller.current?.querySelectorAll<HTMLElement>('[data-item]:not(:disabled):not([aria-disabled="true"])') ?? [])];
     const at = all.indexOf(target);
     let next: HTMLElement | undefined;
     if (event.key === 'ArrowRight') next = all[at + 1];
@@ -197,12 +205,14 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
   const focusEntry = () => requestAnimationFrame(() => scroller.current?.querySelector<HTMLElement>('[data-item][tabindex="0"]:not(:disabled)')?.focus({ preventScroll: true }));
   const returnToPlayback = () => { setFollowing(true); focusEntry(); };
 
-  // Find in transcript.
-  const [finding, setFinding] = useState(false);
+  // Find in transcript, for review only: while recording the column shows the live tail and no Find.
+  const [findOpen, setFinding] = useState(false);
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
-  const needle = query.trim().toLowerCase();
-  const matches = useMemo(() => findMatches(segments, query), [segments, query]);
+  const finding = findOpen && !recording;
+  const needle = recording ? '' : query.trim().toLowerCase();
+  useEffect(() => { if (recording) { setFinding(false); setQuery(''); setCursor(0); } }, [recording]);
+  const matches = useMemo(() => recording ? [] : findMatches(segments, query), [recording, segments, query]);
   const matchIndex = matches.length ? Math.min(cursor, matches.length - 1) : -1;
   const matchRow = matchIndex >= 0 ? matches[matchIndex] : -1;
   const matchSet = useMemo(() => new Set(matches), [matches]);
@@ -225,10 +235,10 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
       <h2>{NAMES.transcript}</h2>
       {status && <span className="cr-status-chip" data-status={status} role="status"><i aria-hidden="true"/>{status === 'recording' ? 'Recording' : 'Processing'}</span>}
       <span className="cr-spacer"/>
-      <button ref={findButton} type="button" className="cr-btn cr-round-button cr-ghost" aria-label={NAMES.findInTranscript} title={NAMES.findInTranscript}
+      {!recording && <button ref={findButton} type="button" className="cr-btn cr-round-button cr-ghost" aria-label={NAMES.findInTranscript} title={NAMES.findInTranscript}
         aria-expanded={finding} aria-controls={finding ? findId : undefined} onClick={() => finding ? closeFind() : setFinding(true)}>
         <Icon name="search" strokeWidth={1.8}/>
-      </button>
+      </button>}
     </div>
     {finding && <div className="cr-find" id={findId}>
       <Icon name="search" strokeWidth={1.9}/>
@@ -252,7 +262,7 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
       {liveError && <p className="cr-transcript-note" role="status"><Icon name="warning" strokeWidth={1.8}/>{liveError}</p>}
       {error && <div className="cr-transcript-error">
         <p><Icon name="warning" strokeWidth={1.8}/>{error}</p>
-        {onRetry && <button type="button" className="cr-btn cr-pill" disabled={retryDisabled} onClick={onRetry}><Icon name="refresh" strokeWidth={1.8}/>{NAMES.retryTranscription}</button>}
+        {onRetry && <button type="button" className="cr-btn cr-pill" disabled={retryDisabled} aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onRetry}><Icon name="refresh" strokeWidth={1.8}/>{NAMES.retryTranscription}</button>}
       </div>}
       <div className="cr-transcript-end" data-follow-end aria-hidden="true"/>
     </div>

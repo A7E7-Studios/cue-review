@@ -4,10 +4,29 @@ import type { Platform } from '../chrome/windowApi';
 
 // Workspace shortcuts (decision 8). Ctrl/⌘+K lives in the title bar with its field.
 
+/**
+ * The letter a shortcut means. `event.key` follows the keyboard layout, so it is used when it
+ * is a Latin letter; other layouts (Cyrillic "к", Greek "ρ") fall back to the physical key.
+ */
+export function shortcutLetter(event: KeyboardEvent): string {
+  if (/^[a-z]$/i.test(event.key)) return event.key.toLowerCase();
+  const physical = /^Key([A-Z])$/.exec(event.code ?? '');
+  return physical ? physical[1].toLowerCase() : '';
+}
+
 /** Ctrl+`key` on Windows and Linux or ⌘`key` on macOS, with no other modifier. */
 export function isCommand(event: KeyboardEvent, os: Platform, key: string): boolean {
   const modifier = os === 'macos' ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
-  return modifier && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+  return modifier && !event.altKey && !event.shiftKey && shortcutLetter(event) === key;
+}
+
+/**
+ * Keys the webview would turn into a page reload, which drops the workspace mid-recording:
+ * F5 with any modifier, and Ctrl or ⌘ with R (also with Shift, on any layout).
+ */
+export function isReload(event: KeyboardEvent): boolean {
+  if (event.key === 'F5' || event.code === 'F5') return true;
+  return (event.ctrlKey || event.metaKey) && !event.altKey && (event.code === 'KeyR' || shortcutLetter(event) === 'r');
 }
 
 const TEXT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week']);
@@ -47,10 +66,15 @@ export function useShortcuts(shortcuts: Shortcuts) {
   const latest = useRef(shortcuts);
   useLayoutEffect(() => { latest.current = shortcuts; });
   useEffect(() => {
+    // Capture phase on the window runs before any field, menu or dialog handler, including
+    // ones that stop propagation, so a reload key never reaches the webview: not in a text
+    // field, not behind a dialog, not while a picker is open, not on another layout.
+    const swallowReload = (event: KeyboardEvent) => { if (isReload(event)) event.preventDefault(); };
     const onKey = (event: KeyboardEvent) => {
       const current = latest.current;
       const target = event.target;
-      if (event.defaultPrevented) return;
+      // The reload guard above prevents the default of Ctrl/⌘+R itself; that is not a component claiming the key.
+      if (event.defaultPrevented && !isReload(event)) return;
       if (event.key === 'Escape') {
         if (current.search?.current && target === current.search.current && current.onClearSearch) {
           event.preventDefault();
@@ -75,7 +99,8 @@ export function useShortcuts(shortcuts: Shortcuts) {
         current.onSeekBy(event.key === 'ArrowLeft' ? -SEEK_STEP_MS : SEEK_STEP_MS);
       }
     };
+    window.addEventListener('keydown', swallowReload, true);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', swallowReload, true); window.removeEventListener('keydown', onKey); };
   }, []);
 }

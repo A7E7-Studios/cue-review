@@ -17,18 +17,19 @@
 }
 .sidebar[data-platform='macos'] {
   margin: 8px 0 8px 8px;
-  padding: 0 10px 14px;
+  padding: 14px 10px 14px;
   border-radius: var(--radius-sidebar-panel);
   background: var(--color-panel);
   box-shadow: var(--shadow-panel);
 }
 
-/* The panel's top row is centred on y = 26, like the traffic lights and the 52px toolbar. */
 .side-header { display: flex; align-items: center; flex: none; height: 28px; margin-bottom: -10px; }
-.sidebar[data-platform='macos'] .side-header { height: 36px; margin-bottom: -6px; }
+/* macOS: the panel's top row is centred on y = 32 (8px inset, 14px padding, 20px row), on the traffic
+   lights that trafficLightPosition (24, 26) puts 26px down; New recording follows at y = 60. */
+.sidebar[data-platform='macos'] .side-header { height: 20px; margin-bottom: 0; }
 /* The lights end about 78px from the window edge; the panel starts 18px in (8px inset, 10px padding). */
 .side-traffic-lights { flex: none; width: calc(var(--size-traffic-lights-width) - 18px); height: var(--size-traffic-lights-height); }
-.side-collapse { width: 30px; height: 26px; margin-left: auto; padding: 0; display: grid; place-items: center; border-radius: var(--radius-row); color: var(--color-text-secondary); }
+.side-collapse { width: 30px; height: 26px; flex: none; margin-left: auto; padding: 0; display: grid; place-items: center; border-radius: 7px; color: var(--color-text-secondary); }
 .side-collapse:hover { background: var(--color-row-hover); color: var(--color-text); }
 
 .sidebar .side-tools { display: flex; align-items: center; gap: 6px; flex: none; min-height: 0; margin: 0; color: var(--color-text-secondary); }
@@ -43,7 +44,7 @@
   padding: 0 10px 0 12px;
   border-radius: var(--radius-button);
   background: var(--color-button);
-  box-shadow: var(--shadow-button);
+  box-shadow: var(--shadow-new-recording);
   color: var(--color-text);
   font-size: var(--font-size-body);
   font-weight: var(--font-weight-strong);
@@ -69,18 +70,20 @@
 .recording-section { position: relative; margin-bottom: 14px; border-radius: var(--radius-row); outline: 1px solid transparent; outline-offset: 2px; }
 .recording-section:last-of-type { margin-bottom: 4px; }
 
-.section-heading { display: flex; align-items: center; min-height: 0; margin: 0; color: var(--color-text-tertiary); }
-.sidebar .section-toggle { flex: 1; min-width: 0; min-height: 24px; justify-content: flex-start; gap: 4px; padding: 2px 10px; border-radius: var(--radius-row); color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
+/* Headings are 21.4px: 12px text at 1.45 over 4px, then 1px to the first row, as in the mocks. */
+.section-heading { display: flex; align-items: center; min-height: 0; margin: 0 0 1px; color: var(--color-text-tertiary); }
+.sidebar .section-toggle { flex: 1; min-width: 0; min-height: 0; justify-content: flex-start; align-items: center; gap: 4px; padding: 0 10px 4px; border-radius: var(--radius-row); color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); line-height: 1.45; }
 .sidebar .section-toggle:hover { background: transparent; color: var(--color-text-secondary); }
 .section-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The disclosure chevron shows on hover or focus, and stays visible while the section is collapsed. */
 .section-chevron { width: 10px; height: 10px; flex: none; opacity: 0; transform: rotate(90deg); transition: transform var(--motion-normal) var(--ease-out), opacity var(--motion-fast) linear; }
 .section-toggle[aria-expanded='false'] .section-chevron { transform: none; opacity: 1; }
 .section-heading:hover .section-chevron, .section-toggle:focus-visible .section-chevron { opacity: 1; }
-.recents-heading { min-height: 24px; padding: 2px 10px; font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
+.recents-heading { min-height: 0; padding: 0 10px 4px; font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); line-height: 1.45; }
 
 .section-options, .session-options { min-width: 26px; min-height: 26px; padding: 3px; color: var(--color-text-secondary); opacity: 0; }
-.sidebar .section-options { min-width: 24px; min-height: 24px; padding: 2px; }
+/* Centred on the heading text without making the heading taller. */
+.sidebar .section-options { min-width: 24px; min-height: 24px; align-self: flex-start; margin: -3px 0; padding: 2px; }
 .section-options svg, .session-options svg { width: 14px; height: 14px; }
 .section-heading:hover .section-options, .section-heading:focus-within .section-options,
 .session-row:hover .session-options, .session-row:focus-within .session-options,
@@ -90,7 +93,7 @@
 .session-row { display: flex; position: relative; align-items: center; min-height: var(--size-row); margin-bottom: 1px; border-radius: var(--radius-row); transition: background-color var(--motion-fast) linear; }
 .session-row:not(.active):hover { background: var(--color-row-hover); }
 .session-row.active { background: var(--color-row-selected); box-shadow: var(--shadow-row-selected); }
-.sidebar[data-platform='macos'] .session-row.active { background: var(--color-panel-row-selected); box-shadow: none; }
+.sidebar[data-platform='macos'] .session-row.active { --color-text-tertiary: var(--color-text-tertiary-on-selected); background: var(--color-panel-row-selected); box-shadow: none; }
 .session-row.dragging { opacity: .45; }
 .sidebar .session {
   display: flex;
@@ -114,7 +117,10 @@
 .sidebar .session.active { color: var(--color-text); font-weight: var(--font-weight-strong); }
 .sidebar .session:focus-visible { outline-offset: -2px; outline-color: var(--color-focus); }
 .session-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session small { flex: none; font-size: var(--font-size-meta); color: var(--color-text-tertiary); }
+/* Recording or processing: an 8px dot before the name (FloatV2RecordMoreWindows). No pulse. */
+.session-status-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--color-record); }
+.session-status-dot[data-status='processing'] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--color-accent); }
+.session-status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* Hover and focus make room for the options button and reveal the duration and date. */
 .session-row:hover .session, .session-row:focus-within .session { padding-right: 34px; }
 .session-meta { display: none; flex: none; font-size: var(--font-size-meta); font-weight: 400; color: var(--color-text-secondary); white-space: nowrap; }

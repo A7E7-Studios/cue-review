@@ -22,6 +22,8 @@
 }
 .cr-btn:hover:not(:disabled) { background: var(--cr-bg-hover, var(--cr-bg, transparent)); color: var(--cr-fg-hover, var(--cr-fg, inherit)); }
 .cr-btn:disabled { background: var(--cr-bg-disabled, var(--cr-bg, transparent)); color: var(--cr-fg-disabled, var(--cr-fg, inherit)); opacity: 1; cursor: default; }
+/* Busy for a moment (another action is under way): looks disabled but keeps keyboard focus. */
+.cr-btn[aria-disabled='true'], .cr-btn[aria-disabled='true']:hover { background: var(--cr-bg-disabled, var(--cr-bg, transparent)); color: var(--cr-fg-disabled, var(--cr-fg, inherit)); cursor: default; }
 .cr-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .cr-btn svg { width: 16px; height: 16px; flex-shrink: 0; pointer-events: none; }
 .cr-spacer { flex: 1; }
@@ -130,7 +132,7 @@
 .cr-speed {
   --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
   --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text));
-  height: var(--size-pill); min-width: 46px; padding: 0 12px; border-radius: var(--radius-pill);
+  height: var(--size-pill); padding: 0 12px; border-radius: var(--radius-pill);
   font-size: var(--font-size-control); font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums;
 }
 .cr-control-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-control-divider); }
@@ -154,13 +156,16 @@
 .cr-scrubber-input:focus-visible ~ .cr-scrubber-knob { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .cr-scrubber[data-disabled] .cr-scrubber-knob { box-shadow: 0 0 0 1px var(--color-control-ring); }
 
-/* Recording dock (decision 6, recording). No progress bar. */
-.cr-dock-slot { display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 0; }
+/* Recording dock (decision 6, recording). No progress bar. It keeps to one row: a long source
+   name truncates first, then the container queries below compact it step by step. */
+.cr-dock-slot { container: cr-dock / inline-size; display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 0; }
 .cr-dock {
-  max-width: 100%; box-sizing: border-box; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px;
+  max-width: 100%; box-sizing: border-box; display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 2px;
   padding: 6px; border-radius: calc(var(--size-dock-control) / 2 + 6px);
   background: var(--color-dock); color: var(--color-dock-text); box-shadow: var(--shadow-dock);
 }
+/* Engines without container queries keep the old fallback of wrapping onto a second row. */
+@supports not (container-type: inline-size) { .cr-dock { flex-wrap: wrap; } }
 .cr-dock .cr-btn:focus-visible { outline-color: var(--color-dock-text); }
 .cr-dock-timer { margin: 0; height: var(--size-dock-control); display: flex; align-items: center; gap: 10px; padding: 0 8px 0 14px; white-space: nowrap; }
 .cr-dock-live { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
@@ -173,7 +178,8 @@
 .cr-dock-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-dock-divider); }
 .cr-dock-source {
   --cr-fg: var(--color-dock-source);
-  height: var(--size-dock-control); max-width: 200px; padding: 0 12px; border-radius: var(--radius-pill); font-weight: 500; flex-shrink: 1; min-width: 0;
+  height: var(--size-dock-control); max-width: 200px; padding: 0 12px; border-radius: var(--radius-pill); font-weight: 500;
+  flex-shrink: 1; min-width: var(--size-dock-control); overflow: hidden;
 }
 .cr-dock-source > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cr-dock-source svg { width: 17px; height: 17px; }
@@ -196,6 +202,48 @@
 .cr-dock-slot[data-compact] .cr-dock-source { max-width: 132px; padding: 0 8px; }
 .cr-dock-slot[data-compact] .cr-stop { padding: 0 14px 0 12px; }
 .cr-dock-slot[data-compact] .cr-dock-caption { font-size: var(--font-size-meta); }
+
+/* Progressive compaction, measured on the take-2 dock with a microphone (the widest): it needs
+   527px with 44px controls and 469px in compact mode. Each step applies just below the width the
+   previous one needs: the source drops to an icon, then the "Take N" label goes, then Stop drops
+   to an icon (and the divider goes), then the meter goes. Hidden labels stay as visually hidden
+   text, so every control keeps its accessible name; the timer is named "Take N elapsed time". */
+.cr-dock-source, .cr-stop { position: relative; }
+@container cr-dock (max-width: 526.5px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-source { width: var(--size-dock-control); flex-shrink: 0; padding: 0; gap: 0; justify-content: center; border-radius: 50%; }
+  .cr-dock-slot:not([data-compact]) .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+@container cr-dock (max-width: 465.5px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-take { display: none; }
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-timer { padding-right: 4px; }
+}
+@container cr-dock (max-width: 416px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-stop { width: var(--size-dock-control); padding: 0; gap: 0; justify-content: center; }
+  .cr-dock-slot:not([data-compact]) .cr-stop > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-divider { display: none; }
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-meter { padding: 0 4px; }
+}
+@container cr-dock (max-width: 355.5px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-meter { display: none; }
+}
+/* The same steps for the compact recorder's 36px controls. */
+@container cr-dock (max-width: 468.5px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-source { width: var(--size-dock-control); flex-shrink: 0; padding: 0; gap: 0; justify-content: center; border-radius: 50%; }
+  .cr-dock-slot[data-compact] .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+@container cr-dock (max-width: 410.5px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-take { display: none; }
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-timer { padding-right: 4px; }
+}
+@container cr-dock (max-width: 364px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-stop { width: var(--size-dock-control); padding: 0; gap: 0; justify-content: center; }
+  .cr-dock-slot[data-compact] .cr-stop > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-divider { display: none; }
+  .cr-dock-slot[data-compact] .cr-dock .cr-meter { padding: 0 4px; }
+}
+@container cr-dock (max-width: 310px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-meter { display: none; }
+}
 
 /* Capture controls (draft) */
 .cr-capture { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }

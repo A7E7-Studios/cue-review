@@ -16,7 +16,11 @@ export interface RecordingDockViewProps extends RecordingDockProps {
   platform?: Platform;
 }
 
-/** The dark dock that replaces the playback bar while recording (decision 6). No progress bar. */
+/**
+ * The dark dock that replaces the playback bar while recording (decision 6). No progress bar.
+ * It stays on one row: as its slot narrows, workspace.css drops the source and Stop labels to
+ * icons (their names stay as visually hidden text), then the take label, then the meter. Stop is always shown.
+ */
 export function RecordingDock({ elapsedMs, take, audioLevel, sourceName, hasMicrophone, muted, onMuted, compact, onToggleCompact, stopDisabled, onStop, platform }: RecordingDockViewProps) {
   const stop = shortcut('r', platform);
   const level = Math.min(1, Math.max(0, Number.isFinite(audioLevel) ? audioLevel! : 0));
@@ -33,15 +37,15 @@ export function RecordingDock({ elapsedMs, take, audioLevel, sourceName, hasMicr
         {METER.map((height, index) => <span key={index} aria-hidden="true" data-level={index >= lit ? 'off' : index >= METER_HIGH ? 'high' : 'low'} style={{ height }}/>)}
       </span>}
       <span className="cr-dock-divider" aria-hidden="true"/>
-      <button type="button" className="cr-btn cr-dock-source" disabled title="The source is locked while recording"><Icon name="monitor" strokeWidth={1.7}/><span>{sourceName}</span></button>
+      <button type="button" className="cr-btn cr-dock-source" disabled title={`${sourceName}. The source is locked while recording.`}><Icon name="monitor" strokeWidth={1.7}/><span className="cr-dock-label">{sourceName}</span></button>
       {hasMicrophone && <button type="button" className="cr-btn cr-dock-button" aria-label={NAMES.muteMicrophone} aria-pressed={muted} title={muted ? 'Unmute microphone' : NAMES.muteMicrophone} onClick={() => onMuted(!muted)}>
         <Icon name={muted ? 'micOff' : 'mic'} strokeWidth={1.7}/>
       </button>}
       <button type="button" className="cr-btn cr-dock-button" aria-label={compact ? NAMES.expand : NAMES.compact} title={compact ? 'Restore workspace' : 'Compact recording mode'} onClick={onToggleCompact}>
         <Icon name={compact ? 'expand' : 'compact'} strokeWidth={1.7}/>
       </button>
-      <button type="button" className="cr-btn cr-stop" title={`Stop recording (${stop.label})`} aria-keyshortcuts={stop.aria} disabled={stopDisabled} onClick={onStop}>
-        <span className="cr-stop-square" aria-hidden="true"/>{NAMES.stop}
+      <button type="button" className="cr-btn cr-stop" title={`Stop recording (${stop.label})`} aria-keyshortcuts={stop.aria} aria-disabled={stopDisabled || undefined} onClick={stopDisabled ? undefined : onStop}>
+        <span className="cr-stop-square" aria-hidden="true"/><span className="cr-dock-label">{NAMES.stop}</span>
       </button>
     </div>
     {take >= 2 && <p className="cr-dock-caption">Adding to this session. Stop to process take {take} on this device.</p>}
