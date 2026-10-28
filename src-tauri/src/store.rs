@@ -398,18 +398,31 @@ impl Store {
         let _lock = self.lock_session(&s.id)?;
         write_json(&self.session_dir(&s.id)?.join("session.json"), s)
     }
+    /// Every readable session, newest first, optionally only one section's.
+    /// A folder or `session.json` that cannot be read (torn by a crash, or
+    /// edited by hand) is logged and left out, so one damaged recording never
+    /// hides the rest of the library.
     pub fn sessions(&self, project: Option<&str>) -> Result<Vec<Session>, String> {
         if let Some(id) = project {
             self.project(id)?;
         }
         let mut entries = Vec::new();
         for entry in fs::read_dir(self.root.join("sessions")).map_err(|e| e.to_string())? {
-            let path = entry
-                .map_err(|e| e.to_string())?
-                .path()
-                .join("session.json");
+            let path = match entry {
+                Ok(entry) => entry.path().join("session.json"),
+                Err(error) => {
+                    eprintln!("A recording folder could not be listed: {error}");
+                    continue;
+                }
+            };
             if path.is_file() {
-                let session: Session = read_json(&path)?;
+                let session: Session = match read_json(&path) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        eprintln!("Skipped {}: {error}", path.display());
+                        continue;
+                    }
+                };
                 if project.is_none_or(|id| session.project_id.as_deref() == Some(id)) {
                     entries.push(session);
                 }
@@ -566,9 +579,18 @@ impl Store {
     /// [`crate::takes::recover`], which repairs each take on its own.
     ///
     /// A session that cannot be read or repaired is skipped, so one damaged
-    /// recording never keeps the app from starting. Returns one message per
-    /// skipped session; only an unreadable sessions folder is an error.
+    /// recording never keeps the app from starting. A skipped session that
+    /// was still recording or processing is marked `error` with a message
+    /// the app shows, so it can be retried or deleted rather than looking
+    /// busy forever. Returns one message per skipped session; only an
+    /// unreadable sessions folder is an error.
     pub fn recover_interrupted(&self) -> Result<Vec<String>, String> {
+        self.recover_interrupted_with(Self::recover_one)
+    }
+    fn recover_interrupted_with(
+        &self,
+        recover: impl Fn(&Self, &Session) -> Result<(), String>,
+    ) -> Result<Vec<String>, String> {
         let mut skipped = Vec::new();
         for entry in fs::read_dir(self.root.join("sessions")).map_err(|e| e.to_string())? {
             let entry = match entry {
@@ -582,17 +604,40 @@ impl Store {
             if !file.is_file() {
                 continue;
             }
-            if let Err(error) = self.recover_one(&file) {
-                skipped.push(format!(
-                    "Recording {} was not recovered: {error}",
-                    entry.file_name().to_string_lossy()
-                ));
+            let folder = entry.file_name().to_string_lossy().into_owned();
+            let listed: Session = match read_json(&file) {
+                Ok(listed) => listed,
+                Err(error) => {
+                    skipped.push(format!("Recording {folder} was not recovered: {error}"));
+                    continue;
+                }
+            };
+            let Err(error) = recover(self, &listed) else {
+                continue;
+            };
+            let mut problem = format!("Recording {folder} was not recovered: {error}");
+            if matches!(listed.status.as_str(), "recording" | "processing") {
+                if let Err(marking) = self.mark_unrecovered(&listed.id, &error) {
+                    problem.push_str(&format!(" It could not be marked as failed: {marking}"));
+                }
             }
+            skipped.push(problem);
         }
         Ok(skipped)
     }
-    fn recover_one(&self, file: &Path) -> Result<(), String> {
-        let listed: Session = read_json(file)?;
+    /// Settles a session that startup recovery could not repair, so the app
+    /// offers Retry and Delete for it. Its files stay as they are.
+    fn mark_unrecovered(&self, id: &str, cause: &str) -> Result<Session, String> {
+        self.update_session(id, |session| {
+            session.status = "error".into();
+            session.error = Some(format!(
+                "The app closed before this recording finished, and CueReview could not repair it when it started again: {}. Its files are kept in the session folder; retry, or delete the recording.",
+                cause.trim_end_matches('.')
+            ));
+            Ok(())
+        })
+    }
+    fn recover_one(&self, listed: &Session) -> Result<(), String> {
         if !listed.takes.is_empty() {
             return crate::takes::recover(self, &listed.id);
         }
@@ -966,6 +1011,86 @@ mod tests {
         assert_eq!(store.session(&interrupted.id).unwrap().status, "error");
         assert_eq!(
             fs::read(folder.join("session.json")).unwrap(),
+            b"{\"id\": \"torn"
+        );
+    }
+    #[test]
+    fn recovery_that_fails_marks_a_busy_session_failed_so_it_can_be_retried_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let recording = store.create_session(None, None, &video_only()).unwrap();
+        let mut processing = store.create_session(None, None, &video_only()).unwrap();
+        processing.status = "processing".into();
+        store.save_session(&processing).unwrap();
+        let ready = ready_session(&store, None);
+        let ready_file = store.session_dir(&ready.id).unwrap().join("session.json");
+        let ready_before = fs::read(&ready_file).unwrap();
+        let repaired = store.create_session(None, None, &video_only()).unwrap();
+        let failing = [&recording.id, &processing.id, &ready.id];
+        let skipped = store
+            .recover_interrupted_with(|store, listed| {
+                if failing.contains(&&listed.id) {
+                    Err("The session lock is held by another program.".into())
+                } else {
+                    Store::recover_one(store, listed)
+                }
+            })
+            .unwrap();
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        for id in failing {
+            assert!(
+                skipped.iter().any(|problem| problem.contains(id.as_str())
+                    && problem.contains("held by another program")),
+                "{id}: {skipped:?}"
+            );
+        }
+        for busy in [&recording.id, &processing.id] {
+            let session = store.session(busy).unwrap();
+            assert_eq!(session.status, "error");
+            assert_eq!(
+                session.error.as_deref(),
+                Some("The app closed before this recording finished, and CueReview could not repair it when it started again: The session lock is held by another program. Its files are kept in the session folder; retry, or delete the recording.")
+            );
+        }
+        // A settled session keeps its state; the others recover as usual.
+        assert_eq!(fs::read(&ready_file).unwrap(), ready_before);
+        let repaired = store.session(&repaired.id).unwrap();
+        assert_eq!(repaired.status, "error");
+        assert!(repaired.error.unwrap().contains("retry transcription"));
+        // Marked sessions can be deleted now.
+        store.delete_session(&recording.id).unwrap();
+    }
+    #[test]
+    fn listing_skips_a_torn_session_and_lists_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let project = store.create_project("Section").unwrap();
+        let kept = ready_session(&store, Some(&project.id));
+        let other = ready_session(&store, None);
+        for (name, bytes) in [
+            ("torn", &b"{\"id\": \"torn"[..]),
+            ("empty", &b""[..]),
+            ("not-a-session", &b"[1, 2, 3]"[..]),
+        ] {
+            let folder = store.root.join("sessions").join(name);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("session.json"), bytes).unwrap();
+        }
+        let mut listed: Vec<_> = store
+            .sessions(None)
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+        listed.sort();
+        let mut expected = vec![kept.id.clone(), other.id];
+        expected.sort();
+        assert_eq!(listed, expected);
+        let section = store.sessions(Some(&project.id)).unwrap();
+        assert_eq!(section.len(), 1);
+        assert_eq!(section[0].id, kept.id);
+        assert_eq!(
+            fs::read(store.root.join("sessions/torn/session.json")).unwrap(),
             b"{\"id\": \"torn"
         );
     }

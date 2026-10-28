@@ -827,6 +827,8 @@ describe('record more', () => {
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('button', { name: NAMES.copyForAgent })).toBeDisabled();
     expect(screen.getByRole('button', { name: NAMES.newRecording })).toBeDisabled();
+    // Sections cannot change while recording, so New section is off too (a deliberate deviation from the mock).
+    expect(screen.getByRole('button', { name: NAMES.newSection })).toBeDisabled();
     expect(transcriptPane().getByText('Take 2 · recording')).toBeVisible();
     expect(screen.getByText('Adding to this session. Stop to process take 2 on this device.')).toBeVisible();
 
@@ -1007,6 +1009,27 @@ describe('record more', () => {
     await open(user); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
+  it('keeps focus on Record more while its take starts and after a refusal', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+    let refuse!: (reason: string) => void;
+    backend.recordMore.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    const user = await review();
+    const more = screen.getByRole('button', { name: NAMES.recordMore });
+    more.focus(); await user.keyboard('{Enter}');
+    // The video is unloaded meanwhile, but the pill is only busy: it stays focusable and ignores activation.
+    expect(document.querySelector('video')).toBeNull();
+    expect(more).toBeEnabled();
+    expect(more).toHaveAttribute('aria-disabled', 'true');
+    expect(more).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(backend.recordMore).toHaveBeenCalledOnce();
+    await act(async () => refuse(SOURCE_GONE));
+    expect(await within(screen.getByRole('group', { name: NAMES.playback })).findByRole('alert')).toHaveTextContent(SOURCE_GONE);
+    expect(more).not.toHaveAttribute('aria-disabled');
+    expect(more).toHaveFocus();
+    expect(more).toHaveAccessibleDescription(SOURCE_GONE);
+    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
+  });
 });
 
 describe('review handoff', () => {
@@ -1070,6 +1093,23 @@ describe('review handoff', () => {
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeDisabled();
     sessions = [newSession()]; transcript = { segments: [{ startMs: 0, endMs: 1000, text: 'Restored', words: [{ text: 'Restored', startMs: 0, endMs: 1000 }] }] }; status = { state: 'idle' };
     await poll(); expect(await screen.findByRole('button', { name: 'Seek to Restored at 0:00' })).toBeVisible();
+  });
+  it('keeps Retry off while another recording transcribes, because the runtime takes one job at a time', async () => {
+    sessions = [{ ...newSession(), status: 'error', error: 'Speech model not found' }, { ...newSession('s2'), projectId: null, name: 'Second recording', status: 'processing' }];
+    transcript = { segments: [], error: 'Speech model not found' };
+    status = { state: 'processing', sessionId: 's2' };
+    const user = await loaded(); await open(user);
+    expect(await transcriptPane().findByText('Speech model not found')).toBeVisible();
+    const retry = transcriptPane().getByRole('button', { name: NAMES.retryTranscription });
+    expect(retry).toBeDisabled();
+    await user.click(retry);
+    expect(backend.retry).not.toHaveBeenCalled();
+    // Once that job ends, Retry works again.
+    sessions = sessions.map(item => item.id === 's2' ? { ...item, status: 'ready' } : item); status = { state: 'idle' };
+    await poll();
+    await waitFor(() => expect(retry).toBeEnabled());
+    await user.click(retry);
+    expect(backend.retry).toHaveBeenCalledWith('s1');
   });
 });
 

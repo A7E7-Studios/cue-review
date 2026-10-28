@@ -269,7 +269,8 @@ pub const SOURCE_GONE: &str = "The original window/display for this recording is
 /// Record more captures the session's source again only while it is what
 /// was first recorded. `current` is what `session.source_id` names now (see
 /// [`crate::capture::source_identity`]): a window must still belong to the
-/// same process and window class, and a display must be the same device.
+/// same process image and window class, and to the same process (id and
+/// creation time) when those were stored; a display must be the same device.
 /// Titles and display bounds may change between takes (a browser switches
 /// tabs, a display changes resolution, which takes normalize).
 /// A session recorded before identities were stored may continue a display
@@ -298,14 +299,28 @@ fn same_source(stored: &SourceIdentity, current: &SourceIdentity) -> bool {
             SourceIdentity::Window {
                 process: a_process,
                 class: a_class,
+                pid: a_pid,
+                process_created_ms: a_created,
                 ..
             },
             SourceIdentity::Window {
                 process: b_process,
                 class: b_class,
+                pid: b_pid,
+                process_created_ms: b_created,
                 ..
             },
-        ) => a_process.eq_ignore_ascii_case(b_process) && a_class == b_class,
+        ) => {
+            // A window cannot outlive its process, so the window first
+            // recorded still has that process's id and creation time. They
+            // tell apart windows of one image and class (ApplicationFrameHost,
+            // Explorer, a browser) once the handle names another window.
+            // Identities stored without them compare image and class only.
+            a_process.eq_ignore_ascii_case(b_process)
+                && a_class == b_class
+                && a_pid.is_none_or(|pid| *b_pid == Some(pid))
+                && a_created.is_none_or(|created| *b_created == Some(created))
+        }
         (SourceIdentity::Display { device: a, .. }, SourceIdentity::Display { device: b, .. }) => {
             a.eq_ignore_ascii_case(b)
         }
@@ -908,7 +923,16 @@ fn remove_take_video(dir: &Path, index: u32) {
 /// it is deleted. The session settles, to ready unless another take needs
 /// work, so Record more and transcription work again, and the transcript
 /// gets the take dividers of the takes left on the timeline.
+///
+/// A swapping take that `video.mp4` already contains (the file was replaced,
+/// then something failed before the bookkeeping) is refused: dropping it
+/// would leave the timeline shorter than the video. Retry finishes it, as
+/// [`swap_media`] does for [`SwapState::Applied`]. When `video.mp4` cannot be
+/// probed, nothing shows the take is in it, so the discard goes ahead.
 pub fn discard(store: &Store, id: &str, index: u32) -> Result<Session, String> {
+    discard_with(store, id, index, &Ffmpeg)
+}
+fn discard_with(store: &Store, id: &str, index: u32, tools: &dyn Tools) -> Result<Session, String> {
     if index < 2 {
         return Err("Take 1 is the original recording and cannot be discarded.".into());
     }
@@ -931,6 +955,14 @@ pub fn discard(store: &Store, id: &str, index: u32) -> Result<Session, String> {
                 ));
             }
             _ => return Err(format!("Take {index} is still being recorded.")),
+        }
+        let applied = tools.probe(&dir.join(ROOT_VIDEO)).is_ok_and(|media| {
+            swap_state(media.duration_ms, take.offset_ms, take.duration_ms) == SwapState::Applied
+        });
+        if applied {
+            return Err(format!(
+                "Take {index} is already in video.mp4, so it cannot be discarded. Choose Retry to finish adding it."
+            ));
         }
         take.status = TakeStatus::Interrupted;
         settle(session, None);
@@ -2702,7 +2734,7 @@ mod tests {
         store.save_transcript(&id, &stale).unwrap();
         assert!(check_can_record_more(&store.session(&id).unwrap()).is_err());
 
-        let session = discard(&store, &id, 3).unwrap();
+        let session = discard_with(&store, &id, 3, &Fake::default()).unwrap();
         assert_eq!(session.takes[2].status, TakeStatus::Interrupted);
         assert_eq!(
             (session.status.as_str(), session.error.as_deref()),
@@ -2759,14 +2791,80 @@ mod tests {
     }
 
     #[test]
+    fn discarding_refuses_a_take_that_video_mp4_already_contains() {
+        let (_dir, store) = store();
+        let (id, dir) = three_takes(&store);
+        store
+            .update_session(&id, |s| {
+                s.status = "error".into();
+                s.error = Some("ffprobe could not read video.mp4 after adding take 3.".into());
+                Ok(())
+            })
+            .unwrap();
+        // The replace went through: video.mp4 lasts takes 1–3 (4.5 s), but the
+        // session still has take 3 waiting.
+        fs::write(dir.join(ROOT_VIDEO), "4500").unwrap();
+        let transcript = Transcript {
+            segments: vec![segment("segment-0", 100, 900)],
+            ..Default::default()
+        };
+        store.save_transcript(&id, &transcript).unwrap();
+        let before = fs::read(dir.join("session.json")).unwrap();
+        let transcript_before = fs::read(dir.join("transcript.json")).unwrap();
+
+        let refused = discard_with(&store, &id, 3, &Fake::default()).unwrap_err();
+        assert_eq!(
+            refused,
+            "Take 3 is already in video.mp4, so it cannot be discarded. Choose Retry to finish adding it."
+        );
+        assert_eq!(fs::read(dir.join("session.json")).unwrap(), before);
+        assert_eq!(
+            fs::read(dir.join("transcript.json")).unwrap(),
+            transcript_before
+        );
+        assert!(take_dir(&dir, 3).join(TAKE_VIDEO).is_file());
+
+        // Retry's swap sees the same state and only finishes the bookkeeping.
+        let fake = Fake::default();
+        let finished = complete_swap_with(&store, &id, 3, &fake, &[]).unwrap();
+        assert_eq!(finished.duration_ms, 4500);
+        assert_eq!(finished.takes[2].status, TakeStatus::Transcribing);
+        assert!(fake.jobs.lock().unwrap().is_empty());
+        assert!(!take_dir(&dir, 3).join(TAKE_VIDEO).exists());
+
+        // A video that cannot be probed shows nothing either way: the
+        // discard goes ahead.
+        let (id, dir) = three_takes(&store);
+        store
+            .update_session(&id, |s| {
+                s.status = "error".into();
+                Ok(())
+            })
+            .unwrap();
+        fs::write(dir.join(ROOT_VIDEO), "not media").unwrap();
+        let discarded = discard_with(&store, &id, 3, &Fake::default()).unwrap();
+        assert_eq!(discarded.takes[2].status, TakeStatus::Interrupted);
+    }
+
+    #[test]
     fn record_more_continues_only_the_source_first_recorded() {
         let (_dir, store) = store();
         let mut session = ready(&store, 2000);
-        let window = SourceIdentity::Window {
-            title: "Review — Notes".into(),
-            process: "notes.exe".into(),
-            class: "NotesWindow".into(),
+        let window_of = |title: &str, process: &str, pid: Option<u32>, created: Option<u64>| {
+            SourceIdentity::Window {
+                title: title.into(),
+                process: process.into(),
+                class: "ApplicationFrameWindow".into(),
+                pid,
+                process_created_ms: created,
+            }
         };
+        let window = window_of(
+            "Review — Notes",
+            "ApplicationFrameHost.exe",
+            Some(4100),
+            Some(1_000),
+        );
         let display = SourceIdentity::Display {
             device: r"\\.\DISPLAY1".into(),
             left: 0,
@@ -2774,11 +2872,12 @@ mod tests {
             right: 1920,
             bottom: 1080,
         };
-        let renamed = SourceIdentity::Window {
-            title: "Another document".into(),
-            process: "notes.exe".into(),
-            class: "NotesWindow".into(),
-        };
+        let renamed = window_of(
+            "Another document",
+            "applicationframehost.exe",
+            Some(4100),
+            Some(1_000),
+        );
         let resized = SourceIdentity::Display {
             device: r"\\.\DISPLAY1".into(),
             left: 0,
@@ -2786,11 +2885,31 @@ mod tests {
             right: 2560,
             bottom: 1440,
         };
-        let other_app = SourceIdentity::Window {
-            title: "Review — Notes".into(),
-            process: "chat.exe".into(),
-            class: "NotesWindow".into(),
-        };
+        let other_app = window_of("Review — Notes", "chat.exe", Some(4100), Some(1_000));
+        // The handle now names another window of the same image and class:
+        // another process, or the same id reused by a process created later.
+        let other_process = window_of(
+            "Settings",
+            "ApplicationFrameHost.exe",
+            Some(5200),
+            Some(1_000),
+        );
+        let reused_pid = window_of(
+            "Review — Notes",
+            "ApplicationFrameHost.exe",
+            Some(4100),
+            Some(9_000),
+        );
+        let unreadable = window_of("Review — Notes", "ApplicationFrameHost.exe", None, None);
+        // Stored before process ids and creation times were kept, or when
+        // the process could not be opened at first capture.
+        let legacy = window_of("Review — Notes", "ApplicationFrameHost.exe", None, None);
+        let pid_only = window_of(
+            "Review — Notes",
+            "ApplicationFrameHost.exe",
+            Some(4100),
+            None,
+        );
         let other_display = SourceIdentity::Display {
             device: r"\\.\DISPLAY2".into(),
             left: 0,
@@ -2808,6 +2927,15 @@ mod tests {
             // Gone, or the id now names something else.
             ("window:4242", Some(&window), None, false),
             ("window:4242", Some(&window), Some(&other_app), false),
+            ("window:4242", Some(&window), Some(&other_process), false),
+            ("window:4242", Some(&window), Some(&reused_pid), false),
+            ("window:4242", Some(&window), Some(&unreadable), false),
+            ("window:4242", Some(&pid_only), Some(&window), true),
+            ("window:4242", Some(&pid_only), Some(&other_process), false),
+            // Stored with process image and class only: those decide.
+            ("window:4242", Some(&legacy), Some(&window), true),
+            ("window:4242", Some(&legacy), Some(&other_process), true),
+            ("window:4242", Some(&legacy), Some(&other_app), false),
             ("monitor:1", Some(&display), None, false),
             ("monitor:1", Some(&display), Some(&other_display), false),
             ("monitor:1", Some(&window), Some(&display), false),

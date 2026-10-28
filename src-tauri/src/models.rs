@@ -49,6 +49,20 @@ pub enum SourceIdentity {
         process: String,
         /// Window class name.
         class: String,
+        /// Id of the owning process. `None` in sessions recorded before it
+        /// was stored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
+        /// When the owning process was created, in ms since the Unix epoch
+        /// (`GetProcessTimes`). With `pid` it tells the process apart from a
+        /// later one that reuses its id, as after a restart. `None` in older
+        /// sessions and when the process could not be opened.
+        #[serde(
+            default,
+            rename = "processCreatedMs",
+            skip_serializing_if = "Option::is_none"
+        )]
+        process_created_ms: Option<u64>,
     },
     Display {
         /// GDI device name, for example `"\\\\.\\DISPLAY1"`.
@@ -338,8 +352,21 @@ mod tests {
                     title: "Review — Notes".into(),
                     process: "notes.exe".into(),
                     class: "NotesWindow".into(),
+                    pid: None,
+                    process_created_ms: None,
                 },
                 json!({"kind":"window","title":"Review — Notes","process":"notes.exe","class":"NotesWindow"}),
+            ),
+            (
+                SourceIdentity::Window {
+                    title: "Review — Notes".into(),
+                    process: "notes.exe".into(),
+                    class: "NotesWindow".into(),
+                    pid: Some(4242),
+                    process_created_ms: Some(1_793_000_000_123),
+                },
+                json!({"kind":"window","title":"Review — Notes","process":"notes.exe","class":"NotesWindow",
+                    "pid":4242,"processCreatedMs":1_793_000_000_123_u64}),
             ),
             (
                 SourceIdentity::Display {

@@ -901,8 +901,10 @@ pub fn run() {
             deps::set_resource_dir(app.path().resource_dir()?);
             let store = Store::open(store::data_root()).map_err(std::io::Error::other)?;
             let ownership = store.acquire_ownership().map_err(std::io::Error::other)?;
-            // A recording that cannot be recovered is logged and left as it
-            // is; it never keeps the app from starting.
+            // A recording that cannot be recovered never keeps the app from
+            // starting. One that was still recording or processing is marked
+            // as failed with a message the app shows, so it can be retried or
+            // deleted; every skipped one is also logged here.
             match store.recover_interrupted() {
                 Ok(skipped) => skipped.iter().for_each(|problem| eprintln!("{problem}")),
                 Err(error) => eprintln!("Interrupted recordings were not checked: {error}"),
@@ -1240,6 +1242,8 @@ mod orchestration_tests {
             title: "Review".into(),
             process: "notes.exe".into(),
             class: "NotesWindow".into(),
+            pid: Some(4242),
+            process_created_ms: Some(1_793_000_000_000),
         };
         let display = SourceIdentity::Display {
             device: r"\\.\DISPLAY99".into(),

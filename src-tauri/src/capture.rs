@@ -818,13 +818,35 @@ mod identity {
     use std::ffi::c_void;
     use windows_capture::{monitor::Monitor, window::Window};
 
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
     #[link(name = "user32")]
     extern "system" {
         fn GetClassNameW(window: *mut c_void, name: *mut u16, length: i32) -> i32;
         fn SetThreadDpiAwarenessContext(context: *mut c_void) -> *mut c_void;
+        fn GetWindowThreadProcessId(window: *mut c_void, process_id: *mut u32) -> u32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut c_void;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
     }
     /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
     const PER_MONITOR_AWARE_V2: isize = -4;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    /// 1970-01-01 as a `FILETIME`: 100 ns intervals since 1601-01-01.
+    const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
     /// Runs `read` with physical-pixel coordinates on this thread, then
     /// restores the thread's DPI awareness, so the app and `cue.exe` (which
@@ -842,6 +864,33 @@ mod identity {
         let mut name = [0u16; 256];
         let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
         String::from_utf16_lossy(&name[..length.clamp(0, name.len() as i32) as usize])
+    }
+
+    /// The process that owns `window`: its id, and when it was created in ms
+    /// since the Unix epoch (`None` when the process cannot be opened).
+    fn owner(window: *mut c_void) -> (Option<u32>, Option<u64>) {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, &mut pid) };
+        if pid == 0 {
+            return (None, None);
+        }
+        (Some(pid), process_created_ms(pid))
+    }
+    fn process_created_ms(pid: u32) -> Option<u64> {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return None;
+        }
+        let [mut creation, mut exit, mut kernel, mut user] = [FileTime::default(); 4];
+        let read =
+            unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
+        unsafe { CloseHandle(process) };
+        if read == 0 {
+            return None;
+        }
+        let FileTime { low, high } = creation;
+        let ticks = (u64::from(high) << 32) | u64::from(low);
+        Some(ticks.checked_sub(UNIX_EPOCH_FILETIME)? / 10_000)
     }
 
     pub(super) fn read(id: &str) -> Option<SourceIdentity> {
@@ -864,10 +913,13 @@ mod identity {
             .ok()?
             .into_iter()
             .find(|window| window.as_raw_hwnd() as usize == handle)?;
+        let (pid, process_created_ms) = owner(window.as_raw_hwnd());
         Some(SourceIdentity::Window {
             title: window.title().unwrap_or_default(),
             process: window.process_name().unwrap_or_default(),
             class: class_name(window.as_raw_hwnd()),
+            pid,
+            process_created_ms,
         })
     }
 }
@@ -2547,9 +2599,33 @@ mod tests {
             }
             if let Some(window) = Window::enumerate().unwrap().first() {
                 let id = format!("window:{}", window.as_raw_hwnd() as usize);
-                if let Some(SourceIdentity::Window { process, class, .. }) = source_identity(&id) {
+                if let Some(SourceIdentity::Window {
+                    process,
+                    class,
+                    pid,
+                    process_created_ms,
+                    ..
+                }) = source_identity(&id)
+                {
                     assert!(!class.is_empty());
                     assert_eq!(process, window.process_name().unwrap_or_default());
+                    assert_eq!(pid, window.process_id().ok());
+                    // Read again, the same process has the same creation time,
+                    // which lies between 2020 and now.
+                    if let Some(SourceIdentity::Window {
+                        process_created_ms: again,
+                        ..
+                    }) = source_identity(&id)
+                    {
+                        assert_eq!(again, process_created_ms);
+                    }
+                    if let Some(created) = process_created_ms {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        assert!((1_577_836_800_000..=now).contains(&created), "{created}");
+                    }
                 }
             }
         }

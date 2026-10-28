@@ -129,7 +129,12 @@ export default function App({ platform: requested }: AppProps = {}) {
   const videoSrc = session && !draft && !mediaHeld ? sessionVideoUrl(session, videoUrl) : undefined;
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
-  const canRecordMore = !!session && !draft && settled(session) && !!videoSrc && devicesReady;
+  /**
+   * Record more itself unloads the video while its take starts. That is a busy moment for the pill
+   * (aria-disabled), not a reason to disable it, so focus stays on it through a refusal.
+   */
+  const startingTake = busy && !!session && heldMedia === session.id && !takeInFlight(session);
+  const canRecordMore = !!session && !draft && settled(session) && (!!videoSrc || startingTake) && devicesReady;
   useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || !!discarding || settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
@@ -479,7 +484,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     } finally { releasing.current = false; setBusy(false); }
   };
   const retry = async () => {
-    if (!session || busy) return;
+    // The runtime transcribes one job at a time, whichever recording it belongs to.
+    if (!session || busy || captureBlocked) return;
     setBusy(true);
     // Retry may finish appending a take to video.mp4 first.
     const swapping = takeSwapping(session);
@@ -652,7 +658,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       <TranscriptPane mode={mode} transcript={shownTranscript} timeMs={recording ? (status.takeOffsetMs ?? 0) + (status.elapsedMs || 0) : time} onSeek={seek}
         status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
-        error={transcriptError} onRetry={() => void retry()} retryBusy={busy}
+        error={transcriptError} onRetry={() => void retry()} retryDisabled={captureBlocked} retryBusy={busy}
         discardTake={stuckTake?.index} onDiscardTake={stuckTake && session ? () => { setDialogError(''); setDiscarding({ id: session.id, index: stuckTake.index }); } : undefined}/>
     </div>}
   </main>;
