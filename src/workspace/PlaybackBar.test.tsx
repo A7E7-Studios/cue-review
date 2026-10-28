@@ -40,6 +40,26 @@ describe('PlaybackBar', () => {
     expect(more).toHaveAttribute('aria-keyshortcuts', 'Meta+R');
     expect(more.title).toContain('⌘R');
   });
+  it('shows why Record more failed beside the pill, with New recording and Dismiss', async () => {
+    const user = userEvent.setup();
+    const handlers = props({ recordMoreError: 'The original window/display for this recording is no longer available.', onNewRecording: vi.fn(), onDismissRecordMoreError: vi.fn() });
+    const { rerender } = render(<PlaybackBar {...handlers} platform="windows"/>);
+    const alert = within(screen.getByRole('group', { name: 'Playback' })).getByRole('alert');
+    expect(alert).toHaveTextContent('no longer available');
+    expect(screen.getByRole('button', { name: 'Record more' })).toHaveAccessibleDescription('The original window/display for this recording is no longer available.');
+    await user.click(within(alert).getByRole('button', { name: 'New recording' }));
+    await user.click(within(alert).getByRole('button', { name: 'Dismiss error' }));
+    expect(handlers.onNewRecording).toHaveBeenCalledTimes(1);
+    expect(handlers.onDismissRecordMoreError).toHaveBeenCalledTimes(1);
+    // Busy for a moment: New recording stays focusable but does nothing.
+    rerender(<PlaybackBar {...handlers} recordMoreBusy platform="windows"/>);
+    const start = within(alert).getByRole('button', { name: 'New recording' });
+    expect(start).toHaveAttribute('aria-disabled', 'true');
+    await user.click(start);
+    expect(handlers.onNewRecording).toHaveBeenCalledTimes(1);
+    rerender(<PlaybackBar {...handlers} recordMoreError={undefined} platform="windows"/>);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
 });
 
 describe('Scrubber', () => {

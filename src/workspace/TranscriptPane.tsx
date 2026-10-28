@@ -110,7 +110,7 @@ function visibleIn(element: Element, box: Element) {
 }
 
 /** The transcript column (decisions 4, 10 and 12). */
-export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false }: TranscriptPaneProps) {
+export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false, discardTake, onDiscardTake }: TranscriptPaneProps) {
   const recording = mode === 'recording';
   const segments = transcript.segments;
   const liveIndex = recording ? liveTake?.index ?? 1 : undefined;
@@ -262,7 +262,10 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
       {liveError && <p className="cr-transcript-note" role="status"><Icon name="warning" strokeWidth={1.8}/>{liveError}</p>}
       {error && <div className="cr-transcript-error">
         <p><Icon name="warning" strokeWidth={1.8}/>{error}</p>
-        {onRetry && <button type="button" className="cr-btn cr-pill" disabled={retryDisabled} aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onRetry}><Icon name="refresh" strokeWidth={1.8}/>{NAMES.retryTranscription}</button>}
+        {(onRetry || (discardTake && onDiscardTake)) && <div className="cr-transcript-error-actions">
+          {onRetry && <button type="button" className="cr-btn cr-pill" disabled={retryDisabled} aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onRetry}><Icon name="refresh" strokeWidth={1.8}/>{NAMES.retryTranscription}</button>}
+          {discardTake && onDiscardTake && <button type="button" className="cr-btn cr-pill" aria-haspopup="dialog" aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onDiscardTake}><Icon name="close" strokeWidth={1.8}/>{NAMES.discardTake(discardTake)}</button>}
+        </div>}
       </div>}
       <div className="cr-transcript-end" data-follow-end aria-hidden="true"/>
     </div>

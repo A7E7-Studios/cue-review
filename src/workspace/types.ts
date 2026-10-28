@@ -122,9 +122,14 @@ export interface PlaybackBarProps {
   /** Labelled NAMES.focusVideo or NAMES.restoreTranscript. */
   onToggleFocus: () => void;
   recordMoreDisabled: boolean;
-  /** Another action is under way: Record more stays focusable but inert (aria-disabled). */
+  /** Another action is under way: Record more and the error's actions stay focusable but inert (aria-disabled). */
   recordMoreBusy?: boolean;
   onRecordMore: () => void;
+  /** Why Record more failed, shown beside the pill as an alert, with NAMES.newRecording and NAMES.dismissError. */
+  recordMoreError?: string;
+  /** Starts a new recording instead, for a source that is gone. */
+  onNewRecording?: () => void;
+  onDismissRecordMoreError?: () => void;
 }
 
 export type CaptureMenu = 'source' | 'microphone';
@@ -206,8 +211,11 @@ export interface TranscriptPaneProps {
   error?: string;
   onRetry?: () => void;
   retryDisabled?: boolean;
-  /** Another action is under way: Retry stays focusable but inert (aria-disabled). */
+  /** Another action is under way: Retry and Discard take stay focusable but inert (aria-disabled). */
   retryBusy?: boolean;
+  /** A take stuck being added to video.mp4: the error also offers NAMES.discardTake(discardTake). */
+  discardTake?: number;
+  onDiscardTake?: () => void;
 }
 
 /** Settings → Appearance, capability statuses, technical details and the vocabulary (decision 14, C5). */
@@ -316,6 +324,7 @@ export const NAMES = {
   seekToWord: (word: string, time: string) => `Seek to ${word} at ${time}`,
   returnToPlayback: 'Return to playback',
   retryTranscription: 'Retry transcription',
+  discardTake: (take: number) => `Discard take ${take}`,
 
   // Dialogs and notices
   settingsDialog: 'Settings',
@@ -333,6 +342,7 @@ export const NAMES = {
   recordingNameDialog: 'Recording name',
   deleteRecordingDialog: 'Delete recording?',
   deleteRecording: 'Delete recording',
+  discardTakeDialog: (take: number) => `Discard take ${take}?`,
   dismissError: 'Dismiss error',
 } as const;
 

@@ -129,6 +129,7 @@
 .cr-transcript-error p { margin: 0; display: flex; gap: 8px; color: var(--color-status-recording-text); font-size: var(--font-size-body); line-height: 1.5; overflow-wrap: anywhere; }
 .cr-transcript-error p svg { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; }
 .cr-transcript-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); box-shadow: var(--shadow-button); }
+.cr-transcript-error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .cr-transcript-end { flex-shrink: 0; height: 1px; margin-top: -1px; }
 
 /* Shown after the reader scrolls away from the playing row. */

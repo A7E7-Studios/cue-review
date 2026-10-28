@@ -61,6 +61,10 @@ export const twoTakeTranscript: Transcript = {
     line('t2-segment-2', 97000, 104000, 'And the finished toast could link straight to the file.'),
   ],
 };
+/** The backend's refusal when Record more's source is gone (src-tauri/src/takes.rs, SOURCE_GONE). */
+export const SOURCE_GONE = 'The original window/display for this recording is no longer available. Start a new recording to capture another source.';
+/** A swap that keeps failing: the session error once Retry could not add take 2 (takes.rs, swap_media). */
+export const stuckTakeError = "video.mp4 lasts 81200 ms, which matches neither the recording before take 2 (80000 ms) nor the recording with it (134000 ms). The take's files are kept in takes/2; discard the take to keep using the recording.";
 // The same session while take 2 records: its live tail, timed on the combined timeline.
 export const takeTwoLiveTranscript: Transcript = {
   status: 'provisional',

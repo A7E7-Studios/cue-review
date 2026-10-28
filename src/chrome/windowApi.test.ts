@@ -31,6 +31,7 @@ describe('windowApi', () => {
     await windowApi.toggleMaximize();
     await windowApi.close();
     await windowApi.setSize({ width: 520, height: 320 });
+    await windowApi.setBackgroundColor('#121215');
     expect(await windowApi.isMaximized()).toBe(false);
     expect(await windowApi.scaleFactor()).toBe(window.devicePixelRatio);
     (await windowApi.onResized(() => {}))();

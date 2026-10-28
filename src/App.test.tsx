@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import App from './App';
 import type { AppProps } from './App';
 import type { Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
+import { SOURCE_GONE } from './stories/fixtures';
 import { NAMES, RETIRED_NAMES } from './workspace/types';
 
 const mocks = vi.hoisted(() => ({
@@ -11,11 +12,11 @@ const mocks = vi.hoisted(() => ({
     projects: vi.fn(), sessions: vi.fn(), session: vi.fn(), transcript: vi.fn(), markers: vi.fn(), addMarker: vi.fn(), setup: vi.fn(), status: vi.fn(),
     sources: vi.fn(), microphones: vi.fn(), preview: vi.fn(), stopPreview: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), renameSession: vi.fn(),
     moveSession: vi.fn(), reorderProjects: vi.fn(), deleteProject: vi.fn(), deleteSession: vi.fn(), start: vi.fn(), stop: vi.fn(), recordMore: vi.fn(),
-    handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
+    discardTake: vi.fn(), handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
   },
   windowApi: {
     minimize: vi.fn(), toggleMaximize: vi.fn(), isMaximized: vi.fn(), onResized: vi.fn(), close: vi.fn(), startDragging: vi.fn(),
-    setSize: vi.fn(), setMinSize: vi.fn(), setAlwaysOnTop: vi.fn(), innerSize: vi.fn(), scaleFactor: vi.fn(), setTheme: vi.fn(),
+    setSize: vi.fn(), setMinSize: vi.fn(), setAlwaysOnTop: vi.fn(), innerSize: vi.fn(), scaleFactor: vi.fn(), setTheme: vi.fn(), setBackgroundColor: vi.fn(),
   },
 }));
 vi.mock('./backend', () => ({ backend: mocks.backend, videoUrl: (path: string) => `asset://${path}` }));
@@ -60,11 +61,12 @@ beforeEach(() => {
   backend.start.mockImplementation(async (projectId: string | null) => { const session = { ...newSession('s2'), projectId, name: 'New recording', autoTitle: true, status: 'recording' as const }; sessions.push(session); status = { state: 'recording', sessionId: 's2', elapsedMs: 3000, audioLevel: .4 }; return session; });
   backend.stop.mockImplementation(async () => { const next = { ...sessions.find(item => item.id === 's2')!, status: 'processing' as const }; sessions = sessions.map(item => item.id === next.id ? next : item); status = { state: 'processing', sessionId: next.id }; return next; });
   backend.recordMore.mockRejectedValue('Record more is not set up in this test.');
+  backend.discardTake.mockRejectedValue('Discarding a take is not set up in this test.');
   backend.handoff.mockResolvedValue('Review local session s1. Transcript and frame instructions.');
   backend.openFolder.mockResolvedValue(undefined); backend.mute.mockResolvedValue(undefined); backend.retry.mockResolvedValue(undefined); backend.installTranscription.mockResolvedValue(undefined);
   backend.settings.mockResolvedValue({});
   backend.saveSettings.mockImplementation(async (next: object) => ({ ...next }));
-  for (const name of ['minimize', 'toggleMaximize', 'close', 'startDragging', 'setSize', 'setMinSize', 'setAlwaysOnTop', 'setTheme'] as const) windowApi[name].mockResolvedValue(undefined);
+  for (const name of ['minimize', 'toggleMaximize', 'close', 'startDragging', 'setSize', 'setMinSize', 'setAlwaysOnTop', 'setTheme', 'setBackgroundColor'] as const) windowApi[name].mockResolvedValue(undefined);
   windowApi.isMaximized.mockResolvedValue(false);
   windowApi.onResized.mockResolvedValue(() => {});
   windowApi.innerSize.mockResolvedValue({ width: 1280, height: 820 });
@@ -412,11 +414,18 @@ describe('project and session workflows', () => {
     expect(screen.queryByRole('button', { name: RETIRED_NAMES.useLightTheme })).not.toBeInTheDocument();
   });
   it('sets the theme in Settings → Appearance and keeps it for the next launch', async () => {
+    // The ground tokens (Vitest loads no CSS); the native window takes the ground's color too.
+    const tokens = document.createElement('style');
+    tokens.textContent = ":root { --color-ground: #ECEEF2; } :root[data-theme='dark'] { --color-ground: #121215; }";
+    document.head.append(tokens);
+    onTestFinished(() => tokens.remove());
     const user = await ready();
     expect(windowApi.setTheme).toHaveBeenLastCalledWith('light');
+    expect(windowApi.setBackgroundColor).toHaveBeenLastCalledWith('#ECEEF2');
     await user.click(screen.getByRole('button', { name: NAMES.settings }));
     await user.selectOptions(screen.getByLabelText(NAMES.appearance), 'dark');
     await waitFor(() => expect(windowApi.setTheme).toHaveBeenLastCalledWith('dark'));
+    expect(windowApi.setBackgroundColor).toHaveBeenLastCalledWith('#121215');
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(localStorage.getItem('cuereview.theme')).toBe('dark');
     cleanup(); windowApi.setTheme.mockClear(); delete document.documentElement.dataset.theme;
@@ -835,6 +844,8 @@ describe('record more', () => {
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('heading', { name: 'Finishing your recording' })).toBeVisible();
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeDisabled();
+    // A take still being added is not stuck: only an error offers to discard it.
+    expect(screen.queryByRole('button', { name: NAMES.discardTake(2) })).not.toBeInTheDocument();
     await poll();
     expect(document.querySelector('video')).toBeNull();
 
@@ -855,7 +866,7 @@ describe('record more', () => {
     const media = document.querySelector('video');
     backend.recordMore.mockRejectedValueOnce('Record more needs a playable recording.');
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
+    expect(await within(screen.getByRole('group', { name: NAMES.playback })).findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
     await waitFor(() => expect(document.querySelector('video')).not.toBe(media));
     const restored = document.querySelector('video')!;
     expect(restored).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
@@ -898,6 +909,103 @@ describe('record more', () => {
     sessions = [takeTwo(newSession(), 'ready')]; status = { state: 'idle' };
     await poll();
     await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4?v=2-20000'));
+  });
+  it('discards a take that cannot be added once confirmed, then reloads the transcript and the video', async () => {
+    const stuck: Session = { ...takeTwo(newSession(), 'swapping'), status: 'error', error: "video.mp4 lasts 12000 ms, which matches neither the recording before take 2 (10000 ms) nor the recording with it (20000 ms). The take's files are kept in takes/2; discard the take to keep using the recording." };
+    sessions = [stuck];
+    const user = await ready(); await open(user);
+    const discard = await transcriptPane().findByRole('button', { name: NAMES.discardTake(2) });
+    expect(transcriptPane().getByRole('button', { name: NAMES.retryTranscription })).toBeEnabled();
+    expect(document.querySelector('video')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Take 2 is not in the video yet' })).toBeVisible();
+
+    // Cancel changes nothing and hands focus back to the button.
+    await user.click(discard);
+    const dialog = screen.getByRole('alertdialog', { name: NAMES.discardTakeDialog(2) });
+    expect(dialog).toHaveAccessibleDescription('Its recording stays in the session folder but is removed from the timeline.');
+    expect(within(dialog).getByRole('button', { name: NAMES.cancel })).toHaveFocus();
+    await user.click(within(dialog).getByRole('button', { name: NAMES.cancel }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(discard).toHaveFocus();
+    expect(backend.discardTake).not.toHaveBeenCalled();
+
+    // Confirming drops take 2: the transcript is read again and video.mp4 loads under a new version.
+    backend.discardTake.mockImplementationOnce(async () => {
+      const next: Session = structuredClone({ ...stuck, status: 'ready', error: undefined });
+      next.takes![1].status = 'interrupted';
+      sessions = [next];
+      transcript = { segments: [{ id: 'line1', text: 'Kept words', startMs: 1000, endMs: 4000, words: [{ text: 'Kept', startMs: 1000, endMs: 1800 }, { text: 'words', startMs: 2500, endMs: 3500 }] }] };
+      return next;
+    });
+    const reads = backend.transcript.mock.calls.length;
+    await user.click(discard);
+    await user.click(within(screen.getByRole('alertdialog', { name: NAMES.discardTakeDialog(2) })).getByRole('button', { name: NAMES.discardTake(2) }));
+    expect(backend.discardTake).toHaveBeenCalledWith('s1', 2);
+    expect(await screen.findByRole('button', { name: 'Seek to Kept at 0:01' })).toBeVisible();
+    expect(backend.transcript).toHaveBeenCalledTimes(reads + 1);
+    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4?v=2-10000');
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: NAMES.discardTake(2) })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    // The button has gone with the error: focus moves to Record more, which works again.
+    const more = screen.getByRole('button', { name: NAMES.recordMore });
+    expect(more).toBeEnabled();
+    expect(more).toHaveFocus();
+    expect(await screen.findByText('Take 2 discarded')).toBeVisible();
+  });
+  it('keeps the discard confirmation open with the refusal, and the video unloaded', async () => {
+    sessions = [{ ...takeTwo(newSession(), 'swapping'), status: 'error', error: 'Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.' }];
+    let refuse!: (reason: string) => void;
+    backend.discardTake.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    const user = await ready(); await open(user);
+    const discard = await transcriptPane().findByRole('button', { name: NAMES.discardTake(2) });
+    await user.click(discard);
+    const dialog = screen.getByRole('alertdialog', { name: NAMES.discardTakeDialog(2) });
+    await user.click(within(dialog).getByRole('button', { name: NAMES.discardTake(2) }));
+    // While it works, the choice is locked and Escape does not close the dialog.
+    expect(within(dialog).getByRole('button', { name: 'Discarding…' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: NAMES.cancel })).toBeDisabled();
+    await user.keyboard('{Escape}');
+    expect(dialog).toBeInTheDocument();
+    await act(async () => refuse('Finish recording and processing before changing this recording.'));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Finish recording and processing before changing this recording.');
+    expect(within(dialog).getByRole('button', { name: NAMES.discardTake(2) })).toBeEnabled();
+    expect(document.querySelector('video')).toBeNull();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(discard).toHaveFocus();
+    expect(transcriptPane().getByText('Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.')).toBeVisible();
+  });
+  it('shows a source that is gone beside Record more, with New recording as the way forward', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+    const user = await review();
+    backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
+    await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
+    const playback = within(screen.getByRole('group', { name: NAMES.playback }));
+    const message = await playback.findByRole('alert');
+    expect(message).toHaveTextContent(SOURCE_GONE);
+    // Beside the pill only, not repeated in the workspace banner; the pill is described by it.
+    expect(screen.getAllByRole('alert')).toEqual([message]);
+    expect(playback.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(SOURCE_GONE);
+    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
+
+    // Dismissing hides it; the next refusal brings it back.
+    await user.click(within(message).getByRole('button', { name: NAMES.dismissError }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(playback.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription('Record more (Ctrl+R): continue this session as a new take');
+    backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
+    await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
+    const again = await playback.findByRole('alert');
+
+    // New recording opens a draft, where another source can be chosen.
+    await user.click(within(again).getByRole('button', { name: NAMES.newRecording }));
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(NAMES.newRecording);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: NAMES.record })).toHaveFocus();
+    expect(backend.start).not.toHaveBeenCalled();
+    // Coming back to the recording starts without the old message.
+    await open(user); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
 

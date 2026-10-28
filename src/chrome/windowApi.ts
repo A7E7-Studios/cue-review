@@ -38,6 +38,11 @@ export const windowApi = {
   scaleFactor: async () => await current()?.scaleFactor() ?? window.devicePixelRatio,
   /** `null` follows the system theme. */
   setTheme: async (theme: WindowTheme | null) => { await current()?.setTheme(theme); },
+  /**
+   * The native window's own color (a hex string such as '#121215'), shown behind the page while
+   * the window resizes or the webview repaints. Windows ignores alpha.
+   */
+  setBackgroundColor: async (color: string) => { await current()?.setBackgroundColor(color); },
 };
 
 type NavigatorWithData = Navigator & { userAgentData?: { platform?: string } };

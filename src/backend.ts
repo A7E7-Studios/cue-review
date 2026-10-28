@@ -48,6 +48,12 @@ export const backend = {
   stop: () => call<Session>('stop_recording'),
   /** Continue a ready session as a new take, locked to its source. A null microphone records without one, as in `start`. */
   recordMore: (id: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('record_more', { id, microphoneId, systemAudio, muted }),
+  /**
+   * Drop take `index` (2 or later) while it is stuck `swapping`: it becomes `interrupted` and keeps its
+   * folder, and the session settles, usually to ready. Resolves to the updated session; the transcript's
+   * take marks are updated too, so read it again.
+   */
+  discardTake: (id: string, index: number) => call<Session>('discard_take', { id, index }),
   transcript: (id: string) => call<Transcript>('get_transcript', { id }),
   preview: (sourceId: string, id:string, onError:(error:string)=>void) => {
     const errors=new Channel<string>();errors.onmessage=onError;

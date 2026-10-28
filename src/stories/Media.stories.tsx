@@ -9,7 +9,7 @@ import { RecordingDock } from '../workspace/RecordingDock';
 import { SessionHeader } from '../workspace/SessionHeader';
 import { TranscriptPane } from '../workspace/TranscriptPane';
 import type { CaptureMenu, TranscriptPaneProps } from '../workspace/types';
-import { takeTwoLiveTranscript, takeTwoStartMs, transcript as firstTakeTranscript, twoTakeSession, twoTakeTranscript } from './fixtures';
+import { SOURCE_GONE, takeTwoLiveTranscript, takeTwoStartMs, transcript as firstTakeTranscript, twoTakeSession, twoTakeTranscript } from './fixtures';
 
 // The recorded screen from the Float v2 mocks. The review video is a still: the
 // <video> shows it as its poster and never loads media.
@@ -25,11 +25,13 @@ const microphones = [{ id: 'microphone', name: 'Studio microphone' }, { id: 'hea
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const recordingTakeTwo: Transcript = { takes: [{ index: 1, startMs: 0 }], segments: [...takeOneSegments, ...takeTwoLiveTranscript.segments] };
 
-type Scenario = 'review' | 'recording-take-2' | 'recording-first' | 'processing' | 'error' | 'no-speech' | 'no-video' | 'draft' | 'draft-unavailable';
+// 'source-gone': Record more was refused because the session's window has closed.
+type Scenario = 'review' | 'recording-take-2' | 'recording-first' | 'processing' | 'error' | 'no-speech' | 'no-video' | 'source-gone' | 'draft' | 'draft-unavailable';
 interface Args { scenario: Scenario; compact: boolean; focused: boolean }
 
 function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
-  const review = ['review', 'processing', 'error', 'no-speech', 'no-video'].includes(scenario);
+  const review = ['review', 'processing', 'error', 'no-speech', 'no-video', 'source-gone'].includes(scenario);
+  const [recordMoreError, setRecordMoreError] = useState(scenario === 'source-gone' ? SOURCE_GONE : '');
   const recording = scenario.startsWith('recording');
   const draft = scenario.startsWith('draft');
   const take = scenario === 'recording-take-2' ? 2 : 1;
@@ -81,7 +83,9 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
       : <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
           onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
-          onToggleFocus={() => setFocused(value => !value)} recordMoreDisabled={scenario === 'processing'} onRecordMore={() => setNotice('Record more selected.')}/>;
+          onToggleFocus={() => setFocused(value => !value)} recordMoreDisabled={scenario === 'processing'}
+          onRecordMore={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
+          recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
 
   return <div style={{ height: '100vh', display: 'flex', minWidth: 0, overflow: 'hidden', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
     <div className="cr-center">
@@ -103,7 +107,7 @@ const meta = {
   title: 'Workspace/Media',
   component: Workspace,
   args: { scenario: 'review', compact: false, focused: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-first', 'processing', 'error', 'no-speech', 'no-video', 'draft', 'draft-unavailable'] } },
+  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-first', 'processing', 'error', 'no-speech', 'no-video', 'source-gone', 'draft', 'draft-unavailable'] } },
   render: args => <Workspace key={`${args.scenario}-${args.compact}-${args.focused}`} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Workspace>;
@@ -125,6 +129,9 @@ export const Processing: Story = { args: { scenario: 'processing' } };
 export const TranscriptError: Story = { args: { scenario: 'error' } };
 export const NoSpeech: Story = { args: { scenario: 'no-speech' } };
 export const NoVideo: Story = { args: { scenario: 'no-video' } };
+export const RecordMoreSourceGone: Story = { args: { scenario: 'source-gone' } };
+export const RecordMoreSourceGoneDark: Story = { args: { scenario: 'source-gone' }, globals: { theme: 'dark' } };
+export const RecordMoreSourceGoneSmallWindow: Story = { args: { scenario: 'source-gone' }, globals: { viewport: { value: 'small', isRotated: false } } };
 export const Draft: Story = { args: { scenario: 'draft' } };
 export const DraftSourceUnavailable: Story = { args: { scenario: 'draft-unavailable' } };
 export const DraftCompactSize: Story = { args: { scenario: 'draft' }, globals: { viewport: { value: 'compact', isRotated: false } } };

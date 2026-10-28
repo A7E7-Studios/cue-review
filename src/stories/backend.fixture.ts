@@ -1,9 +1,11 @@
 import type { backend as RealBackend, CaptureSource, Marker, Microphone, Project, RecordingStatus, Session, Settings, SetupStatus } from '../backend';
-import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript } from './fixtures';
+import { date, previewImage, sections, sessions, SOURCE_GONE, stuckTakeError, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript } from './fixtures';
 
 const sampleVideo = new URL('./sample-capture.webm', import.meta.url).href;
 // 'takes' opens the library session with two takes; 'recording-take' records its take 2.
-export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take';
+// 'stuck-take': take 2 could not be added to video.mp4 and waits to be retried or discarded.
+// 'source-gone': the library session's window has closed, so Record more is refused.
+export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'stuck-take' | 'source-gone';
 let projects: Project[] = [];
 let recordings: Session[] = [];
 let markers: Marker[] = [];
@@ -37,7 +39,12 @@ export function configureScenario(next: Scenario) {
     status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
   }
   // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
-  if (next === 'takes' || next === 'recording-take') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
+  if (next === 'takes' || next === 'recording-take' || next === 'source-gone') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
+  if (next === 'stuck-take') {
+    const session: Session = { ...clone(twoTakeSession), videoPath: sampleVideo, durationMs: takeTwoStartMs, status: 'error', error: stuckTakeError };
+    session.takes![1].status = 'swapping';
+    recordings[0] = session;
+  }
   if (next === 'recording-take') {
     const session = recordings[0];
     session.durationMs = takeTwoStartMs;
@@ -53,10 +60,14 @@ export const backend = {
   sessions: async () => clone(recordings),
   session: async (id: string) => clone(find(id)),
   transcript: async (id: string) => {
-    if (!recordings.find(item => item.id === id)?.takes?.length) return clone(transcript);
-    // While take 2 records, the saved transcript still ends with take 1.
+    const session = recordings.find(item => item.id === id);
+    if (!session?.takes?.length) return clone(transcript);
+    // While take 2 records, or when it never joined video.mp4, the saved transcript ends with take 1.
     const takeOne = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
-    return clone(scenario === 'recording-take' && status.state === 'recording' ? { ...twoTakeTranscript, segments: takeOne, takes: [{ index: 1, startMs: 0 }] } : twoTakeTranscript);
+    const second = session.takes.find(take => take.index === 2);
+    if (second?.status === 'recording') return clone({ ...twoTakeTranscript, segments: takeOne, takes: [{ index: 1, startMs: 0 }] });
+    if (second?.status === 'swapping' || second?.status === 'interrupted') return clone({ ...twoTakeTranscript, segments: takeOne, takes: undefined });
+    return clone(twoTakeTranscript);
   },
   markers: async () => clone(markers),
   status: async () => clone(status),
@@ -78,7 +89,17 @@ export const backend = {
   recordMore: async (id: string, microphoneId: string | null, systemAudio: boolean) => {
     const session = find(id);
     if (session.status !== 'ready' || status.state !== 'idle') throw new Error('Finish the current recording or processing job first.');
+    if (scenario === 'source-gone') throw new Error(SOURCE_GONE);
     recordTake(session, microphoneId, systemAudio);
+    return clone(session);
+  },
+  discardTake: async (id: string, index: number) => {
+    const session = find(id);
+    const take = session.takes?.find(item => item.index === index);
+    if (index < 2) throw new Error('Take 1 is the original recording and cannot be discarded.');
+    if (take?.status !== 'swapping') throw new Error(`Take ${index} is already part of the recording and cannot be discarded.`);
+    take.status = 'interrupted';
+    session.status = 'ready'; session.error = undefined;
     return clone(session);
   },
   stop: async () => {

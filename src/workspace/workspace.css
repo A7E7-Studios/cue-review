@@ -136,6 +136,18 @@
   font-size: var(--font-size-control); font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums;
 }
 .cr-control-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-control-divider); }
+/* Why Record more failed, right under the pill, with the way forward (New recording) beside it. */
+.cr-record-more-error {
+  align-self: flex-end; max-width: min(100%, 620px); box-sizing: border-box;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 6px 6px 12px; border-radius: var(--radius-transcript-row);
+  background: var(--color-status-recording); color: var(--color-status-recording-text); font-size: var(--font-size-control); line-height: 1.45;
+}
+.cr-record-more-error > svg { width: 16px; height: 16px; align-self: flex-start; margin-top: 6px; }
+/* The message takes the row; on a narrow window the actions wrap under it. */
+.cr-record-more-error > p { flex: 1 1 240px; min-width: 0; margin: 0; padding: 4px 0; overflow-wrap: anywhere; }
+.cr-record-more-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); margin-left: auto; box-shadow: var(--shadow-button); }
+.cr-record-more-error .cr-record-more-dismiss { --cr-fg: currentColor; --cr-fg-hover: currentColor; --cr-bg-hover: color-mix(in srgb, currentColor 12%, transparent); }
+.cr-record-more-error .cr-record-more-dismiss svg { width: 14px; height: 14px; }
 
 /* Scrubber: a visually hidden range with speech, take ticks and the knob drawn over it. */
 .cr-scrubber { position: relative; height: 18px; touch-action: none; cursor: pointer; user-select: none; }

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { FormEvent, RefObject } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { backend, videoUrl } from './backend';
@@ -20,7 +20,7 @@ import { SessionHeader } from './workspace/SessionHeader';
 import { TranscriptPane } from './workspace/TranscriptPane';
 import { NAMES } from './workspace/types';
 import type { CaptureMenu, MediaEmptyState, WorkspaceMode } from './workspace/types';
-import { DeleteRecordingDialog, NameDialog } from './app/dialogs';
+import { DeleteRecordingDialog, DiscardTakeDialog, NameDialog } from './app/dialogs';
 import type { NameDialogState } from './app/dialogs';
 import { liveTake, recordingTranscript, releaseMedia, sessionVideoUrl, takeInFlight, takeMarks, takeSwapping } from './app/media';
 import { MICROPHONE_UNAVAILABLE, useCaptureDevices } from './app/useCaptureDevices';
@@ -55,7 +55,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [notice, setNotice] = useState('');
   const report = useCallback((problem: unknown) => { setError(errorMessage(problem)); }, []);
   const reportInDialog = useCallback((problem: unknown) => { setDialogError(errorMessage(problem)); }, []);
-  const [theme, setTheme] = useTheme(report);
+  const [theme, setTheme] = useTheme(report, os);
   const sidebar = useSidebarLayout();
   const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
   const { compact, toggleCompact, exitCompact } = useCompactWindow(report);
@@ -81,6 +81,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [installing, setInstalling] = useState(false);
   const [dialog, setDialog] = useState<NameDialogState | null>(null);
   const [deletion, setDeletion] = useState<{ id: string; name: string } | null>(null);
+  /** The take whose discard is being confirmed. */
+  const [discarding, setDiscarding] = useState<{ id: string; index: number } | null>(null);
+  /** Why Record more failed, shown beside its pill rather than in the workspace banner. */
+  const [recordMoreError, setRecordMoreError] = useState('');
   const [search, setSearch] = useState('');
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
   const [mediaRevision, setMediaRevision] = useState(0);
@@ -126,7 +130,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
   const canRecordMore = !!session && !draft && settled(session) && !!videoSrc && devicesReady;
-  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; });
+  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || !!discarding || settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
 
@@ -146,7 +150,7 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   const openSession = useCallback(async (id: string) => {
     const request = ++selection.current;
-    restorePlayback.current = null; setLoading(true); setCaptureMenu(null); setError(''); dismissOverlay();
+    restorePlayback.current = null; setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
@@ -260,7 +264,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const prepare = useCallback(() => {
     if (locked) return;
     selection.current++; shownId.current = null; restorePlayback.current = null; dismissOverlay();
-    setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null);
+    setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null); setRecordMoreError('');
   }, [locked, dismissOverlay]);
   const seek = useCallback((ms: number) => {
     const next = seekTime(ms, duration);
@@ -324,11 +328,14 @@ export default function App({ platform: requested }: AppProps = {}) {
     } catch (problem) { report(problem); }
     finally { setBusy(false); }
   };
-  /** Continues the open recording as a new take on its own source (decision 10). */
+  /**
+   * Continues the open recording as a new take on its own source (decision 10). A refusal, such as a
+   * source that is gone, is shown beside the Record more pill with New recording as the way forward.
+   */
   const recordMore = async () => {
     if (!session || !canRecordMore || busy || loading || recording || processing || captureBlocked) return;
-    if (microphoneUnavailable) { report(MICROPHONE_UNAVAILABLE); return; }
-    actionEpoch.current++; setBusy(true); setError('');
+    if (microphoneUnavailable) { setRecordMoreError(MICROPHONE_UNAVAILABLE); return; }
+    actionEpoch.current++; setBusy(true); setError(''); setRecordMoreError('');
     // Windows keeps an open file locked and the backend replaces video.mp4 after the take,
     // so the video is unloaded first and stays unloaded until processing has finished.
     const playback = unloadVideo(session.id);
@@ -346,7 +353,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     } catch (problem) {
       setHeldMedia(null);
       reloadVideo(playback);
-      report(problem);
+      setRecordMoreError(errorMessage(problem));
     } finally { releasing.current = false; setBusy(false); }
   };
   const recordCommand = () => { if (recording) void stop(); else if (draft) void start(); else void recordMore(); };
@@ -357,7 +364,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
   useShortcuts({
     platform: os,
-    enabled: !dialog && !deletion && !settingsOpen && !captureMenu,
+    enabled: !dialog && !deletion && !discarding && !settingsOpen && !captureMenu,
     onRecord: recordCommand,
     onNew: prepare,
     onTogglePlay: mode === 'review' && videoSrc ? () => void togglePlay() : undefined,
@@ -489,6 +496,35 @@ export default function App({ platform: requested }: AppProps = {}) {
       report(problem);
     } finally { releasing.current = false; setBusy(false); }
   };
+  /**
+   * Drops a take whose swap into video.mp4 keeps failing (`swapping` after a failed Retry). The take
+   * keeps its folder and the session settles, usually to ready. The video stayed unloaded while the
+   * take was pending; it reloads under a version that counts the discarded take, so the webview
+   * cannot serve the copy it cached before Record more.
+   */
+  const discardTake = async () => {
+    const target = discarding;
+    if (!target || busy) return;
+    actionEpoch.current++; setBusy(true); setDialogError('');
+    try {
+      const next = await backend.discardTake(target.id, target.index);
+      // The take is gone either way: a transcript that cannot be read yet is reported in the workspace.
+      let text: Transcript | undefined;
+      let unreadable: unknown;
+      try { text = await backend.transcript(next.id); } catch (problem) { unreadable = problem; }
+      if (shownId.current === next.id) {
+        setSession(next); setDuration(next.durationMs); setTime(0); setPlaying(false); setError('');
+        if (text) setTranscript(text);
+        setHeldMedia(held => held === next.id ? null : held);
+        reloadVideo(null);
+      }
+      setDiscarding(null);
+      setNotice(`Take ${target.index} discarded`);
+      if (unreadable !== undefined) report(unreadable);
+      await refreshProjects().catch(report);
+    } catch (problem) { reportInDialog(problem); }
+    finally { setBusy(false); }
+  };
   /** Settings may close while it works: a late failure then goes to the workspace. */
   const reportFromSettings = (problem: unknown) => (dialogOpen.current ? reportInDialog : report)(problem);
   const install = async () => {
@@ -508,6 +544,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const shownTranscript = recording ? recordingTranscript(transcript, status) : { ...transcript, takes: marks };
   const transcriptError = mode === 'review' && !processing && (session?.status === 'error' || transcript.error)
     ? transcript.error || session?.error || 'The transcript could not be created.' : undefined;
+  /** A take that Retry could not add to video.mp4, offered for discarding beside Retry. */
+  const stuckTake = transcriptError && session?.status === 'error' ? session.takes?.find(take => take.index > 1 && take.status === 'swapping') : undefined;
   const emptyMessage = recording
     ? noAudio ? 'No audio input was selected for this recording.'
       : !setup?.modelReady ? 'Transcription needs setup.'
@@ -518,7 +556,9 @@ export default function App({ platform: requested }: AppProps = {}) {
   const empty = mode !== 'review'
     ? captureEmptyState({ source, loading, paused: previewPaused, previewError })
     : busy && heldMedia === session?.id && !processing ? STARTING_TAKE
-      : reviewEmptyState({ loading, processing: processing || mediaHeld });
+      // Nothing is under way for a stuck take, so the stage does not say it is finishing.
+      : stuckTake && !loading ? { title: `Take ${stuckTake.index} is not in the video yet`, detail: 'Retry to add it, or discard the take to play the recording.' }
+        : reviewEmptyState({ loading, processing: processing || mediaHeld });
   const videoProps: MediaStageViewProps['videoProps'] = {
     onTimeUpdate: event => setTime(event.currentTarget.currentTime * 1000),
     onLoadedMetadata: event => {
@@ -559,7 +599,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       : <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
           playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onCycleSpeed={cycleSpeed}
           focused={focusVideo} onToggleFocus={() => setFocusVideo(value => !value)}
-          recordMoreDisabled={!canRecordMore || loading || processing || captureBlocked} recordMoreBusy={busy} onRecordMore={() => void recordMore()}/>;
+          recordMoreDisabled={!canRecordMore || loading || processing || captureBlocked} recordMoreBusy={busy} onRecordMore={() => void recordMore()}
+          recordMoreError={recordMoreError || undefined} onNewRecording={prepare} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
 
   // Focus that loses its control goes to the control taking its place (decisions 6 and 9).
   useFocusRescue(appRoot, lost => {
@@ -579,8 +620,12 @@ export default function App({ platform: requested }: AppProps = {}) {
     if (mode === 'recording') return find('.cr-stop');
     return find('.cr-stage-controls .cr-dark-pill') ?? sheet.current;
   });
+  /** The same home for a dialog whose invoking control is gone when it closes (a discarded take's button). */
+  const stageFocus = useMemo<RefObject<HTMLElement | null>>(() => ({
+    get current() { return [...(appRoot.current?.querySelectorAll('.cr-stage-controls .cr-dark-pill') ?? [])].find(canTakeFocus) ?? sheet.current; },
+  }), []);
 
-  const errorBanner = error && !dialog && !deletion && !settingsOpen && <div className="app-error" role="alert">
+  const errorBanner = error && !dialog && !deletion && !discarding && !settingsOpen && <div className="app-error" role="alert">
     <Icon name="warning" strokeWidth={1.8}/><p>{error}</p>
     <button type="button" aria-label={NAMES.dismissError} title={NAMES.dismissError} onClick={() => setError('')}><Icon name="close" strokeWidth={1.8}/></button>
   </div>;
@@ -607,7 +652,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       <TranscriptPane mode={mode} transcript={shownTranscript} timeMs={recording ? (status.takeOffsetMs ?? 0) + (status.elapsedMs || 0) : time} onSeek={seek}
         status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
-        error={transcriptError} onRetry={() => void retry()} retryBusy={busy}/>
+        error={transcriptError} onRetry={() => void retry()} retryBusy={busy}
+        discardTake={stuckTake?.index} onDiscardTake={stuckTake && session ? () => { setDialogError(''); setDiscarding({ id: session.id, index: stuckTake.index }); } : undefined}/>
     </div>}
   </main>;
 
@@ -642,6 +688,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>
     <DeleteRecordingDialog target={deletion} busy={busy} error={deletion ? dialogError : ''} restoreFocusRef={deletionFocus} fallbackFocusRef={sheet}
       onClose={() => setDeletion(null)} onDelete={() => void deleteRecording()}/>
+    <DiscardTakeDialog take={discarding?.index ?? null} busy={busy} error={discarding ? dialogError : ''} fallbackFocusRef={stageFocus}
+      onClose={() => setDiscarding(null)} onDiscard={() => void discardTake()}/>
     {/* Always mounted, so screen readers announce each notice as it appears. */}
     <div className="app-toast-region" role="status">{notice && <div className="app-toast">{notice}</div>}</div>
   </div>;
