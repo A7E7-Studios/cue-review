@@ -11,10 +11,10 @@ const sessionId = crypto.randomUUID();
 const sessionDir = path.join(dataRoot, 'sessions', sessionId);
 const pipeline = JSON.parse(fs.readFileSync(path.join(workspace, 'test-results', 'pipeline-verification.json')));
 const sourceAudio = path.join(workspace, '.local', 'pipeline-data', 'sessions', pipeline.sessionId, 'mic.wav');
-const local = path.join(process.env.LOCALAPPDATA, 'CueReview');
-const env = { ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: path.join(local, 'models', 'ggml-base.bin'), CUEREVIEW_VAD_MODEL: path.join(local, 'models', 'ggml-silero-v6.2.0.bin'), CUEREVIEW_DTW_MODEL: 'base', PATH: `${path.join(local, 'tools', 'whisper-b5454')};${process.env.PATH}` };
+const { appData: local, whisperDir, withSpeechPath } = require('./test-env.cjs');
+const env = withSpeechPath({ ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: path.join(local, 'models', 'ggml-base.bin'), CUEREVIEW_VAD_MODEL: path.join(local, 'models', 'ggml-silero-v6.2.0.bin'), CUEREVIEW_DTW_MODEL: 'base' });
 const cue = path.join(workspace, 'src-tauri', 'target', 'release', 'cue.exe');
-const result = { runId, dataRoot, sessionId, sessionDir, startedAt: new Date().toISOString() };
+const result = { runId, dataRoot, sessionId, sessionDir, whisperDir: whisperDir(), startedAt: new Date().toISOString() };
 const assert = (value, message) => { if (!value) throw Error(message); };
 function run(tool, args, binary = false) {
   const child = spawnSync(tool, args, { env, encoding: binary ? undefined : 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
