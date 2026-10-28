@@ -59,12 +59,14 @@ pub fn tool(name: &str) -> Result<PathBuf, String> {
     ))
 }
 pub fn command(name: &str) -> Result<Command, String> {
-    let mut cmd = Command::new(tool(name)?);
+    let cmd = Command::new(tool(name)?);
     #[cfg(windows)]
-    {
+    let cmd = {
         use std::os::windows::process::CommandExt;
+        let mut cmd = cmd;
         cmd.creation_flags(0x08000000);
-    }
+        cmd
+    };
     Ok(cmd)
 }
 pub fn model_path() -> PathBuf {
