@@ -1,6 +1,9 @@
 // Attended review and compact-mode checks in a running test app with the local CDP port (9224).
 // Launch the app with a dedicated CUEREVIEW_DATA_DIR that holds the verify-pipeline.ps1 fixture.
 // The compact check records the default source for a few seconds.
+// The clipboard check copies the agent handoff to the Windows clipboard. The clipboard's text is saved
+// before and put back afterwards, also when the check fails; other content (an image, files) cannot be
+// put back and is replaced, and an empty clipboard is cleared again.
 // Controls are found by the accessible names in src/workspace/types.ts (NAMES) and its HOOKS.
 //   node scripts/verify-native-ux.cjs [--review-only | --compact-only]
 const {chromium}=require('playwright');
@@ -18,6 +21,17 @@ const titleBar=()=>page.locator('[aria-label="Title bar"]');
 const sidebar=()=>page.getByRole('complementary',{name:'Recordings',exact:true});
 const size=()=>page.evaluate(()=>({width:innerWidth,height:innerHeight}));
 const near=(a,b,tolerance=1)=>Math.abs(a-b)<=tolerance;
+// The clipboard's text through PowerShell, as base64 UTF-8 so no console code page alters it.
+// null when the clipboard holds no text.
+const powershell=(command,input)=>execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',command],{encoding:'utf8',windowsHide:true,input});
+function readClipboard(){
+ const encoded=powershell('$t=Get-Clipboard -Raw;if($null -eq $t){"none"}else{"text:"+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t))}').trim();
+ return encoded.startsWith('text:')?Buffer.from(encoded.slice(5),'base64').toString('utf8'):null;
+}
+function writeClipboard(text){
+ if(!text)powershell('Add-Type -AssemblyName System.Windows.Forms;[System.Windows.Forms.Clipboard]::Clear()');
+ else powershell('$b=[Console]::In.ReadToEnd().Trim();Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))',Buffer.from(text,'utf8').toString('base64'));
+}
 // The theme lives in Settings → Appearance, opened from the title bar (decision 14).
 async function setTheme(theme){
  await titleBar().getByRole('button',{name:'Settings',exact:true}).click();
@@ -93,8 +107,16 @@ async function review(){
  // Markers are out of the UI (decision 5): no Add marker control, and M opens nothing.
  await page.keyboard.press('m');await page.waitForTimeout(300);
  assert(!await page.getByRole('button',{name:'Add marker',exact:true}).count()&&!await page.getByRole('dialog').count(),'Marker UI is still present');result.checks.markersRemoved=true;
- await page.getByRole('button',{name:'Copy for agent',exact:true}).click();await page.getByText('Agent instructions copied',{exact:true}).last().waitFor();
- const clipboard=execFileSync('powershell.exe',['-NoProfile','-Command','Get-Clipboard -Raw'],{encoding:'utf8',windowsHide:true});const handoff=await invoke('get_agent_handoff',{id:sid});if(clipboard.replace(/\r\n/g,'\n').trim()!==handoff.replace(/\r\n/g,'\n').trim())throw Error('Native clipboard handoff mismatch');
+ // Keep the user's clipboard text and put it back, whatever the check finds.
+ const savedClipboard=readClipboard();let clipboard;
+ try{
+  await page.getByRole('button',{name:'Copy for agent',exact:true}).click();await page.getByText('Agent instructions copied',{exact:true}).last().waitFor();
+  clipboard=readClipboard()??'';
+ }finally{
+  try{writeClipboard(savedClipboard);const lines=text=>(text||'').replace(/\r\n/g,'\n');result.checks.clipboardRestored=lines(readClipboard())===lines(savedClipboard);}catch(e){result.clipboardRestoreError=String(e);}
+ }
+ const handoff=await invoke('get_agent_handoff',{id:sid});if(clipboard.replace(/\r\n/g,'\n').trim()!==handoff.replace(/\r\n/g,'\n').trim())throw Error('Native clipboard handoff mismatch');
+ assert(result.checks.clipboardRestored,'The clipboard text was not restored: '+(result.clipboardRestoreError||'it differs'));
  assert(handoff.includes('--segments')&&handoff.includes('--per-segment'),'Handoff lacks the recommended workflow');result.checks.clipboard=true;
  const rateButton=page.getByRole('button',{name:/^Playback speed /});while((await page.locator('video').evaluate(v=>v.playbackRate))!==1)await rateButton.click();await rateButton.click();result.checks.playbackRate=await page.locator('video').evaluate(v=>v.playbackRate);if(result.checks.playbackRate!==1.5)throw Error('Speed failed');
  await page.getByRole('button',{name:'Play',exact:true}).click();await page.waitForTimeout(350);await page.getByRole('button',{name:'Pause',exact:true}).click();if((await page.locator('video').evaluate(v=>v.currentTime))<=seek)throw Error('Playback did not advance');result.checks.playback=true;
