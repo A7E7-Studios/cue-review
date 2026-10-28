@@ -197,14 +197,14 @@ Rules:
 
 | Step | State | Notes |
 |---|---|---|
-| S0 baseline commit | pending | |
-| P0 contracts | pending | |
-| A chrome + sidebar | pending | |
-| B media + transcript | pending | |
-| C takes backend | pending | |
-| D cursor | pending | |
-| E CLI + handoff | pending | |
-| F vocabulary + settings | pending | |
+| S0 baseline commit | done | 35ad509 |
+| P0 contracts | done | c6fbf18. Figtree is now the default font; new tokens use the `--color-*` prefix; NAMES keeps "Compact"/"Expand" |
+| A chrome + sidebar | merged | c9f07cd. 96 web tests; `tauri build --debug` OK. For G: pass `showCollapse={false}` on Windows/Linux; fix "New recording" truncating while its Ctrl+N hint shows at 232px; the sidebar now always contains a `role=status` element |
+| B media + transcript | merged | 02ee1c9. Merged branch: 157 web tests, build OK. For G: `MediaStage` takes `children` (the controls slot); use `platform?` props and the `review.ts` helpers. Rename `scrubber.ts` → `scrubberGeometry.ts`, because it collides with `Scrubber.tsx` on case-insensitive file systems. Status chips use role=status |
+| C takes backend | merged | f1227fc. Combined: clippy clean; 103 lib tests passing, 24 ignored. The ignored ffmpeg concat, Whisper take-2 offset, recovery and snapshot tests pass. Adds `capture-timing.json` `normalize{scale,padX,padY,baseWidth,baseHeight}`; follow-up: `cursor.rs` must apply it. For G: unload the video before Record more and keep it unloaded until processing ends; add a cache-buster to the video URL; Stop returns before the swap finishes, so refresh the session on idle |
+| D cursor | merged | 40bbff4. Combined `cargo test --lib`: 78 passed, 22 ignored. `px`/`py` for later takes assume the take is scaled to take 1's size without padding; reconcile with C's scale+pad. The `SetCursorPos` test is reserved for the attended phase |
+| E CLI + handoff | merged | 515d0b4. 65 lib tests passing; 2 ignored ffmpeg tests passing; verify-cli 9/9. `cursor` is null in frame/frames/moments until D lands |
+| F vocabulary + settings | merged | b95916c. Combined: 170 web tests, 111 lib tests passing (25 ignored), clippy clean. Prompt cap is about 75 tokens (20 terms, 200 characters). `-mc` = prompt tokens + 1 with `--carry-initial-prompt`, so decoded text is never carried; the Whisper regression passes. The validation story's play test needs a focused tab |
 | G app integration | pending | |
 | H docs + scripts | pending | |
 | Independent review + fixes | pending | |
