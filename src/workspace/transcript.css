@@ -1,0 +1,127 @@
+/* Float v2 transcript column (decisions 4, 10 and 12). Buttons share .cr-btn from workspace.css. */
+
+/* Layout for the app: the full-height column on the right. */
+.cr-transcript-column {
+  flex: 0 1 var(--size-transcript); width: var(--size-transcript); min-width: var(--size-transcript-min); min-height: 0;
+  display: flex; flex-direction: column; border-left: 1px solid var(--color-divider);
+}
+
+.cr-transcript {
+  position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; height: 100%; box-sizing: border-box;
+  display: flex; flex-direction: column;
+  color: var(--color-text); font-family: var(--font-family); font-size: var(--font-size-body); line-height: var(--line-height-body);
+  font-variant-numeric: var(--font-numeric);
+}
+.cr-transcript-header { flex-shrink: 0; height: var(--size-pane-header); box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 20px; }
+.cr-transcript-header h2 { margin: 0; color: var(--color-text); font-size: var(--font-size-pane-title); font-weight: 700; line-height: 1.3; }
+.cr-status-chip {
+  height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: var(--radius-pill);
+  background: var(--color-status-recording); color: var(--color-status-recording-text);
+  font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); white-space: nowrap;
+}
+.cr-status-chip > i { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--color-record); }
+.cr-status-chip[data-status='processing'] { background: var(--color-pill); color: var(--color-text-secondary); }
+.cr-status-chip[data-status='processing'] > i { background: var(--color-accent); }
+
+/* Find in transcript */
+.cr-find {
+  flex-shrink: 0; height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 4px;
+  margin: 0 10px 8px; padding: 0 4px 0 10px; border-radius: 8px;
+  background: var(--color-button); box-shadow: var(--shadow-button); color: var(--color-text-tertiary);
+}
+.cr-find:focus-within { box-shadow: 0 0 0 2px var(--color-focus); }
+.cr-find > svg { width: 14px; height: 14px; flex-shrink: 0; }
+.cr-find input {
+  flex: 1; min-width: 0; height: 100%; margin: 0; padding: 0 0 0 4px; border: 0; border-radius: 0;
+  background: transparent; color: var(--color-text); font: inherit; font-size: var(--font-size-control); outline: none;
+}
+.cr-find input:focus-visible { outline: none; }
+.cr-find input::placeholder { color: var(--color-text-tertiary); }
+.cr-find input::-webkit-search-cancel-button { display: none; }
+.cr-find-count { color: var(--color-text-tertiary); font-size: var(--font-size-meta); white-space: nowrap; }
+.cr-find-step { --cr-fg: var(--color-text-secondary); --cr-bg-hover: var(--color-pill); --cr-fg-disabled: var(--color-control-ring); width: 26px; height: 26px; border-radius: 6px; }
+.cr-find-step svg { width: 13px; height: 13px; }
+
+/* Rows */
+.cr-transcript-scroll {
+  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding-block: 12px;
+  display: flex; flex-direction: column; gap: 1px; padding: 0 10px 14px;
+}
+.cr-row {
+  flex-shrink: 0; display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px;
+  border-radius: var(--radius-transcript-row); transition: background-color var(--motion-fast) linear;
+}
+.cr-row.is-current { background: var(--color-current-row); border-radius: var(--radius-current-row); }
+.cr-row.is-match-current { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 45%, transparent); }
+.cr-row-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.cr-row-text { margin: 0; color: var(--color-transcript); font-size: var(--font-size-transcript); line-height: var(--line-height-transcript); overflow-wrap: anywhere; }
+.cr-row.is-past .cr-row-text { color: var(--color-transcript-past); }
+.cr-row.is-current .cr-row-text { color: var(--color-text); }
+.cr-row.is-current .word.upcoming { color: var(--color-transcript-past); }
+
+.cr-row-time {
+  display: block; height: 22px; margin: 0; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--color-text-tertiary); font: inherit; font-size: var(--font-size-meta); font-weight: 500;
+  line-height: 22px; text-align: left; cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.cr-row-time:hover:not(:disabled) { background: transparent; color: var(--color-accent-text); }
+.cr-row-time:disabled { background: transparent; color: var(--color-text-tertiary); opacity: 1; cursor: default; }
+.cr-row.is-current .cr-row-time { color: var(--color-accent-text); font-weight: 700; }
+
+/* Words keep their layout box (padding and margin cancel out) so moving the
+   spoken pill never reflows the line. */
+.cr-transcript .word {
+  display: inline; margin: -1px -3px; padding: 1px 3px; border: 0; border-radius: var(--radius-pill);
+  background: transparent; color: inherit; font: inherit; line-height: inherit; letter-spacing: inherit;
+  text-align: left; vertical-align: baseline; cursor: pointer;
+}
+.cr-transcript .segment-text {
+  display: inline; margin: 0; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: inherit; font: inherit; line-height: inherit; letter-spacing: inherit;
+  text-align: left; cursor: pointer; overflow-wrap: anywhere;
+}
+.cr-transcript .word:hover:not(:disabled), .cr-transcript .segment-text:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); color: inherit; }
+.cr-transcript .word:disabled, .cr-transcript .segment-text:disabled { background: transparent; color: inherit; opacity: 1; cursor: text; }
+.cr-transcript .word.found, .cr-find-mark { background: color-mix(in srgb, var(--color-meter-high) 45%, transparent); color: inherit; }
+.cr-find-mark { padding: 0 1px; border-radius: 3px; }
+.cr-transcript .word.spoken, .cr-transcript .word.spoken:hover { background: var(--color-accent); color: var(--color-on-accent); }
+.cr-transcript .word:focus-visible, .cr-transcript .segment-text:focus-visible, .cr-row-time:focus-visible {
+  position: relative; z-index: 1; outline: 2px solid var(--color-focus); outline-offset: 1px;
+}
+
+/* Takes and the live tail */
+.cr-take-divider {
+  flex-shrink: 0; margin: 6px 10px; display: flex; align-items: center; gap: 10px;
+  color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); white-space: nowrap;
+}
+.cr-take-divider > span { flex: 1; height: 1px; background: var(--color-divider); }
+.cr-take-divider[data-live] { color: var(--color-status-recording-text); }
+.cr-take-divider[data-live] > span { background: var(--color-live-divider); }
+.cr-row.is-tail { background: var(--color-live-tail); border-radius: var(--radius-current-row); }
+.cr-row.is-tail .cr-row-time, .cr-row.is-tail .cr-row-time:disabled { color: var(--color-status-recording-text); font-weight: 700; }
+.cr-row.is-tail .cr-row-text { color: var(--color-text-tertiary); }
+.cr-live-caret { display: inline-block; width: 2px; height: 16px; margin-left: 3px; vertical-align: -3px; border-radius: 1px; background: var(--color-record); }
+.cr-live-note { color: var(--color-text-tertiary); font-size: var(--font-size-meta); }
+
+/* Empty, notes and errors */
+.cr-transcript-empty { margin: 0; padding: 8px 10px; color: var(--color-text-secondary); font-size: var(--font-size-body); line-height: 1.55; }
+.cr-transcript-note { flex-shrink: 0; margin: 6px 10px; display: flex; align-items: flex-start; gap: 6px; color: var(--color-text-secondary); font-size: var(--font-size-meta); line-height: 1.45; overflow-wrap: anywhere; }
+.cr-transcript-note svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 1px; color: var(--color-status-recording-text); }
+.cr-transcript-error {
+  flex-shrink: 0; margin: 8px 0; padding: 12px; border-radius: var(--radius-transcript-row);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 10px; background: var(--color-status-recording);
+}
+.cr-transcript-error p { margin: 0; display: flex; gap: 8px; color: var(--color-status-recording-text); font-size: var(--font-size-body); line-height: 1.5; overflow-wrap: anywhere; }
+.cr-transcript-error p svg { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; }
+.cr-transcript-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); box-shadow: var(--shadow-button); }
+.cr-transcript-end { flex-shrink: 0; height: 1px; margin-top: -1px; }
+
+/* Shown after the reader scrolls away from the playing row. */
+.cr-return {
+  --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-accent-text);
+  position: absolute; left: 50%; bottom: 14px; z-index: 2; transform: translateX(-50%);
+  height: 32px; gap: 7px; padding: 0 14px 0 12px; border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-button), 0 6px 16px rgba(16, 24, 40, .12);
+  font-size: var(--font-size-control); font-weight: var(--font-weight-strong);
+}
+.cr-return svg { width: 11px; height: 11px; }
