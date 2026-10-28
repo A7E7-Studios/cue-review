@@ -2863,13 +2863,16 @@ mod tests {
         assert!(pointer::physical_pixels());
         let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
         let title: Vec<u16> = "CueReview cursor verification\0".encode_utf16().collect();
-        // WS_EX_TOPMOST | WS_EX_TOOLWINDOW; WS_POPUP | WS_VISIBLE | SS_BLACKRECT.
+        // WS_EX_TOPMOST | WS_EX_TOOLWINDOW; WS_POPUP | WS_VISIBLE | SS_NOTIFY |
+        // SS_BLACKRECT. Without SS_NOTIFY a static answers WM_NCHITTEST with
+        // HTTRANSPARENT, which only its own thread asks: `root_at` here saw
+        // through the window while the sampler's thread saw it.
         let window = Owned(unsafe {
             CreateWindowExW(
                 0x88,
                 class.as_ptr(),
                 title.as_ptr(),
-                0x90000004,
+                0x90000104,
                 240,
                 180,
                 480,
@@ -2948,10 +2951,12 @@ mod tests {
             (bounds.right - 2, bounds.bottom - 2),
             (bounds.left - 60, bounds.top + 20),
         ] {
+            let before = epoch.elapsed().as_millis() as u64;
             assert_ne!(unsafe { SetCursorPos(x, y) }, 0);
+            let moved = epoch.elapsed().as_millis() as u64;
             pump(Duration::from_millis(150));
             let over = root_at(x, y) == window.0;
-            expected.push((epoch.elapsed().as_millis() as u64, x, y, over));
+            expected.push(((before, moved), x, y, over));
             pump(Duration::from_millis(100));
         }
         // Click the owned window, but only when it is the window under the pointer.
@@ -2977,34 +2982,59 @@ mod tests {
             let video = cursor::video_size((canvas, canvas)).0;
             ((f64::from(offset) + 0.5) / f64::from(canvas) * f64::from(video)).floor() as i32
         };
-        for (t, x, y, over) in expected {
-            let point = window_track.at(t).expect("window sample");
-            assert_eq!(
-                (point.px, point.py, point.in_video),
-                (
-                    pixel(x - bounds.left, canvas.0),
-                    pixel(y - bounds.top, canvas.1),
-                    over
-                ),
-                "window at {x},{y}"
+        // Within 1 px, for jitter and rounding.
+        let near = |point: &cursor::CursorPoint, (px, py): (i32, i32)| {
+            (point.px - px).abs() <= 1 && (point.py - py).abs() <= 1
+        };
+        // The sample of the move itself: the first one near the new position
+        // in a short window around `SetCursorPos`, before a hand resting on the
+        // mouse has had time to nudge it. Lines are only written when the
+        // pointer moves (and as heartbeats), and the sampler stamps the time
+        // before it reads the pointer, so the move can be stamped a little
+        // before `SetCursorPos` returned. `Err` lists the samples seen.
+        let sample_of_move =
+            |track: &cursor::CursorTrack, (before, moved): (u64, u64), want: (i32, i32)| {
+                let from = before.saturating_sub(50);
+                let mut seen: Vec<cursor::CursorPoint> = Vec::new();
+                for t in from..=moved + 100 {
+                    if let Some(point) = track.at(t).filter(|point| point.t_ms >= from) {
+                        if seen.last().is_none_or(|last| last.t_ms != point.t_ms) {
+                            seen.push(point);
+                        }
+                    }
+                }
+                seen.iter()
+                    .copied()
+                    .find(|point| near(point, want))
+                    .ok_or(seen)
+            };
+        for (move_ms, x, y, over) in expected {
+            let want = (
+                pixel(x - bounds.left, canvas.0),
+                pixel(y - bounds.top, canvas.1),
             );
-            let point = display_track.at(t).expect("display sample");
-            assert_eq!(
-                (point.px, point.py, point.in_video),
-                (
-                    pixel(x - screen.left, screen_canvas.0),
-                    pixel(y - screen.top, screen_canvas.1),
-                    true
-                ),
-                "display at {x},{y}"
+            let point = sample_of_move(&window_track, move_ms, want).unwrap_or_else(|seen| {
+                panic!("window at {x},{y}: no sample within 1 px of {want:?} around the move at {move_ms:?} ms: {seen:?}")
+            });
+            assert_eq!(point.in_video, over, "window at {x},{y}: {point:?}");
+            let want = (
+                pixel(x - screen.left, screen_canvas.0),
+                pixel(y - screen.top, screen_canvas.1),
             );
+            let point = sample_of_move(&display_track, move_ms, want).unwrap_or_else(|seen| {
+                panic!("display at {x},{y}: no sample within 1 px of {want:?} around the move at {move_ms:?} ms: {seen:?}")
+            });
+            assert!(point.in_video, "display at {x},{y}: {point:?}");
         }
         if clickable {
             let clicks = window_track.clicks(click_from, click_to);
             assert_eq!(clicks.len(), 1, "{clicks:?}");
             assert_eq!(clicks[0].button, MouseButton::Left);
             assert!(clicks[0].at.in_video);
-            assert_eq!(clicks[0].at.px, pixel(100, canvas.0));
+            assert!(
+                near(&clicks[0].at, (pixel(100, canvas.0), pixel(100, canvas.1))),
+                "{clicks:?}"
+            );
         } else {
             eprintln!("Skipped the click: the owned window was not under the pointer");
         }
@@ -3140,7 +3170,37 @@ mod tests {
         ffmpeg(decode).unwrap();
         let new_timing: serde_json::Value =
             serde_json::from_slice(&fs::read(folder.join("capture-timing.json")).unwrap()).unwrap();
-        assert_eq!(new_timing["outputEndMs"], timing["outputEndMs"]);
+        // The output end is reproduced exactly when it comes from the same
+        // native extent. A fixture finalized before the container-metadata
+        // fast path (no `nativeExtentSource`, or `packetTimestamps`) ends where
+        // its last packet does, while the fast path adds one output frame as a
+        // guard to the container's extent, which can also count the last AAC
+        // packet the packet scan left out: a difference of about 42 ms at 30 fps.
+        let (old_end, new_end) = (
+            timing["outputEndMs"].as_f64().unwrap(),
+            new_timing["outputEndMs"].as_f64().unwrap(),
+        );
+        let (old_source, new_source) = (
+            &timing["nativeExtentSource"],
+            &new_timing["nativeExtentSource"],
+        );
+        let output_end_tolerance_ms = if old_source == new_source {
+            assert_eq!(new_timing["outputEndMs"], timing["outputEndMs"]);
+            0.0
+        } else {
+            let frame_ms = 1000.0 / 30.0;
+            let aac_packet_ms = 1024.0 * 1000.0 / 48_000.0;
+            let tolerance = frame_ms + aac_packet_ms;
+            assert!(
+                (new_end - old_end).abs() <= tolerance,
+                "The fixture's output end ({old_end} ms, native extent {old_source}) and the new one ({new_end} ms, native extent {new_source}) differ by more than one frame and one AAC packet ({tolerance:.3} ms)"
+            );
+            println!(
+                "The fixture's native extent is {old_source} and the new one {new_source}: output end {old_end} ms vs {new_end} ms ({:+.3} ms, within {tolerance:.3} ms)",
+                new_end - old_end
+            );
+            tolerance
+        };
         assert_eq!(new_timing["videoHostStartMs"], timing["videoHostStartMs"]);
         let source_mix = hound::WavReader::open(source.join("audio.wav")).unwrap();
         let new_mix = hound::WavReader::open(folder.join("audio.wav")).unwrap();
@@ -3204,11 +3264,16 @@ mod tests {
         let old_video = source.join("video.mp4").metadata().unwrap().len();
         let new_video = final_video.metadata().unwrap().len();
         let actual_total = sum_files(&folder);
+        // Finalizing rewrites capture-timing.json, which for an older fixture
+        // gains `nativeExtentSource`; every other file is the same size.
+        let old_timing = source.join("capture-timing.json").metadata().unwrap().len();
+        let new_timing_bytes = folder.join("capture-timing.json").metadata().unwrap().len();
         assert_eq!(
             actual_total,
-            source_total - old_video - original_bytes.len() as u64 + new_video
+            source_total - old_video - original_bytes.len() as u64 + new_video - old_timing
+                + new_timing_bytes
         );
-        let report = serde_json::json!({"output":folder,"sourceTotalBytes":source_total,"oldVideoBytes":old_video,"nativeVideoBytes":original_bytes.len(),"newVideoBytes":new_video,"actualTotalBytesAfterCleanup":actual_total,"videoReductionPercent":100.0 * (1.0 - new_video as f64 / old_video as f64),"folderReductionPercent":100.0 * (1.0 - actual_total as f64 / source_total as f64),"finalizeSeconds":encode_seconds,"sampledSsimAgainstPreviousOutput":ssim,"timelineUnchanged":true,"fullDecodePassed":true,"audioBytesUnchanged":true,"originalUntouched":true});
+        let report = serde_json::json!({"output":folder,"sourceTotalBytes":source_total,"oldVideoBytes":old_video,"nativeVideoBytes":original_bytes.len(),"newVideoBytes":new_video,"actualTotalBytesAfterCleanup":actual_total,"videoReductionPercent":100.0 * (1.0 - new_video as f64 / old_video as f64),"folderReductionPercent":100.0 * (1.0 - actual_total as f64 / source_total as f64),"finalizeSeconds":encode_seconds,"sampledSsimAgainstPreviousOutput":ssim,"timelineUnchanged":true,"fixtureNativeExtentSource":old_source,"nativeExtentSource":new_source,"fixtureOutputEndMs":old_end,"outputEndMs":new_end,"outputEndToleranceMs":output_end_tolerance_ms,"fullDecodePassed":true,"audioBytesUnchanged":true,"originalUntouched":true});
         fs::write(
             folder.join("verification.json"),
             serde_json::to_vec_pretty(&report).unwrap(),
