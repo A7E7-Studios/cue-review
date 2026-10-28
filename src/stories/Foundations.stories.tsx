@@ -15,7 +15,7 @@ const type = [
 ];
 
 function Swatches({ title, roles }: { title: string; roles: string[] }) {
-  return <section className="workshop-section"><h2>{title}</h2><div className="workshop-row">{roles.map(role => <div key={role} className="workshop-swatch">
+  return <section className="workshop-section"><h2>{title}</h2><div className="workshop-row">{roles.map(role => <div key={role} className="workshop-swatch" style={{ width: 220 }}>
     <span style={{ background: `var(--color-${role})` }}/><code>--color-{role}</code>
   </div>)}</div></section>;
 }
