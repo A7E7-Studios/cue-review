@@ -1,6 +1,7 @@
 import type { backend as RealBackend, CaptureSource, Marker, Microphone, Project, RecordingStatus, Session, Settings, SetupStatus } from '../backend';
 import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript } from './fixtures';
 
+const sampleVideo = new URL('./sample-capture.webm', import.meta.url).href;
 // 'takes' opens the library session with two takes; 'recording-take' records its take 2.
 export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take';
 let projects: Project[] = [];
@@ -35,7 +36,8 @@ export function configureScenario(next: Scenario) {
     recordings[0] = { ...recordings[0], status: next, sourceId: 'display', microphoneId: 'microphone' };
     status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
   }
-  if (next === 'takes' || next === 'recording-take') recordings[0] = clone(twoTakeSession);
+  // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
+  if (next === 'takes' || next === 'recording-take') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
   if (next === 'recording-take') {
     const session = recordings[0];
     session.durationMs = takeTwoStartMs;

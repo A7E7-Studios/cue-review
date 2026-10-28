@@ -1,72 +1,8 @@
-/* Compact controls retain a generous target without enlarging their glyphs. */
-button {
-  border-radius: var(--radius-control);
-  transition: background-color var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out),
-    opacity var(--motion-fast) var(--ease-out);
-}
-button:disabled { transition: none; }
-.danger-button, .danger-button:hover { color: var(--on-red); }
-button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.side-tools, .session-header { min-height: 60px; }
-.session-header { padding-block: 10px; }
-.title-row h1 { font-size: var(--font-title); letter-spacing: -.2px; }
-.header-actions button, .capture-setting, .record-button { min-height: var(--control-height); }
-.record-button { padding-inline: 12px; font-size: var(--font-control); }
-.capture-bar { min-height: 50px; padding-block: 8px; }
-.utility-controls button, .side-tools button:first-child,
-.header-actions .folder-button, .capture-marker, .popover-title button,
-.dialog-title button, .show-sidebar {
-  min-width: var(--icon-hit-area);
-  min-height: var(--icon-hit-area);
-}
-.player { border-radius: var(--radius-panel); }
-.player-controls { min-height: 44px; padding: 6px 8px; font-size: var(--font-meta); gap: 8px; }
-.player-controls button { min-width: 28px; min-height: 28px; padding: 5px; }
-.player-controls input[type='range'] { height: 16px; }
-.meta, .timestamp, .capture-status, .transcript-foot, .option-note,
-.dependency small, .settings-shortcuts { font-size: var(--font-meta); }
-.transcript-header h2 { font-size: var(--font-body); font-weight: 600; }
-.transcript-line p { font-size: var(--font-body); line-height: 1.75; }
-.transcript-line { transition: background-color var(--motion-fast) linear; }
-.word { transition: none; }
-.transcript-foot { min-height: 36px; }
-.transcript-foot button { min-height: 28px; min-width: 28px; }
-.popover { border-radius: var(--radius-panel); background: var(--bg); padding: 10px; max-height: calc(100dvh - 70px); display: flex; flex-direction: column; }
-.popover-title { margin-bottom: 6px; flex-shrink: 0; }
-.option-list { min-height: 0; flex: 1 1 auto; margin-inline: 0; }
-.option-button { min-height: 32px; padding: 6px 8px; }
-.option-button small { font-size: var(--font-meta); }
-.popover .check { flex-shrink: 0; margin-top: 8px; padding-top: 10px; }
-.option-note { margin-top: 8px; }
-.name-dialog, .setup-dialog { border-radius: var(--radius-dialog); padding: 24px; }
-.name-dialog input, .appearance select { min-height: 32px; font-size: var(--font-body); }
-.dialog-actions button { min-height: 32px; padding-inline: 12px; }
-.setup-statuses { display: grid; gap: 12px; margin: 18px 0; }
-.setup-status { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: var(--font-control); }
-.setup-status > span:last-child { color: var(--muted); font-size: var(--font-meta); }
-.setup-details { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 12px; }
-.setup-details > summary { color: var(--muted); cursor: pointer; font-size: var(--font-control); padding: 4px 0; }
-.setup-details .dependency { margin-block: 12px; }
-.setup-dialog .settings-shortcuts { margin-top: 18px; padding-top: 14px; }
-.toast { animation: surface-in var(--motion-normal) var(--ease-out) both; }
-.popover { animation: popover-in var(--motion-fast) var(--ease-out) both; transform-origin: bottom left; }
-@keyframes popover-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes surface-in { from { opacity: 0; } to { opacity: 1; } }
-
-/* Media and recording indicators never animate. Reduced motion also skips fades. */
+/* Motion contract (docs/DESIGN.md). Media and recording indicators never animate, and
+   reduced motion also skips fades, slides and smooth scrolling everywhere. */
 :root[data-motion='reduced'] *, :root[data-motion='reduced'] *::before,
 :root[data-motion='reduced'] *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion='full']) *, :root:not([data-motion='full']) *::before,
   :root:not([data-motion='full']) *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-}
-
-@media (max-width: 530px) {
-  .compact .capture-bar { min-height: 42px; padding-block: 5px; }
-  .compact .record-button { padding-inline: 8px; }
-  .popover { max-height: calc(100dvh - 56px); }
 }

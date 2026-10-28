@@ -1,0 +1,81 @@
+import { useEffect, useLayoutEffect, useRef } from 'react';
+import type { RefObject } from 'react';
+import type { Platform } from '../chrome/windowApi';
+
+// Workspace shortcuts (decision 8). Ctrl/⌘+K lives in the title bar with its field.
+
+/** Ctrl+`key` on Windows and Linux or ⌘`key` on macOS, with no other modifier. */
+export function isCommand(event: KeyboardEvent, os: Platform, key: string): boolean {
+  const modifier = os === 'macos' ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  return modifier && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+}
+
+const TEXT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week']);
+/** A field that takes typing, where shortcuts belong to the field. */
+export function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  return target instanceof HTMLInputElement && TEXT_TYPES.has(target.type);
+}
+
+/** A control that Space activates itself, so Space must not also play or pause. */
+const ACTIVATES_ON_SPACE = 'button, a[href], summary, input:not([type="range"]), [role="button"], [role="checkbox"], [role="switch"], [role="menuitem"], [role="option"], [role="tab"]';
+const BLOCKING = '[role="menu"], [role="dialog"], [role="alertdialog"], [inert]';
+
+export interface Shortcuts {
+  platform: Platform;
+  /** False while a dialog, a picker or a menu is open: every shortcut is ignored. */
+  enabled: boolean;
+  /** Ctrl/⌘+R: record or stop in a draft, Record more in review, Stop while recording. */
+  onRecord: () => void;
+  /** Ctrl/⌘+N: new recording. */
+  onNew: () => void;
+  /** Space, when there is something to play. */
+  onTogglePlay?: () => void;
+  /** ← and →, when there is something to seek. */
+  onSeekBy?: (deltaMs: number) => void;
+  /** Escape in this field clears it. */
+  search?: RefObject<HTMLInputElement | null>;
+  onClearSearch?: () => void;
+  /** Escape anywhere else, for example to close the sidebar overlay. */
+  onEscape?: () => void;
+}
+
+export const SEEK_STEP_MS = 5000;
+
+export function useShortcuts(shortcuts: Shortcuts) {
+  const latest = useRef(shortcuts);
+  useLayoutEffect(() => { latest.current = shortcuts; });
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const current = latest.current;
+      const target = event.target;
+      if (event.defaultPrevented) return;
+      if (event.key === 'Escape') {
+        if (current.search?.current && target === current.search.current && current.onClearSearch) {
+          event.preventDefault();
+          if (current.search.current.value) current.onClearSearch();
+          else current.search.current.blur();
+          return;
+        }
+        if (current.enabled && current.onEscape && !(target instanceof Element && target.closest(BLOCKING))) { event.preventDefault(); current.onEscape(); }
+        return;
+      }
+      if (!current.enabled || isEditable(target) || (target instanceof Element && target.closest(BLOCKING))) return;
+      if (isCommand(event, current.platform, 'r')) { event.preventDefault(); if (!event.repeat) current.onRecord(); return; }
+      if (isCommand(event, current.platform, 'n')) { event.preventDefault(); if (!event.repeat) current.onNew(); return; }
+      // A modifier combination never falls through to a bare-key action.
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === ' ' || event.code === 'Space') {
+        if (!current.onTogglePlay || (target instanceof Element && target.closest(ACTIVATES_ON_SPACE))) return;
+        event.preventDefault();
+        if (!event.repeat) current.onTogglePlay();
+      } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && current.onSeekBy) {
+        event.preventDefault();
+        current.onSeekBy(event.key === 'ArrowLeft' ? -SEEK_STEP_MS : SEEK_STEP_MS);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+}

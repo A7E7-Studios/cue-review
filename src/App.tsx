@@ -1,371 +1,578 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { LogicalSize } from '@tauri-apps/api/dpi';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { backend, videoUrl } from './backend';
-import type { CaptureSource, Marker, Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
-import { activeSegment, activeWord, errorMessage, formatTime, seekTime, segmentSeekMs, wordSeekMs } from './review';
+import type { Project, RecordingStatus, Session, Settings, SetupStatus, Transcript } from './backend';
+import { CompactDragStrip, TitleBar } from './chrome/TitleBar';
+import { platform as detectPlatform } from './chrome/windowApi';
+import type { Platform } from './chrome/windowApi';
+import { SettingsDialog } from './dialogs/SettingsDialog';
 import { Icon } from './icons';
+import { errorMessage, seekTime } from './review';
 import { Sidebar } from './Sidebar';
-import { Dialog } from './ui/Dialog';
-import { prefersReducedMotion } from './ui/usePresence';
+import { CaptureControls } from './workspace/CaptureControls';
+import { captureEmptyState, MediaStage, reviewEmptyState } from './workspace/MediaStage';
+import type { MediaStageViewProps } from './workspace/MediaStage';
+import { PlaybackBar } from './workspace/PlaybackBar';
+import { RecordingDock } from './workspace/RecordingDock';
+import { SessionHeader } from './workspace/SessionHeader';
+import { TranscriptPane } from './workspace/TranscriptPane';
+import { NAMES } from './workspace/types';
+import type { CaptureMenu, MediaEmptyState, WorkspaceMode } from './workspace/types';
+import { DeleteRecordingDialog, NameDialog } from './app/dialogs';
+import type { NameDialogState } from './app/dialogs';
+import { liveTake, recordingTranscript, releaseMedia, sessionVideoUrl, takeInFlight, takeMarks, takeSwapping } from './app/media';
+import { MICROPHONE_UNAVAILABLE, useCaptureDevices } from './app/useCaptureDevices';
+import { useCompactWindow } from './app/useCompactWindow';
+import { usePreviewStream } from './app/usePreviewStream';
+import { useShortcuts } from './app/useShortcuts';
+import { useSidebarLayout } from './app/useSidebarLayout';
+import { useTheme } from './app/useTheme';
 
-type DialogState = {kind:'project'|'renameProject'|'renameSession'|'marker';id?:string;sessionId?:string;value:string;markerTimeMs?:number};
-const EMPTY_TRANSCRIPT: Transcript = {segments:[]};
-function dateLabel(value: string) { return new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
+const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
+const SPEEDS = [1, 1.5, 2, 0.75];
+const STARTING_TAKE: MediaEmptyState = { title: 'Starting the next take…' };
+type Playback = { id: string; time: number; playing: boolean };
+const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
+const settled = (item: Session) => item.status === 'ready' || item.status === 'error';
 
-export default function App() {
-  const [theme,setTheme] = useState(() => localStorage.getItem('cuereview.theme') || 'light');
-  const [projects,setProjects] = useState<Project[]>([]);
-  const [sessions,setSessions] = useState<Session[]>([]);
-  const [session,setSession] = useState<Session|null>(null);
-  const [draft,setDraft] = useState(true);
-  const [sources,setSources] = useState<CaptureSource[]>([]);
-  const [microphones,setMicrophones] = useState<Microphone[]>([]);
-  const [sourceId,setSourceId] = useState('');
-  const [microphoneId,setMicrophoneId] = useState<string|undefined>(undefined);
-  const [systemAudio,setSystemAudio] = useState(false);
-  const [muted,setMuted] = useState(false);
-  const [status,setStatus] = useState<RecordingStatus>({state:'idle'});
-  const [setup,setSetup] = useState<SetupStatus|null>(null);
-  const [transcript,setTranscript] = useState<Transcript>(EMPTY_TRANSCRIPT);
-  const [markers,setMarkers] = useState<Marker[]>([]);
-  const [preview,setPreview] = useState('');
-  const [previewError,setPreviewError] = useState('');
-  const [previewRevision,setPreviewRevision] = useState(0);
-  const [startingRecording,setStartingRecording] = useState(false);
-  const [error,setError] = useState('');
-  const [notice,setNotice] = useState('');
-  const [busy,setBusy] = useState(false);
-  const [loading,setLoading] = useState(true);
-  const [installing,setInstalling] = useState(false);
-  const [menu,setMenu] = useState('');
-  const [dialog,setDialog] = useState<DialogState|null>(null);
-  const [deletion,setDeletion] = useState<{id:string;name:string}|null>(null);
-  const [mediaRevision,setMediaRevision] = useState(0);
-  const deletingFiles = useRef(false);
-  const restorePlayback = useRef<{id:string;time:number;playing:boolean}|null>(null);
-  const deletionFocus = useRef<HTMLElement|null>(null);
-  const nameInput = useRef<HTMLInputElement|null>(null);
-  const deleteCancel = useRef<HTMLButtonElement|null>(null);
-  const dialogFallback = useRef<HTMLElement|null>(null);
-  const [collapsed,setCollapsed] = useState(()=>window.innerWidth<700);
-  const [compact,setCompact] = useState(false);
-  const [time,setTime] = useState(0);
-  const [duration,setDuration] = useState(0);
-  const [playing,setPlaying] = useState(false);
-  const [speed,setSpeed] = useState(1);
-  const [focusVideo,setFocusVideo] = useState(false);
+export interface AppProps {
+  /** Window chrome and shortcut labels follow this platform; detected from the user agent when omitted. */
+  platform?: Platform;
+}
+
+export default function App({ platform: requested }: AppProps = {}) {
+  const os = requested ?? detectPlatform();
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const report = useCallback((problem: unknown) => { setError(errorMessage(problem)); }, []);
+  const [theme, setTheme] = useTheme(report);
+  const sidebar = useSidebarLayout();
+  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
+  const { compact, toggleCompact, exitCompact } = useCompactWindow(report);
+  const {
+    sourceOptions, microphones, source, microphoneUnavailable, refreshDevices,
+    sourceId, setSourceId, microphoneId, setMicrophoneId, systemAudio, setSystemAudio, muted, setMuted,
+  } = useCaptureDevices();
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [session, setSession] = useState<Session | null>(null);
+  const [draft, setDraft] = useState(true);
+  const [transcript, setTranscript] = useState<Transcript>(EMPTY_TRANSCRIPT);
+  const [status, setStatus] = useState<RecordingStatus>({ state: 'idle' });
+  const [setup, setSetup] = useState<SetupStatus | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [captureMenu, setCaptureMenu] = useState<CaptureMenu | null>(null);
+  const [previewRevision, setPreviewRevision] = useState(0);
+  const [startingRecording, setStartingRecording] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [installing, setInstalling] = useState(false);
+  const [dialog, setDialog] = useState<NameDialogState | null>(null);
+  const [deletion, setDeletion] = useState<{ id: string; name: string } | null>(null);
+  const [search, setSearch] = useState('');
+  /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
+  const [mediaRevision, setMediaRevision] = useState(0);
+  /** The session whose video stays unloaded while a take records and is appended to video.mp4. */
+  const [heldMedia, setHeldMedia] = useState<string | null>(null);
+  const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [focusVideo, setFocusVideo] = useState(false);
+
   const video = useRef<HTMLVideoElement>(null);
-  const sourceTrigger = useRef<HTMLButtonElement>(null);
-  const microphoneTrigger = useRef<HTMLButtonElement>(null);
-  const currentLine = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const sheet = useRef<HTMLElement>(null);
+  const deletionFocus = useRef<HTMLElement | null>(null);
+  /** Set while the app itself unloads the video, so the resulting media events are not failures. */
+  const releasing = useRef(false);
+  const restorePlayback = useRef<Playback | null>(null);
   const selection = useRef(0);
   const actionEpoch = useRef(0);
   const runtimeState = useRef<RecordingStatus['state']>('idle');
-  const restoredSize = useRef<{width:number;height:number}|null>(null);
-  const recording = status.state === 'recording';
-  const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
-  const previewEnabled = (draft || recording) && !previewPaused;
-  const processing = session?.status === 'processing' || status.state === 'processing';
-  const locked = recording || busy;
-  const project = projects.find(item => item.id === session?.projectId);
-  const source:CaptureSource|undefined = sources.find(item => item.id === sourceId) || (sourceId ? {id:sourceId,name:'Previously selected source',kind:'display',available:false,detail:'The previously selected capture source is no longer available. Reconnect it and refresh, or choose another source.'} : undefined);
-  const microphone = microphones.find(item => item.id === microphoneId);
-  const microphoneUnavailable = !!microphoneId&&!microphone;
-  const noAudio = !microphoneId&&!systemAudio;
-  const deviceAudioOnly = (source?.kind==='android'||source?.kind==='quest')&&!microphoneId&&systemAudio;
-  const displayedTranscript = recording ? status.liveTranscript || EMPTY_TRANSCRIPT : transcript;
-  const transcriptTime = recording ? status.elapsedMs || 0 : time;
-  const highlighted = activeSegment(displayedTranscript.segments,transcriptTime);
-  const followIndex = recording ? displayedTranscript.segments.length - 1 : highlighted;
+  /** The last runtime error shown, so the poll does not bring back a dismissed one. */
+  const runtimeError = useRef('');
 
-  const report = useCallback((problem:unknown) => {setError(errorMessage(problem));},[]);
+  const recording = status.state === 'recording';
+  const processing = session?.status === 'processing' || status.state === 'processing';
+  const mode: WorkspaceMode = recording ? 'recording' : draft ? 'draft' : 'review';
+  const locked = recording || busy;
+  const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
+  const { preview, previewError } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
+  const mediaHeld = !!session && (heldMedia === session.id || takeInFlight(session));
+  const videoSrc = session && !draft && !mediaHeld ? sessionVideoUrl(session, videoUrl) : undefined;
+  const canRecordMore = !!session && !draft && settled(session) && !!videoSrc;
+  const noAudio = !microphoneId && !systemAudio;
+  const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
+
+  useLayoutEffect(() => { document.documentElement.dataset.platform = os; }, [os]);
+
   const refreshProjects = useCallback(async () => {
-    const [items,allSessions] = await Promise.all([backend.projects(),backend.sessions()]);
+    const [items, all] = await Promise.all([backend.projects(), backend.sessions()]);
+    const sorted = all.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     setProjects(items);
-    setSessions(allSessions.sort((a,b)=>Date.parse(b.createdAt)-Date.parse(a.createdAt)));
-  },[]);
-  const refreshDevices = useCallback(async () => {
-    const [videoSources,audioSources] = await Promise.all([backend.sources(),backend.microphones()]);
-    setSources(videoSources); setMicrophones(audioSources);
-    setSourceId(current => current || videoSources.find(item=>item.available)?.id || '');
-    setMicrophoneId(current => current ?? audioSources[0]?.id ?? '');
-  },[]);
-  const openSession = useCallback(async (id:string) => {
+    setSessions(sorted);
+    // A rename from the CLI (`cue rename`) reaches the open recording's title too.
+    setSession(current => {
+      const fresh = current && sorted.find(item => item.id === current.id);
+      return current && fresh && fresh.name !== current.name ? { ...current, name: fresh.name, autoTitle: fresh.autoTitle } : current;
+    });
+  }, []);
+
+  const openSession = useCallback(async (id: string) => {
     const request = ++selection.current;
-    restorePlayback.current=null;setLoading(true); setMenu(''); setError('');
+    restorePlayback.current = null; setLoading(true); setCaptureMenu(null); setError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
-      const [text,cues] = await Promise.all([backend.transcript(id),backend.markers(id)]);
-      if(request !== selection.current) return;
-      setSession(next);setTranscript(text);setMarkers(cues);setDraft(false);setTime(0);setPlaying(false);setDuration(next.durationMs);
-      if(next.status==='recording'){if(next.sourceId)setSourceId(next.sourceId);setMicrophoneId(next.microphoneId||'');setSystemAudio(next.systemAudio||false);}
-    } catch(problem) { if(request===selection.current) report(problem); }
-    finally { if(request===selection.current) setLoading(false); }
-  },[report]);
+      const text = await backend.transcript(id);
+      if (request !== selection.current) return;
+      setSession(next); setTranscript(text); setDraft(false); setTime(0); setPlaying(false); setDuration(next.durationMs);
+      if (settled(next)) setHeldMedia(current => current === next.id ? null : current);
+      if (next.status === 'recording') {
+        // Restore the capture's choices, including a later take's microphone.
+        const take = next.takes?.find(item => item.status === 'recording');
+        if (next.sourceId) setSourceId(next.sourceId);
+        setMicrophoneId(take ? take.microphoneId || '' : next.microphoneId || '');
+        setSystemAudio(take ? take.systemAudio : next.systemAudio || false);
+      }
+    } catch (problem) { if (request === selection.current) report(problem); }
+    finally { if (request === selection.current) setLoading(false); }
+  }, [report, dismissOverlay, setSourceId, setMicrophoneId, setSystemAudio]);
 
   useEffect(() => {
-    let alive=true;
-    (async()=>{
+    let alive = true;
+    (async () => {
       try {
         await refreshProjects();
-        const [health,recordingStatus] = await Promise.all([backend.setup(),backend.status()]);
-        if(!alive) return;
-        setSetup(health);setStatus(recordingStatus);runtimeState.current=recordingStatus.state;
-        if(recordingStatus.sessionId) await openSession(recordingStatus.sessionId);
+        const [health, recordingStatus] = await Promise.all([backend.setup(), backend.status()]);
+        if (!alive) return;
+        setSetup(health); setStatus(recordingStatus); runtimeState.current = recordingStatus.state;
+        if (recordingStatus.sessionId) await openSession(recordingStatus.sessionId);
         await refreshDevices();
-      } catch(problem) {if(alive) report(problem);}
-      finally {if(alive) setLoading(false);}
+      } catch (problem) { if (alive) report(problem); }
+      finally { if (alive) setLoading(false); }
     })();
-    return ()=>{alive=false;};
-  },[refreshProjects,refreshDevices,openSession,report]);
-  useEffect(()=>{document.documentElement.dataset.theme=theme;localStorage.setItem('cuereview.theme',theme);if(isTauri())getCurrentWindow().setTheme(theme==='dark'?'dark':'light').catch(report);},[theme,report]);
-  useEffect(()=>{
-    if(!isTauri())return;
-    const subscription=listen<string>('close-blocked',event=>setError(event.payload));
-    return()=>{void subscription.then(unlisten=>unlisten());};
-  },[]);
-  useEffect(()=>{
-    if(!isTauri()) return;
-    let alive=true;let polling=false;
-    const poll=async()=>{
-      if(polling)return;polling=true;
-      const epoch=actionEpoch.current;
+    return () => { alive = false; };
+  }, [refreshProjects, refreshDevices, openSession, report]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const subscription = listen<string>('close-blocked', event => setError(event.payload));
+    return () => { void subscription.then(unlisten => unlisten()); };
+  }, []);
+
+  // The CLI can rename or add recordings while the app is in the background.
+  useEffect(() => {
+    const refresh = () => { void refreshProjects().catch(() => {}); };
+    const visible = () => { if (document.visibilityState === 'visible') refresh(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', visible);
+    return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', visible); };
+  }, [refreshProjects]);
+
+  // Runtime status. Stop returns before a take is appended and transcribed, so the open
+  // recording is re-read until it settles, and then its video and transcript reload.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      const epoch = actionEpoch.current;
       try {
-        const next=await backend.status();if(!alive||epoch!==actionEpoch.current)return;setStatus(next);
-        const finished=runtimeState.current==='processing'&&next.state==='idle';
-        runtimeState.current=next.state;
-        if(finished)await refreshProjects();
-        if(!alive||epoch!==actionEpoch.current)return;
-        if(next.error)setError(next.error);
-        if(session && (session.status==='processing'||session.status==='recording') && next.state!=='recording') {
-          const fresh=await backend.session(session.id);if(!alive||epoch!==actionEpoch.current)return;
-          if(fresh.status==='ready'||fresh.status==='error') {
-            const [text,cues]=await Promise.all([backend.transcript(fresh.id),backend.markers(fresh.id)]);
-            if(!alive||epoch!==actionEpoch.current)return;setSession(fresh);setTranscript(text);setMarkers(cues);setDuration(fresh.durationMs);if(!finished)await refreshProjects();
-          }else setSession(fresh);
+        const next = await backend.status();
+        if (!alive || epoch !== actionEpoch.current) return;
+        setStatus(next);
+        const finished = runtimeState.current === 'processing' && next.state === 'idle';
+        runtimeState.current = next.state;
+        if (finished) await refreshProjects();
+        if (!alive || epoch !== actionEpoch.current) return;
+        if (next.error && next.error !== runtimeError.current) setError(next.error);
+        runtimeError.current = next.error || '';
+        if (session && inProgress(session) && next.state !== 'recording') {
+          const fresh = await backend.session(session.id);
+          if (!alive || epoch !== actionEpoch.current) return;
+          if (settled(fresh)) {
+            const text = await backend.transcript(fresh.id);
+            if (!alive || epoch !== actionEpoch.current) return;
+            setSession(fresh); setTranscript(text); setDuration(fresh.durationMs);
+            setHeldMedia(current => current === fresh.id ? null : current);
+            if (!finished) await refreshProjects();
+          } else setSession(fresh);
         }
-      }catch(problem){if(alive)report(problem);}finally{polling=false;}
+      } catch (problem) { if (alive) report(problem); }
+      finally { polling = false; }
     };
-    const timer=setInterval(poll,700);return()=>{alive=false;clearInterval(timer);};
-  },[session?.id,session?.status,refreshProjects,report]);
-  useEffect(()=>{
-    setPreview('');setPreviewError('');
-    if(!sourceId||!previewEnabled||!source?.available)return;
-    let alive=true;let failed=false;const id=crypto.randomUUID();
-    const fail=(problem:unknown)=>{failed=true;if(alive){setPreview('');setPreviewError(errorMessage(problem));}};
-    void backend.preview(sourceId,id,fail).then(stream=>{if(alive&&!failed){setPreview(stream.url);setPreviewError('');}}).catch(fail);
-    return()=>{alive=false;void backend.stopPreview(id).catch(()=>{});};
-  },[sourceId,previewEnabled,source?.available,previewRevision]);
-  useEffect(()=>{if(currentLine.current) currentLine.current.scrollIntoView({behavior:prefersReducedMotion()?'auto':'smooth',block:'nearest'});},[followIndex]);
-  useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
-  useEffect(()=>{
-    if(!['source','microphone'].includes(menu))return;
-    const panel=document.querySelector(`.${menu==='source'?'source-menu':'mic-menu'}`);
-    (panel?.querySelector<HTMLElement>('.option-button[aria-pressed="true"]:not(:disabled)')||panel?.querySelector<HTMLElement>('.option-button:not(:disabled)'))?.focus();
-    const close=(event:PointerEvent)=>{if(event.target instanceof Element&&!event.target.closest('.popover,.capture-setting'))setMenu('');};
-    document.addEventListener('pointerdown',close);return()=>document.removeEventListener('pointerdown',close);
-  },[menu]);
+    const timer = setInterval(poll, 700);
+    return () => { alive = false; clearInterval(timer); };
+  }, [session?.id, session?.status, refreshProjects, report]);
 
-  const prepare = useCallback(()=>{if(locked)return;selection.current++;restorePlayback.current=null;setLoading(false);setDraft(true);setSession(null);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setPlaying(false);setTime(0);setMenu('');},[locked]);
-  const seek=useCallback((ms:number)=>{const next=seekTime(ms,duration);if(video.current)video.current.currentTime=next/1000;setTime(next);},[duration]);
-  const play=useCallback(async()=>{if(!video.current||draft||recording)return;try{if(video.current.paused)await video.current.play();else video.current.pause();}catch(problem){report(problem);}},[draft,recording,report]);
-  const toggleCompact=useCallback(async()=>{
+  useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(timer); }, [notice]);
+  // Compact mode exists only while recording.
+  useEffect(() => { if (compact && !recording) void exitCompact(); }, [compact, recording, exitCompact]);
+
+  const prepare = useCallback(() => {
+    if (locked) return;
+    selection.current++; restorePlayback.current = null; dismissOverlay();
+    setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null);
+  }, [locked, dismissOverlay]);
+  const seek = useCallback((ms: number) => {
+    const next = seekTime(ms, duration);
+    if (video.current) video.current.currentTime = next / 1000;
+    setTime(next);
+  }, [duration]);
+  const togglePlay = useCallback(async () => {
+    const media = video.current;
+    if (!media || mode !== 'review') return;
+    try { if (media.paused) await media.play(); else media.pause(); } catch (problem) { report(problem); }
+  }, [mode, report]);
+  const cycleSpeed = () => {
+    const next = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+    setSpeed(next);
+    if (video.current) video.current.playbackRate = next;
+  };
+
+  /** Unloads the review video, remembering where playback was in case it must come back. */
+  const unloadVideo = (id: string): Playback | null => {
+    const media = video.current;
+    if (!media) return null;
+    const playback = { id, time: media.currentTime, playing: !media.paused };
+    restorePlayback.current = null; releasing.current = true;
+    releaseMedia(media);
+    setPlaying(false);
+    return playback;
+  };
+  const reloadVideo = (playback: Playback | null) => {
+    if (playback) restorePlayback.current = playback;
+    setMediaRevision(value => value + 1);
+  };
+
+  const start = async () => {
+    if (busy || processing || loading || recording) return;
+    actionEpoch.current++; setBusy(true); setError(''); setCaptureMenu(null);
     try {
-      if(isTauri()) {
-        const win=getCurrentWindow();
-        if(!compact){const size=await win.innerSize();const scale=await win.scaleFactor();restoredSize.current={width:size.width/scale,height:size.height/scale};await win.setMinSize(new LogicalSize(420,250));await win.setSize(new LogicalSize(520,320));await win.setAlwaysOnTop(true);}
-        else {await win.setAlwaysOnTop(false);const size=restoredSize.current||{width:1200,height:780};await win.setSize(new LogicalSize(size.width,size.height));await win.setMinSize(new LogicalSize(640,480));}
-      }
-      setCompact(current=>!current);
-    }catch(problem){report(problem);}
-  },[compact,report]);
-  const record=useCallback(async()=>{
-    if(busy||processing||loading)return;actionEpoch.current++;setBusy(true);setError('');setMenu('');
+      if (!source?.available) throw new Error(source?.detail || 'Choose an available screen, window, or connected device first.');
+      if (microphoneUnavailable) throw new Error(MICROPHONE_UNAVAILABLE);
+      setStartingRecording(true);
+      const next = await backend.start(null, null, sourceId, microphoneId || null, systemAudio, muted);
+      setSession(next); setDraft(false); setTranscript(EMPTY_TRANSCRIPT); runtimeState.current = 'recording';
+      setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0 }); setTime(0); setPlaying(false);
+      await refreshProjects();
+    } catch (problem) { report(problem); }
+    finally { setStartingRecording(false); setBusy(false); }
+  };
+  const stop = async () => {
+    if (busy || !recording) return;
+    actionEpoch.current++; setBusy(true); setError('');
     try {
-      if(recording){const next=await backend.stop();setSession(next);setDraft(false);runtimeState.current=next.status==='processing'?'processing':'idle';setStatus({state:runtimeState.current});setDuration(next.durationMs);await refreshProjects();if(compact)await toggleCompact();}
-      else {
-        if(!source?.available)throw new Error(source?.detail||'Choose an available screen, window, or connected device first.');
-        if(microphoneUnavailable)throw new Error('The selected microphone is unavailable. Reconnect it and refresh microphones, choose another input, or select No microphone.');
-        setStartingRecording(true);
-        const next=await backend.start(null,null,sourceId,microphoneId||null,systemAudio,muted);
-        setSession(next);setDraft(false);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);runtimeState.current='recording';setStatus({state:'recording',sessionId:next.id,elapsedMs:0});setTime(0);setPlaying(false);await refreshProjects();
+      const next = await backend.stop();
+      setSession(next); setDraft(false);
+      runtimeState.current = next.status === 'processing' ? 'processing' : 'idle';
+      setStatus({ state: runtimeState.current }); setDuration(next.durationMs);
+      if (settled(next)) {
+        setTranscript(await backend.transcript(next.id));
+        setHeldMedia(current => current === next.id ? null : current);
       }
-    }catch(problem){report(problem);}finally{setStartingRecording(false);setBusy(false);}
-  },[busy,processing,loading,recording,sourceId,source?.available,source?.detail,muted,microphoneId,microphoneUnavailable,systemAudio,refreshProjects,compact,toggleCompact,report]);
-  const addMarker=useCallback(()=>{if(!session)return;setDialog({kind:'marker',id:session.id,value:'',markerTimeMs:recording?status.elapsedMs||0:time});},[session,recording,status.elapsedMs,time]);
-  useEffect(()=>{
-    const key=(event:KeyboardEvent)=>{
-      if(event.defaultPrevented || (event.target instanceof Element && event.target.closest('[role=menu],[role=dialog],[role=alertdialog]')))return;
-      if(event.key==='Escape'){
-        if(deletion){if(!busy){setDeletion(null);deletionFocus.current?.focus();}return;}
-        if(menu==='source')sourceTrigger.current?.focus();
-        if(menu==='microphone')microphoneTrigger.current?.focus();
-        setMenu('');setDialog(null);return;
-      }
-      if(dialog||deletion||menu==='setup')return;
-      if(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)return;
-      if(event.ctrlKey&&event.key.toLowerCase()==='r'){event.preventDefault();void record();}
-      else if(event.ctrlKey&&event.key.toLowerCase()==='n'){event.preventDefault();prepare();}
-      else if(event.code==='Space'){
-        if(event.target instanceof Element && event.target.closest('button,a[href],[role="button"]'))return;
-        event.preventDefault();void play();
-      }
-      else if(event.key==='ArrowLeft'){event.preventDefault();seek(time-5000);}
-      else if(event.key==='ArrowRight'){event.preventDefault();seek(time+5000);}
-      else if(event.key.toLowerCase()==='m'&&session){event.preventDefault();addMarker();}
-    };window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);
-  },[record,prepare,play,seek,time,session,addMarker,dialog,deletion,busy,menu]);
-  const submitDialog=async(event:FormEvent)=>{
-    event.preventDefault();if(!dialog)return;const name=dialog.value.trim();if(!name&&dialog.kind!=='marker')return;setBusy(true);setError('');
+      await refreshProjects();
+    } catch (problem) { report(problem); }
+    finally { setBusy(false); }
+  };
+  /** Continues the open recording as a new take on its own source (decision 10). */
+  const recordMore = async () => {
+    if (!session || !canRecordMore || busy || loading || recording || processing) return;
+    if (microphoneUnavailable) { report(MICROPHONE_UNAVAILABLE); return; }
+    actionEpoch.current++; setBusy(true); setError('');
+    // Windows keeps an open file locked and the backend replaces video.mp4 after the take,
+    // so the video is unloaded first and stays unloaded until processing has finished.
+    const playback = unloadVideo(session.id);
+    setHeldMedia(session.id);
     try {
-      if(dialog.kind==='project'){
-        const next=await backend.createProject(name);setDialog(null);await refreshProjects();
-        if(dialog.sessionId){const moved=await backend.moveSession(dialog.sessionId,next.id);setSession(current=>current?.id===moved.id?{...current,projectId:moved.projectId}:current);await refreshProjects();}
-      }
-      if(dialog.kind==='renameProject'){await backend.renameProject(dialog.id!,name);await refreshProjects();}
-      if(dialog.kind==='renameSession'){await backend.renameSession(dialog.id!,name);if(session && session.id===dialog.id)setSession({...session,name});await refreshProjects();}
-      if(dialog.kind==='marker'){const marker=await backend.addMarker(dialog.id!,dialog.markerTimeMs||0,name||'Review this moment');setMarkers(items=>[...items,marker].sort((a,b)=>a.timeMs-b.timeMs));setNotice('Marker saved');}
-      setDialog(null);
-    }catch(problem){report(problem);}finally{setBusy(false);}
-  };
-  const copyHandoff=async()=>{if(!session)return;setBusy(true);try{const text=await backend.handoff(session.id);await navigator.clipboard.writeText(text);setNotice('Agent instructions copied');setMenu('');}catch(problem){report(problem);}finally{setBusy(false);}};
-  const moveSession=async(id:string,sectionId:string|null):Promise<boolean>=>{
-    const item=sessions.find(item=>item.id===id);
-    if(!item||locked||['recording','processing'].includes(item.status))return false;
-    if(item.projectId===sectionId)return true;
-    setBusy(true);setError('');
-    try{const moved=await backend.moveSession(id,sectionId);setSession(current=>current?.id===moved.id?{...current,projectId:moved.projectId}:current);await refreshProjects();return true;}
-    catch(problem){report(problem);return false;}finally{setBusy(false);}
-  };
-  const reorderSections=async(ids:string[]):Promise<boolean>=>{
-    if(locked)return false;setBusy(true);setError('');
-    try{await backend.reorderProjects(ids);await refreshProjects();return true;}
-    catch(problem){report(problem);return false;}finally{setBusy(false);}
-  };
-  const deleteSection=async(item:Project)=>{
-    if(locked||sessions.some(recording=>recording.projectId===item.id&&['recording','processing'].includes(recording.status)))return;
-    setBusy(true);setError('');
-    try{
-      await backend.deleteProject(item.id);
-      setProjects(items=>items.filter(section=>section.id!==item.id));
-      setSessions(items=>items.map(recording=>recording.projectId===item.id?{...recording,projectId:null}:recording));
-      setSession(current=>current?.projectId===item.id?{...current,projectId:null}:current);
-      await refreshProjects();setNotice('Section deleted. Recordings moved to Recents.');
-    }catch(problem){
-      report(problem);await refreshProjects().catch(()=>{});
-      if(session)await backend.session(session.id).then(fresh=>setSession(current=>current?.id===fresh.id?{...current,projectId:fresh.projectId}:current)).catch(()=>{});
-    }finally{setBusy(false);}
-  };
-  const deleteRecording=async()=>{
-    if(!deletion||locked)return;
-    const item=sessions.find(item=>item.id===deletion.id);
-    if(!item||['recording','processing'].includes(item.status))return;
-    setBusy(true);setError('');selection.current++;actionEpoch.current++;
-    const media=session?.id===item.id?video.current:null;
-    const playback=media?{id:item.id,time:media.currentTime,playing:!media.paused}:null;
-    let deleted=false;
-    try{
-      // Windows holds the playing file open. Release it before native deletion.
-      if(media){restorePlayback.current=null;deletingFiles.current=true;media.pause();media.removeAttribute('src');media.load();setPlaying(false);}
-      await backend.deleteSession(item.id);deleted=true;
-      setSessions(items=>items.filter(recording=>recording.id!==item.id));setDeletion(null);
-      if(session?.id===item.id){setSession(null);setDraft(true);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setTime(0);setDuration(0);setPlaying(false);setLoading(false);setFocusVideo(false);}
-      await refreshProjects();setNotice('Recording deleted');
-    }catch(problem){
-      if(!deleted&&playback){restorePlayback.current=playback;setMediaRevision(value=>value+1);}
+      // The take uses the current microphone choice and the session's own source and system audio.
+      const next = await backend.recordMore(session.id, microphoneId || null, session.systemAudio ?? false, muted);
+      const take = next.takes?.find(item => item.status === 'recording') ?? next.takes?.at(-1);
+      setSession(next); setTime(0);
+      if (next.sourceId) setSourceId(next.sourceId);
+      setSystemAudio(next.systemAudio ?? false);
+      runtimeState.current = 'recording';
+      setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0, takeIndex: take?.index, takeOffsetMs: take?.offsetMs });
+      await refreshProjects();
+    } catch (problem) {
+      setHeldMedia(null);
+      reloadVideo(playback);
       report(problem);
-    }finally{deletingFiles.current=false;setBusy(false);}
+    } finally { releasing.current = false; setBusy(false); }
   };
-  const retry=async()=>{if(!session)return;setBusy(true);try{await backend.retry(session.id);setSession({...session,status:'processing',error:undefined});runtimeState.current='processing';setStatus({state:'processing',sessionId:session.id});setError('');}catch(problem){report(problem);}finally{setBusy(false);}};
-  const install=async()=>{setInstalling(true);setError('');try{await backend.installTranscription();setSetup(await backend.setup());setNotice('Transcription tools installed');}catch(problem){report(problem);}finally{setInstalling(false);}};
-  const selectTheme=()=>setTheme(current=>current==='dark'?'light':'dark');
-  const utilityControls=<div className="utility-controls"><button title={`Use ${theme==='dark'?'light':'dark'} theme`} aria-label={`Use ${theme==='dark'?'light':'dark'} theme`} onClick={selectTheme}><Icon name={theme==='dark'?'sun':'moon'}/></button><button aria-label="Settings" title="Settings" onClick={()=>setMenu(menu==='setup'?'':'setup')}><Icon name="settings"/></button></div>;
+  const recordCommand = () => { if (recording) void stop(); else if (draft) void start(); else void recordMore(); };
 
-  const sourceOptions=sourceId&&!sources.some(item=>item.id===sourceId)&&source?[source,...sources]:sources;
+  const changeSearch = (value: string) => {
+    setSearch(value);
+    if (value.trim() && !sidebarVisible) showSidebar();
+  };
+  useShortcuts({
+    platform: os,
+    enabled: !dialog && !deletion && !settingsOpen && !captureMenu,
+    onRecord: recordCommand,
+    onNew: prepare,
+    onTogglePlay: mode === 'review' && videoSrc ? () => void togglePlay() : undefined,
+    onSeekBy: mode === 'review' ? delta => seek(time + delta) : undefined,
+    search: searchRef,
+    onClearSearch: () => setSearch(''),
+    onEscape: sidebarOverlay ? dismissOverlay : undefined,
+  });
 
-  return <div className={`app ${compact?'compact':''}`}>
-    <div className={`shell ${collapsed?'sidebar-collapsed':''}`}>
-      <Sidebar sections={projects} sessions={sessions} activeId={draft?undefined:session?.id} locked={locked} loading={loading}
-        utilities={!collapsed&&!compact?utilityControls:null} onCollapse={()=>setCollapsed(true)} onNew={prepare}
-        onOpen={id=>void openSession(id)} onRename={item=>setDialog({kind:'renameSession',id:item.id,value:item.name})}
-        onRenameSection={item=>setDialog({kind:'renameProject',id:item.id,value:item.name})}
-        onCreateSection={sessionId=>setDialog({kind:'project',sessionId,value:''})} onMove={moveSession}
-        onReorder={reorderSections} onDeleteSection={item=>void deleteSection(item)}
-        onDeleteSession={item=>{deletionFocus.current=document.activeElement instanceof HTMLElement?document.activeElement:null;setError('');setDeletion({id:item.id,name:item.name});}}/>
-      <main ref={dialogFallback} tabIndex={-1} data-dialog-focus-fallback className="content">
-        <header className="session-header">
-          <div className="session-heading">
-            <div className="title-row"><button className="show-sidebar" aria-label={collapsed?'Show sidebar':'Hide sidebar'} onClick={()=>setCollapsed(!collapsed)}><Icon name="panel"/></button><h1>{draft?'New recording':<button title="Rename recording" disabled={recording||processing||busy} onClick={()=>setDialog({kind:'renameSession',id:session?.id,value:session?.name||''})}>{session?.name||'Recording'}</button>}</h1>{recording&&<span className="live-dot"/>}</div>
-            {!draft&&<div className="meta">{project&&<><span>{project.name}</span><span>·</span></>}<span>{session&&dateLabel(session.createdAt)}</span><span>·</span><span>{recording?formatTime(status.elapsedMs||0):formatTime(session?.durationMs||0)}</span></div>}
-          </div>
-          <div className="header-actions">{(collapsed||compact)&&utilityControls}{recording?<button title={compact?'Restore workspace':'Compact recording mode'} onClick={()=>void toggleCompact()}><Icon name="compact"/>{compact?'Expand':'Compact'}</button>:session&&<><button className="folder-button" title="Open recording folder" aria-label="Open recording folder" onClick={()=>void backend.openFolder(session.id).catch(report)}><Icon name="folder"/></button><button disabled={busy||processing} onClick={()=>void copyHandoff()}>Copy for agent<Icon name="arrow"/></button></>}</div>
-        </header>
+  const changeMuted = async (next: boolean) => {
+    try { await backend.mute(next); setMuted(next); } catch (problem) { report(problem); }
+  };
+  const submitDialog = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!dialog) return;
+    const name = dialog.value.trim();
+    if (!name) return;
+    setBusy(true); setError('');
+    try {
+      if (dialog.kind === 'section') {
+        const next = await backend.createProject(name);
+        setDialog(null);
+        await refreshProjects();
+        if (dialog.sessionId) {
+          const moved = await backend.moveSession(dialog.sessionId, next.id);
+          setSession(current => current?.id === moved.id ? { ...current, projectId: moved.projectId } : current);
+          await refreshProjects();
+        }
+      }
+      if (dialog.kind === 'renameSection') { await backend.renameProject(dialog.id!, name); await refreshProjects(); }
+      if (dialog.kind === 'renameRecording') {
+        await backend.renameSession(dialog.id!, name);
+        setSession(current => current && current.id === dialog.id ? { ...current, name } : current);
+        await refreshProjects();
+      }
+      setDialog(null);
+    } catch (problem) { report(problem); }
+    finally { setBusy(false); }
+  };
+  const copyHandoff = async () => {
+    if (!session || recording || processing) return;
+    setBusy(true);
+    try {
+      const text = await backend.handoff(session.id);
+      await navigator.clipboard.writeText(text);
+      setNotice('Agent instructions copied');
+    } catch (problem) { report(problem); }
+    finally { setBusy(false); }
+  };
+  const moveSession = async (id: string, sectionId: string | null): Promise<boolean> => {
+    const item = sessions.find(entry => entry.id === id);
+    if (!item || locked || inProgress(item)) return false;
+    if (item.projectId === sectionId) return true;
+    setBusy(true); setError('');
+    try {
+      const moved = await backend.moveSession(id, sectionId);
+      setSession(current => current?.id === moved.id ? { ...current, projectId: moved.projectId } : current);
+      await refreshProjects();
+      return true;
+    } catch (problem) { report(problem); return false; }
+    finally { setBusy(false); }
+  };
+  const reorderSections = async (ids: string[]): Promise<boolean> => {
+    if (locked) return false;
+    setBusy(true); setError('');
+    try { await backend.reorderProjects(ids); await refreshProjects(); return true; }
+    catch (problem) { report(problem); return false; }
+    finally { setBusy(false); }
+  };
+  const deleteSection = async (item: Project) => {
+    if (locked || sessions.some(entry => entry.projectId === item.id && inProgress(entry))) return;
+    setBusy(true); setError('');
+    try {
+      await backend.deleteProject(item.id);
+      setProjects(items => items.filter(section => section.id !== item.id));
+      setSessions(items => items.map(entry => entry.projectId === item.id ? { ...entry, projectId: null } : entry));
+      setSession(current => current?.projectId === item.id ? { ...current, projectId: null } : current);
+      await refreshProjects();
+      setNotice('Section deleted. Recordings moved to Recents.');
+    } catch (problem) {
+      report(problem);
+      await refreshProjects().catch(() => {});
+      if (session) await backend.session(session.id).then(fresh => setSession(current => current?.id === fresh.id ? { ...current, projectId: fresh.projectId } : current)).catch(() => {});
+    } finally { setBusy(false); }
+  };
+  const deleteRecording = async () => {
+    if (!deletion || locked) return;
+    const item = sessions.find(entry => entry.id === deletion.id);
+    if (!item || inProgress(item)) return;
+    setBusy(true); setError(''); selection.current++; actionEpoch.current++;
+    // Windows holds the playing file open. Release it before deleting the folder.
+    const playback = session?.id === item.id ? unloadVideo(item.id) : null;
+    let deleted = false;
+    try {
+      await backend.deleteSession(item.id);
+      deleted = true;
+      setSessions(items => items.filter(entry => entry.id !== item.id));
+      setDeletion(null);
+      if (session?.id === item.id) {
+        setSession(null); setDraft(true); setTranscript(EMPTY_TRANSCRIPT); setTime(0); setDuration(0); setPlaying(false); setLoading(false); setFocusVideo(false);
+      }
+      await refreshProjects();
+      setNotice('Recording deleted');
+    } catch (problem) {
+      if (!deleted && playback) reloadVideo(playback);
+      report(problem);
+    } finally { releasing.current = false; setBusy(false); }
+  };
+  const retry = async () => {
+    if (!session) return;
+    setBusy(true);
+    // Retry may finish appending a take to video.mp4 first.
+    const swapping = takeSwapping(session);
+    const playback = swapping ? unloadVideo(session.id) : null;
+    if (swapping) setHeldMedia(session.id);
+    try {
+      await backend.retry(session.id);
+      setSession({ ...session, status: 'processing', error: undefined });
+      runtimeState.current = 'processing';
+      setStatus({ state: 'processing', sessionId: session.id });
+      setError('');
+    } catch (problem) {
+      if (swapping) { setHeldMedia(null); reloadVideo(playback); }
+      report(problem);
+    } finally { releasing.current = false; setBusy(false); }
+  };
+  const install = async () => {
+    setInstalling(true); setError('');
+    try { await backend.installTranscription(); setSetup(await backend.setup()); setNotice('Transcription tools installed'); }
+    catch (problem) { report(problem); }
+    finally { setInstalling(false); }
+  };
+  const openSettings = () => {
+    setSettingsOpen(true);
+    backend.settings().then(setSettings).catch(report);
+  };
+  const saveSettings = async (next: Settings) => { setSettings(await backend.saveSettings(next)); };
 
-        {error&&!dialog&&!deletion&&menu!=='setup'&&<div className="error-banner" role="alert"><Icon name="warning"/><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}><Icon name="close"/></button></div>}
-        {setup&&!setup.ready&&!recording&&<div className="setup-banner"><span>Transcription needs setup.</span><button onClick={()=>setMenu('setup')}>Review setup<Icon name="arrow"/></button></div>}
-        <div className={`review ${focusVideo?'focus-video':''}`}>
-          <section className="player" aria-label={draft||recording?'Capture preview':'Recording video'}>
-            <div className="video-surface">
-              {draft||recording?<>
-                {preview?<img className="preview-image" src={preview} alt={`Live preview of ${source?.name||'capture source'}`}/>:<div className="video-empty"><Icon name="monitor"/><h2>{previewPaused?'Camera preview paused':loading?'Loading…':source&&!source.available?'Capture source unavailable':source?'Loading preview…':'Choose a source'}</h2>{previewPaused&&<p>The camera is in use for recording. Preview returns when you start a new session.</p>}{source&&!source.available&&<p>{source.detail||'Reconnect the selected source and refresh, or choose another source.'}</p>}</div>}
-                {previewError&&<div className="preview-error">{previewError}</div>}
-                {recording&&<div className="record-badge"><i/>Recording <span>{formatTime(status.elapsedMs||0)}</span></div>}
-              </>:session?.videoPath?<video key={`${session.id}:${mediaRevision}`} ref={video} src={videoUrl(session.videoPath)} playsInline preload="metadata" onTimeUpdate={event=>setTime(event.currentTarget.currentTime*1000)} onLoadedMetadata={event=>{setDuration(Number.isFinite(event.currentTarget.duration)?event.currentTarget.duration*1000:session.durationMs);event.currentTarget.playbackRate=speed;const restore=restorePlayback.current;if(restore?.id===session?.id){restorePlayback.current=null;event.currentTarget.currentTime=restore.time;setTime(restore.time*1000);if(restore.playing)void event.currentTarget.play().catch(report);}}} onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)} onClick={()=>void play()} onError={()=>{const restoring=restorePlayback.current?.id===session?.id;if(restoring)restorePlayback.current=null;if(!deletingFiles.current&&!restoring)setError('This recording could not be played. Open its folder to inspect the video file.');}} />:<div className="video-empty"><Icon name="monitor"/><h2>{loading?'Opening recording…':processing?'Finishing your recording':'No video available'}</h2><p>{processing?'Finishing video and transcript…':'Open the session folder to inspect its files.'}</p></div>}
-            </div>
-            {!draft&&!recording&&<div className="player-controls"><button disabled={!session?.videoPath} title={playing?'Pause (Space)':'Play (Space)'} aria-label={playing?'Pause':'Play'} onClick={()=>void play()}><Icon name={playing?'pause':'play'}/></button><span className="time">{formatTime(time)}<span> / {formatTime(duration)}</span></span><input aria-label="Playback position" type="range" min="0" max={duration||1} value={Math.min(time,duration)} step="10" onChange={event=>seek(Number(event.target.value))}/><button title="Playback speed" aria-label={`Playback speed ${speed}×`} onClick={()=>{const next=speed===1?1.5:speed===1.5?2:speed===2?.75:1;setSpeed(next);if(video.current)video.current.playbackRate=next;}}>{speed}×</button><button title="Focus video" aria-label={focusVideo?'Restore transcript':'Focus video'} onClick={()=>setFocusVideo(!focusVideo)}><Icon name="expand"/></button></div>}
-          </section>
-          <section className="transcript" aria-label="Transcript">
-            <div className="transcript-header"><h2>Transcript</h2><span>{recording?(noAudio?'No audio':status.liveTranscript?.error?'Needs attention':deviceAudioOnly?'After recording':'Listening…'):processing?'Transcribing…':transcript.error||session?.status==='error'?'Needs attention':transcript.segments.length?<><Icon name="check"/>Synced</>:draft?(noAudio&&microphoneId!==undefined?'Video only':''):'No speech'}</span></div>
-            <div className="transcript-scroll">
-              {recording&&status.liveTranscript?.error&&<p className="option-note" role="status">{status.liveTranscript.error}</p>}
-              {displayedTranscript.segments.length?displayedTranscript.segments.map((segment,index)=>{const wordIndex=activeWord(segment.words,transcriptTime);return <div key={segment.id||index} className={`transcript-line ${highlighted===index?'current':''}`} ref={followIndex===index?currentLine:undefined}><button className="timestamp" disabled={recording} onClick={()=>seek(segmentSeekMs(segment))} aria-label={`Seek to ${formatTime(segmentSeekMs(segment))}`}>{formatTime(segmentSeekMs(segment))}</button><p>{segment.words.length?segment.words.map((word,indexWord)=><span key={indexWord}><button className={`word ${highlighted===index&&wordIndex===indexWord?'spoken':''}`} disabled={recording} onClick={()=>seek(wordSeekMs(word))} aria-label={`Seek to ${word.text} at ${formatTime(wordSeekMs(word))}`} aria-current={highlighted===index&&wordIndex===indexWord?'true':undefined}>{word.text}</button>{' '}</span>):<button className="segment-text" disabled={recording} onClick={()=>seek(segmentSeekMs(segment))}>{segment.text}</button>}</p></div>}):<div className="transcript-empty"><p>{recording?(noAudio?'No audio input was selected for this recording.':setup?.modelReady?(deviceAudioOnly?'Device audio is transcribed after recording.':'Listening… transcript updates in short batches.'):'Transcription needs setup.'):processing?'Transcribing…':draft?'':transcript.error||session?.error||'No speech was detected in this recording.'}</p></div>}
-              {(session?.status==='error'||transcript.error)&&!processing&&<button className="retry-button" disabled={busy} onClick={()=>void retry()}><Icon name="refresh"/>Retry transcription</button>}
-              {!!markers.length&&<div className="markers"><h3>Markers</h3>{markers.map(marker=><button key={marker.id} disabled={recording} onClick={()=>seek(marker.timeMs)}><Icon name="marker"/><time>{formatTime(marker.timeMs)}</time><span>{marker.label}</span></button>)}</div>}
-            </div>
-            {session&&<div className="transcript-foot"><span>{displayedTranscript.segments.reduce((sum,item)=>sum+item.words.length,0)||''}{displayedTranscript.segments.length?' words':''}</span><button title="Add marker (M)" aria-label="Add marker" onClick={addMarker}><Icon name="marker"/></button></div>}
-          </section>
-        </div>
-        <div className="capture-bar">
-          <button className="capture-setting source-trigger" ref={sourceTrigger} disabled={locked} aria-expanded={menu==='source'} onClick={()=>setMenu(menu==='source'?'':'source')}><Icon name="monitor"/><span>{source?.name||'Choose source'}</span><Icon name="chevron" style={{transform:'rotate(90deg)'}}/></button><span className="divider"/>
-          <button className="capture-setting mic-trigger" ref={microphoneTrigger} title={microphoneUnavailable?'Selected microphone unavailable. Reconnect it or choose another input.':undefined} disabled={busy} aria-expanded={menu==='microphone'} onClick={()=>setMenu(menu==='microphone'?'':'microphone')}><Icon name="mic"/><span>{microphoneUnavailable?'Microphone unavailable':muted&&microphoneId?'Muted':microphone?.name||'No microphone'}</span>{recording&&!muted&&microphoneId&&!microphoneUnavailable&&<meter className="audio-meter" min="0" max="1" value={status.audioLevel||0} aria-label="Microphone audio level"/>}<Icon name="chevron" style={{transform:'rotate(90deg)'}}/></button>
-          {recording&&<button className="capture-marker" aria-label="Add marker" title="Add marker (M)" onClick={addMarker}><Icon name="marker"/></button>}
-          <button className={`record-button ${recording?'is-recording':''}`} disabled={busy||processing||loading||(!recording&&(!source?.available||microphoneUnavailable))} onClick={()=>void record()} title="Start / stop recording (Ctrl+R)"><span className="record-dot"/>{busy?'Please wait…':recording?'Stop':processing?'Transcribing…':'Record'}</button>
-          {menu==='source'&&<div className="popover source-menu"><div className="popover-title">Capture source<button aria-label="Refresh capture devices" onClick={()=>void refreshDevices().then(()=>setPreviewRevision(value=>value+1)).catch(report)}><Icon name="refresh"/></button></div><div className="option-list" role="group" aria-label="Capture sources">{sourceOptions.map(item=><button className={`option-button ${sourceId===item.id?'selected':''}`} aria-pressed={sourceId===item.id} aria-label={`${item.name}${!item.available?' · unavailable':''}`} key={item.id} onClick={()=>{setSourceId(item.id);setPreviewRevision(value=>value+1);if(!draft)prepare();setMenu('');sourceTrigger.current?.focus();}}><span>{item.name}{!item.available&&<small>Unavailable</small>}</span>{sourceId===item.id&&<Icon name="check"/>}</button>)}</div>{source?.detail&&<p className="option-note">{source.detail}</p>}<label className="check"><input type="checkbox" checked={systemAudio} onChange={event=>setSystemAudio(event.target.checked)}/>{source?.kind==='android'||source?.kind==='quest'?'Include device audio':'Include system audio'}</label></div>}
-          {menu==='microphone'&&<div className="popover mic-menu"><div className="popover-title">Microphone<button disabled={recording} aria-label="Refresh microphones" onClick={()=>void refreshDevices().catch(report)}><Icon name="refresh"/></button></div><div className="option-list" role="group" aria-label="Microphone options"><button className={`option-button ${microphoneId===''?'selected':''}`} aria-pressed={microphoneId===''} disabled={recording} onClick={()=>{setMicrophoneId('');setMenu('');microphoneTrigger.current?.focus();}}>No microphone{microphoneId===''&&<Icon name="check"/>}</button>{microphoneUnavailable&&<button className="option-button selected" aria-pressed="true" disabled={recording}>Previously selected microphone · unavailable</button>}{microphones.map(item=><button className={`option-button ${microphoneId===item.id?'selected':''}`} aria-pressed={microphoneId===item.id} disabled={recording} key={item.id} onClick={()=>{setMicrophoneId(item.id);setMenu('');microphoneTrigger.current?.focus();}}>{item.name}{microphoneId===item.id&&<Icon name="check"/>}</button>)}</div>{microphoneUnavailable&&<p className="option-note">Reconnect the selected microphone and refresh microphones, choose another input, or select No microphone.</p>}<label className="check"><input type="checkbox" checked={muted} onChange={async event=>{const next=event.target.checked;try{if(recording)await backend.mute(next);setMuted(next);}catch(problem){report(problem);}}}/>Mute microphone</label></div>}
-        </div>
-      </main>
+  // Workspace contents
+  const marks = takeMarks(session, transcript);
+  const shownTranscript = recording ? recordingTranscript(transcript, status) : { ...transcript, takes: marks };
+  const transcriptError = mode === 'review' && !processing && (session?.status === 'error' || transcript.error)
+    ? transcript.error || session?.error || 'The transcript could not be created.' : undefined;
+  const emptyMessage = recording
+    ? noAudio ? 'No audio input was selected for this recording.'
+      : !setup?.modelReady ? 'Transcription needs setup.'
+        : deviceAudioOnly ? 'Device audio is transcribed after recording.' : 'Listening… transcript updates in short batches.'
+    : processing ? 'Transcribing…'
+      : draft ? noAudio && microphoneId !== undefined ? 'No audio input is selected, so this recording will be video only.' : 'Words appear here while you record.'
+        : loading ? undefined : 'No speech was detected in this recording.';
+  const empty = mode !== 'review'
+    ? captureEmptyState({ source, loading, paused: previewPaused, previewError })
+    : busy && heldMedia === session?.id && !processing ? STARTING_TAKE
+      : reviewEmptyState({ loading, processing: processing || mediaHeld });
+  const videoProps: MediaStageViewProps['videoProps'] = {
+    onTimeUpdate: event => setTime(event.currentTarget.currentTime * 1000),
+    onLoadedMetadata: event => {
+      const media = event.currentTarget;
+      setDuration(Number.isFinite(media.duration) ? media.duration * 1000 : session?.durationMs ?? 0);
+      media.playbackRate = speed;
+      const restore = restorePlayback.current;
+      if (restore && restore.id === session?.id) {
+        restorePlayback.current = null;
+        media.currentTime = restore.time; setTime(restore.time * 1000);
+        if (restore.playing) void media.play().catch(report);
+      }
+    },
+    onPlay: () => setPlaying(true),
+    onPause: () => setPlaying(false),
+    onEnded: () => setPlaying(false),
+    onClick: () => void togglePlay(),
+    onError: () => {
+      const restoring = restorePlayback.current?.id === session?.id;
+      if (restoring) restorePlayback.current = null;
+      if (!releasing.current && !restoring) setError('This recording could not be played. Open its folder to inspect the video file.');
+    },
+  };
+
+  const dock = <RecordingDock platform={os} elapsedMs={status.elapsedMs || 0} take={status.takeIndex ?? 1} audioLevel={status.audioLevel}
+    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable} muted={muted} onMuted={next => void changeMuted(next)}
+    compact={compact} onToggleCompact={() => void toggleCompact()} stopDisabled={busy} onStop={() => void stop()}/>;
+  const controls = mode === 'recording' ? dock
+    : mode === 'draft' ? <CaptureControls platform={os} sources={sourceOptions} source={source} microphones={microphones} microphoneId={microphoneId}
+        microphoneUnavailable={microphoneUnavailable} systemAudio={systemAudio} muted={muted} menu={captureMenu} onMenu={setCaptureMenu}
+        onSelectSource={id => { setSourceId(id); setPreviewRevision(value => value + 1); }} onSelectMicrophone={setMicrophoneId}
+        onSystemAudio={setSystemAudio} onMuted={setMuted}
+        onRefreshSources={() => void refreshDevices().then(() => setPreviewRevision(value => value + 1)).catch(report)}
+        onRefreshMicrophones={() => void refreshDevices().catch(report)}
+        locked={locked} busy={busy} recordLabel={busy ? NAMES.pleaseWait : processing ? NAMES.transcribing : NAMES.record}
+        recordDisabled={busy || processing || loading || !source?.available || microphoneUnavailable} onRecord={() => void start()}/>
+      : <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
+          playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onCycleSpeed={cycleSpeed}
+          focused={focusVideo} onToggleFocus={() => setFocusVideo(value => !value)}
+          recordMoreDisabled={!canRecordMore || busy || loading || processing} onRecordMore={() => void recordMore()}/>;
+
+  const errorBanner = error && !dialog && !deletion && !settingsOpen && <div className="app-error" role="alert">
+    <Icon name="warning" strokeWidth={1.8}/><p>{error}</p>
+    <button type="button" aria-label={NAMES.dismissError} title={NAMES.dismissError} onClick={() => setError('')}><Icon name="close" strokeWidth={1.8}/></button>
+  </div>;
+  const setupBanner = setup && !setup.ready && !recording && <div className="app-setup">
+    <span>Transcription needs setup.</span>
+    <button type="button" onClick={openSettings}>{NAMES.reviewSetup}<Icon name="arrow" strokeWidth={1.8}/></button>
+  </div>;
+
+  const workspace = <main ref={sheet} className="app-sheet" tabIndex={-1} data-dialog-focus-fallback>
+    <div className="cr-center">
+      <SessionHeader title={draft ? NAMES.newRecording : session?.name || 'Recording'} draft={draft}
+        renameDisabled={recording || processing || busy} onRename={() => session && setDialog({ kind: 'renameRecording', id: session.id, value: session.name })}
+        onOpenFolder={() => session && void backend.openFolder(session.id).catch(report)}
+        copyDisabled={recording || processing || busy} onCopyForAgent={() => void copyHandoff()}/>
+      {errorBanner}
+      {setupBanner}
+      <MediaStage mode={mode} previewUrl={preview || undefined} sourceName={source?.name} previewError={previewError || undefined}
+        videoSrc={videoSrc} videoKey={`${session?.id}:${mediaRevision}`} videoRef={video} videoProps={videoProps} empty={empty}
+        focused={focusVideo && mode === 'review'}>
+        {controls}
+      </MediaStage>
     </div>
-    <Dialog open={menu==='setup'} onClose={()=>setMenu('')} title="Settings" className="setup-dialog" closeLabel="Close settings" fallbackFocusRef={dialogFallback}>
-      <label className="appearance">Appearance<select value={theme} disabled={installing} onChange={event=>setTheme(event.target.value)}><option value="light">Light</option><option value="dark">Dark</option></select></label>
-      {error&&<p className="dialog-error" role="alert">{error}</p>}
-      {setup?<>
-        <div className="setup-statuses">{[
-          {label:'Capture and playback',available:['ffmpeg','ffprobe'].every(name=>setup.dependencies?.some(item=>item.name===name&&item.available)),optional:false},
-          {label:'Transcription',available:setup.modelReady&&['whisper-cli','whisper-vad-speech-segments'].every(name=>setup.dependencies?.some(item=>item.name===name&&item.available)),optional:false},
-          {label:'USB devices',available:['adb','scrcpy'].every(name=>setup.dependencies?.some(item=>item.name===name&&item.available)),optional:true},
-        ].map(item=><div className="setup-status" key={item.label}><span>{item.label}</span><span><Icon name={item.available?'check':'warning'}/>{item.available?'Available':item.optional?'Optional setup':'Setup needed'}</span></div>)}</div>
-        {setup.issues.map((issue,index)=><p className="setup-issue" key={index}>{issue}</p>)}
-        {(!setup.modelReady||setup.dependencies?.some(item=>(item.name==='whisper-cli'||item.name==='whisper-vad-speech-segments')&&!item.available))&&<button className="primary" disabled={installing} onClick={()=>void install()}>{installing?'Downloading speech tools…':'Install transcription'}</button>}
-        {installing&&<p className="option-note" role="status">Downloading the speech model and tools. This may take a few minutes.</p>}
-        <details className="setup-details"><summary>Technical details</summary>{setup.dependencies?.map(item=><div className="dependency" key={item.name}><Icon name={item.available?'check':'warning'}/><div><strong>{item.name}</strong><small>{item.detail||item.path||(item.available?'Available':'Missing')}</small></div></div>)}</details>
-        <button className="check-setup" disabled={installing} onClick={()=>void backend.setup().then(setSetup).catch(report)}><Icon name="refresh"/>Check again</button>
-      </>:<p>Start the desktop app to inspect installed recording tools.</p>}
-      <p className="settings-shortcuts">Ctrl+N new recording · Ctrl+R record / stop<br/>Space play / pause · ← → seek 5 seconds · M add marker</p>
-    </Dialog>
-    <Dialog open={!!dialog} onClose={()=>setDialog(null)} title={dialog?.kind==='project'?'New section':dialog?.kind==='renameProject'?'Rename section':dialog?.kind==='marker'?'Add marker':'Recording name'} className="name-dialog" busy={busy} initialFocusRef={nameInput} fallbackFocusRef={dialogFallback} onSubmit={event=>void submitDialog(event)}>
-      {dialog?.kind==='marker'&&<p className="marker-time">At {formatTime(dialog.markerTimeMs||0)}</p>}
-      {error&&<p className="dialog-error" role="alert">{error}</p>}
-      <label>{dialog?.kind==='marker'?'Note':'Name'}<input ref={nameInput} disabled={busy} maxLength={160} value={dialog?.value||''} onChange={event=>{if(dialog)setDialog({...dialog,value:event.target.value});}}/></label>
-      <div className="dialog-actions"><button type="button" disabled={busy} onClick={()=>setDialog(null)}>Cancel</button><button className="primary" disabled={busy||(!dialog?.value.trim()&&dialog?.kind!=='marker')} type="submit">{busy?'Saving…':'Save'}</button></div>
-    </Dialog>
-    <Dialog open={!!deletion} onClose={()=>setDeletion(null)} title="Delete recording?" role="alertdialog" className="name-dialog delete-dialog" description={<>Permanently delete <strong>{deletion?.name}</strong> and all its files, including video, audio, transcript, and markers? This cannot be undone.</>} busy={busy} initialFocusRef={deleteCancel} restoreFocusRef={deletionFocus} fallbackFocusRef={dialogFallback}>
-      {error&&<p className="dialog-error" role="alert">{error}</p>}
-      <div className="dialog-actions"><button ref={deleteCancel} disabled={busy} onClick={()=>setDeletion(null)}>Cancel</button><button className="danger-button" disabled={busy} onClick={()=>void deleteRecording()}>{busy?'Deleting…':'Delete recording'}</button></div>
-    </Dialog>
-    {notice&&<div className="toast" role="status">{notice}</div>}
+    {!(focusVideo && mode === 'review') && <div className="cr-transcript-column">
+      <TranscriptPane mode={mode} transcript={shownTranscript} timeMs={recording ? (status.takeOffsetMs ?? 0) + (status.elapsedMs || 0) : time} onSeek={seek}
+        status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
+        liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
+        error={transcriptError} onRetry={() => void retry()} retryDisabled={busy}/>
+    </div>}
+  </main>;
+
+  const sidebarElement = sidebarVisible && <Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
+    sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
+    onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
+    onRename={item => setDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
+    onRenameSection={item => setDialog({ kind: 'renameSection', id: item.id, value: item.name })}
+    onCreateSection={sessionId => setDialog({ kind: 'section', sessionId, value: '' })}
+    onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
+    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setError(''); setDeletion({ id: item.id, name: item.name }); }}/>;
+  const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
+    search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
+
+  return <div className="app" data-platform={os} data-sidebar={compact ? undefined : sidebarOverlay ? 'overlay' : sidebarVisible ? 'docked' : 'hidden'} data-compact={compact || undefined}>
+    {compact ? <>
+      <CompactDragStrip platform={os}/>
+      <main ref={sheet} className="app-compact" tabIndex={-1} data-dialog-focus-fallback>{errorBanner}{dock}</main>
+    </> : os === 'macos' ? <div className="app-body">
+      {sidebarElement}
+      <div className="app-main">{titleBar}{workspace}</div>
+    </div> : <>
+      {titleBar}
+      <div className="app-body">{sidebarElement}{workspace}</div>
+    </>}
+    {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
+
+    <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
+      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(report)}
+      settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? error : undefined}/>
+    <NameDialog state={dialog} busy={busy} error={dialog ? error : ''} fallbackFocusRef={sheet}
+      onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>
+    <DeleteRecordingDialog target={deletion} busy={busy} error={deletion ? error : ''} restoreFocusRef={deletionFocus} fallbackFocusRef={sheet}
+      onClose={() => setDeletion(null)} onDelete={() => void deleteRecording()}/>
+    {notice && <div className="app-toast" role="status">{notice}</div>}
   </div>;
 }
