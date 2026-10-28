@@ -98,3 +98,15 @@ Use a dedicated `CUEREVIEW_DATA_DIR` for desktop verification. The review script
 `scripts/verify-device-ui.cjs` requires `CUEREVIEW_TEST_DEVICE` set to an authorized ADB serial. It launches an isolated app, records without creating a project or entering a name, checks direct device menus and playback, and assigns/unassigns an optional group without changing the media. Set `ADB_SERVER_SOCKET` too when the device belongs to a nondefault server.
 
 See [architecture](docs/ARCHITECTURE.md) and the [verification checklist](docs/VERIFICATION.md) for boundaries and remaining hardware validation. Passing display capture does not establish Android/Quest correctness. Device-to-PC-microphone alignment needs hardware measurement, and recordings should be checked before relying on millisecond-level cross-device alignment.
+
+## UI workshop
+
+The [design review and shared foundation](docs/DESIGN.md) records the visual direction, implemented changes, motion rules and prioritized remaining work.
+
+Run `npm run storybook` and open `http://127.0.0.1:6006`. `npm run build-storybook` produces the standalone workshop in `storybook-static/`.
+
+The workshop uses the application's real Sidebar, Dialog and App components, with the same tokens and styles. Theme, motion and viewport toolbar controls make it possible to inspect light/dark appearance, reduced motion, a small window and the compact recorder. Stories cover empty, long-name, long-list, busy and error states. Interaction stories exercise moving recordings, closing menus, device selection and dialog focus restoration.
+
+Workspace stories replace the backend through Storybook-only Vite aliases. Their sample state stays in memory: they cannot capture a screen, open a microphone, download tools or read/delete recording files. The illustrative preview is generated sample artwork; the transcript-only review deliberately has no recording video. These aliases and fixture assets are excluded from the production application bundle.
+
+The accessibility panel is an inspection aid; its findings are not currently a CI acceptance gate or a claim that every story passes an accessibility audit. Existing application tests remain the behavioral gate. Native capture, playback and window-management checks still require the desktop application.

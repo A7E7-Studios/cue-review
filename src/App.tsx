@@ -9,8 +9,10 @@ import type { CaptureSource, Marker, Microphone, Project, RecordingStatus, Sessi
 import { activeSegment, activeWord, errorMessage, formatTime, seekTime, segmentSeekMs, wordSeekMs } from './review';
 import { Icon } from './icons';
 import { Sidebar } from './Sidebar';
+import { Dialog } from './ui/Dialog';
+import { prefersReducedMotion } from './ui/usePresence';
 
-type Dialog = {kind:'project'|'renameProject'|'renameSession'|'marker';id?:string;sessionId?:string;value:string};
+type DialogState = {kind:'project'|'renameProject'|'renameSession'|'marker';id?:string;sessionId?:string;value:string;markerTimeMs?:number};
 const EMPTY_TRANSCRIPT: Transcript = {segments:[]};
 function dateLabel(value: string) { return new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 
@@ -40,12 +42,15 @@ export default function App() {
   const [loading,setLoading] = useState(true);
   const [installing,setInstalling] = useState(false);
   const [menu,setMenu] = useState('');
-  const [dialog,setDialog] = useState<Dialog|null>(null);
+  const [dialog,setDialog] = useState<DialogState|null>(null);
   const [deletion,setDeletion] = useState<{id:string;name:string}|null>(null);
   const [mediaRevision,setMediaRevision] = useState(0);
   const deletingFiles = useRef(false);
   const restorePlayback = useRef<{id:string;time:number;playing:boolean}|null>(null);
   const deletionFocus = useRef<HTMLElement|null>(null);
+  const nameInput = useRef<HTMLInputElement|null>(null);
+  const deleteCancel = useRef<HTMLButtonElement|null>(null);
+  const dialogFallback = useRef<HTMLElement|null>(null);
   const [collapsed,setCollapsed] = useState(()=>window.innerWidth<700);
   const [compact,setCompact] = useState(false);
   const [time,setTime] = useState(0);
@@ -155,7 +160,7 @@ export default function App() {
     void backend.preview(sourceId,id,fail).then(stream=>{if(alive&&!failed){setPreview(stream.url);setPreviewError('');}}).catch(fail);
     return()=>{alive=false;void backend.stopPreview(id).catch(()=>{});};
   },[sourceId,previewEnabled,source?.available,previewRevision]);
-  useEffect(()=>{if(currentLine.current) currentLine.current.scrollIntoView({behavior:'smooth',block:'nearest'});},[followIndex]);
+  useEffect(()=>{if(currentLine.current) currentLine.current.scrollIntoView({behavior:prefersReducedMotion()?'auto':'smooth',block:'nearest'});},[followIndex]);
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
   useEffect(()=>{
     if(!['source','microphone'].includes(menu))return;
@@ -191,10 +196,10 @@ export default function App() {
       }
     }catch(problem){report(problem);}finally{setStartingRecording(false);setBusy(false);}
   },[busy,processing,loading,recording,sourceId,source?.available,source?.detail,muted,microphoneId,microphoneUnavailable,systemAudio,refreshProjects,compact,toggleCompact,report]);
-  const addMarker=useCallback(()=>{if(!session)return;setDialog({kind:'marker',id:session.id,value:''});},[session]);
+  const addMarker=useCallback(()=>{if(!session)return;setDialog({kind:'marker',id:session.id,value:'',markerTimeMs:recording?status.elapsedMs||0:time});},[session,recording,status.elapsedMs,time]);
   useEffect(()=>{
     const key=(event:KeyboardEvent)=>{
-      if(event.defaultPrevented || (event.target instanceof Element && event.target.closest('[role=menu]')))return;
+      if(event.defaultPrevented || (event.target instanceof Element && event.target.closest('[role=menu],[role=dialog],[role=alertdialog]')))return;
       if(event.key==='Escape'){
         if(deletion){if(!busy){setDeletion(null);deletionFocus.current?.focus();}return;}
         if(menu==='source')sourceTrigger.current?.focus();
@@ -223,7 +228,7 @@ export default function App() {
       }
       if(dialog.kind==='renameProject'){await backend.renameProject(dialog.id!,name);await refreshProjects();}
       if(dialog.kind==='renameSession'){await backend.renameSession(dialog.id!,name);if(session && session.id===dialog.id)setSession({...session,name});await refreshProjects();}
-      if(dialog.kind==='marker'){const marker=await backend.addMarker(dialog.id!,recording?status.elapsedMs||0:time,name||'Review this moment');setMarkers(items=>[...items,marker].sort((a,b)=>a.timeMs-b.timeMs));setNotice('Marker saved');}
+      if(dialog.kind==='marker'){const marker=await backend.addMarker(dialog.id!,dialog.markerTimeMs||0,name||'Review this moment');setMarkers(items=>[...items,marker].sort((a,b)=>a.timeMs-b.timeMs));setNotice('Marker saved');}
       setDialog(null);
     }catch(problem){report(problem);}finally{setBusy(false);}
   };
@@ -291,7 +296,7 @@ export default function App() {
         onCreateSection={sessionId=>setDialog({kind:'project',sessionId,value:''})} onMove={moveSession}
         onReorder={reorderSections} onDeleteSection={item=>void deleteSection(item)}
         onDeleteSession={item=>{deletionFocus.current=document.activeElement instanceof HTMLElement?document.activeElement:null;setError('');setDeletion({id:item.id,name:item.name});}}/>
-      <main className="content">
+      <main ref={dialogFallback} tabIndex={-1} data-dialog-focus-fallback className="content">
         <header className="session-header">
           <div className="session-heading">
             <div className="title-row"><button className="show-sidebar" aria-label={collapsed?'Show sidebar':'Hide sidebar'} onClick={()=>setCollapsed(!collapsed)}><Icon name="panel"/></button><h1>{draft?'New recording':<button title="Rename recording" disabled={recording||processing||busy} onClick={()=>setDialog({kind:'renameSession',id:session?.id,value:session?.name||''})}>{session?.name||'Recording'}</button>}</h1>{recording&&<span className="live-dot"/>}</div>
@@ -334,9 +339,33 @@ export default function App() {
         </div>
       </main>
     </div>
-    {menu==='setup'&&<div className="modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)setMenu('');}}><section className="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title"><div className="dialog-title"><h2 id="setup-title">Settings</h2><button aria-label="Close settings" onClick={()=>setMenu('')}><Icon name="close"/></button></div><label className="appearance">Appearance<select value={theme} onChange={event=>setTheme(event.target.value)}><option value="light">Light</option><option value="dark">Dark</option></select></label><h3>Transcription</h3>{error&&<p className="dialog-error" role="alert">{error}</p>}{setup?<><p>{setup.ready?'Ready to transcribe on this computer.':'Complete setup to transcribe recordings on this computer.'}</p>{setup.dependencies?.map(item=><div className="dependency" key={item.name}><Icon name={item.available?'check':'warning'}/><div><strong>{item.name}</strong><small>{item.detail||item.path||(item.available?'Available':'Missing')}</small></div></div>)}{setup.issues.map((issue,index)=><p className="setup-issue" key={index}>{issue}</p>)}{(!setup.modelReady||setup.dependencies?.some(item=>(item.name==='whisper-cli'||item.name==='whisper-vad-speech-segments')&&!item.available))&&<button className="primary" disabled={installing} onClick={()=>void install()}>{installing?'Downloading speech tools…':'Install transcription'}</button>}{installing&&<p className="option-note" role="status">Downloading the speech model and tools. This may take a few minutes.</p>}<button className="check-setup" onClick={()=>void backend.setup().then(setSetup).catch(report)}><Icon name="refresh"/>Check again</button></>:<p>Start the desktop app to inspect installed recording tools.</p>}<p className="settings-shortcuts">Ctrl+N new recording · Ctrl+R record / stop<br/>Space play / pause · ← → seek 5 seconds · M add marker</p></section></div>}
-    {dialog&&<div className="modal-backdrop"><form className="name-dialog" role="dialog" aria-modal="true" aria-labelledby="name-title" onSubmit={event=>void submitDialog(event)}><h2 id="name-title">{dialog.kind==='project'?'New section':dialog.kind==='renameProject'?'Rename section':dialog.kind==='marker'?'Add marker':'Recording name'}</h2>{error&&<p className="dialog-error" role="alert">{error}</p>}<label>{dialog.kind==='marker'?'Note':'Name'}<input autoFocus maxLength={160} value={dialog.value} onChange={event=>setDialog({...dialog,value:event.target.value})}/></label><div className="dialog-actions"><button type="button" onClick={()=>setDialog(null)}>Cancel</button><button className="primary" disabled={busy||(!dialog.value.trim()&&dialog.kind!=='marker')} type="submit">{busy?'Saving…':'Save'}</button></div></form></div>}
-    {deletion&&<div className="modal-backdrop"><section className="name-dialog delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description"><h2 id="delete-title">Delete recording?</h2><p id="delete-description">Permanently delete <strong>{deletion.name}</strong> and all its files, including video, audio, transcript, and markers? This cannot be undone.</p>{error&&<p className="dialog-error" role="alert">{error}</p>}<div className="dialog-actions"><button autoFocus disabled={busy} onClick={()=>{setDeletion(null);deletionFocus.current?.focus();}}>Cancel</button><button className="danger-button" disabled={busy} onClick={()=>void deleteRecording()}>{busy?'Deleting…':'Delete recording'}</button></div></section></div>}
+    <Dialog open={menu==='setup'} onClose={()=>setMenu('')} title="Settings" className="setup-dialog" closeLabel="Close settings" fallbackFocusRef={dialogFallback}>
+      <label className="appearance">Appearance<select value={theme} disabled={installing} onChange={event=>setTheme(event.target.value)}><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      {error&&<p className="dialog-error" role="alert">{error}</p>}
+      {setup?<>
+        <div className="setup-statuses">{[
+          {label:'Capture and playback',available:['ffmpeg','ffprobe'].every(name=>setup.dependencies?.some(item=>item.name===name&&item.available)),optional:false},
+          {label:'Transcription',available:setup.modelReady&&['whisper-cli','whisper-vad-speech-segments'].every(name=>setup.dependencies?.some(item=>item.name===name&&item.available)),optional:false},
+          {label:'USB devices',available:['adb','scrcpy'].every(name=>setup.dependencies?.some(item=>item.name===name&&item.available)),optional:true},
+        ].map(item=><div className="setup-status" key={item.label}><span>{item.label}</span><span><Icon name={item.available?'check':'warning'}/>{item.available?'Available':item.optional?'Optional setup':'Setup needed'}</span></div>)}</div>
+        {setup.issues.map((issue,index)=><p className="setup-issue" key={index}>{issue}</p>)}
+        {(!setup.modelReady||setup.dependencies?.some(item=>(item.name==='whisper-cli'||item.name==='whisper-vad-speech-segments')&&!item.available))&&<button className="primary" disabled={installing} onClick={()=>void install()}>{installing?'Downloading speech tools…':'Install transcription'}</button>}
+        {installing&&<p className="option-note" role="status">Downloading the speech model and tools. This may take a few minutes.</p>}
+        <details className="setup-details"><summary>Technical details</summary>{setup.dependencies?.map(item=><div className="dependency" key={item.name}><Icon name={item.available?'check':'warning'}/><div><strong>{item.name}</strong><small>{item.detail||item.path||(item.available?'Available':'Missing')}</small></div></div>)}</details>
+        <button className="check-setup" disabled={installing} onClick={()=>void backend.setup().then(setSetup).catch(report)}><Icon name="refresh"/>Check again</button>
+      </>:<p>Start the desktop app to inspect installed recording tools.</p>}
+      <p className="settings-shortcuts">Ctrl+N new recording · Ctrl+R record / stop<br/>Space play / pause · ← → seek 5 seconds · M add marker</p>
+    </Dialog>
+    <Dialog open={!!dialog} onClose={()=>setDialog(null)} title={dialog?.kind==='project'?'New section':dialog?.kind==='renameProject'?'Rename section':dialog?.kind==='marker'?'Add marker':'Recording name'} className="name-dialog" busy={busy} initialFocusRef={nameInput} fallbackFocusRef={dialogFallback} onSubmit={event=>void submitDialog(event)}>
+      {dialog?.kind==='marker'&&<p className="marker-time">At {formatTime(dialog.markerTimeMs||0)}</p>}
+      {error&&<p className="dialog-error" role="alert">{error}</p>}
+      <label>{dialog?.kind==='marker'?'Note':'Name'}<input ref={nameInput} disabled={busy} maxLength={160} value={dialog?.value||''} onChange={event=>{if(dialog)setDialog({...dialog,value:event.target.value});}}/></label>
+      <div className="dialog-actions"><button type="button" disabled={busy} onClick={()=>setDialog(null)}>Cancel</button><button className="primary" disabled={busy||(!dialog?.value.trim()&&dialog?.kind!=='marker')} type="submit">{busy?'Saving…':'Save'}</button></div>
+    </Dialog>
+    <Dialog open={!!deletion} onClose={()=>setDeletion(null)} title="Delete recording?" role="alertdialog" className="name-dialog delete-dialog" description={<>Permanently delete <strong>{deletion?.name}</strong> and all its files, including video, audio, transcript, and markers? This cannot be undone.</>} busy={busy} initialFocusRef={deleteCancel} restoreFocusRef={deletionFocus} fallbackFocusRef={dialogFallback}>
+      {error&&<p className="dialog-error" role="alert">{error}</p>}
+      <div className="dialog-actions"><button ref={deleteCancel} disabled={busy} onClick={()=>setDeletion(null)}>Cancel</button><button className="danger-button" disabled={busy} onClick={()=>void deleteRecording()}>{busy?'Deleting…':'Delete recording'}</button></div>
+    </Dialog>
     {notice&&<div className="toast" role="status">{notice}</div>}
   </div>;
 }

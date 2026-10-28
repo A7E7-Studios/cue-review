@@ -19,7 +19,7 @@ let markers:Marker[];
 const backend=mocks.backend;
 const timestamp='2026-10-27T10:42:00Z';
 const newSession=(id='s1'):Session=>({id,projectId:'p1',name:'Review Alpha',createdAt:timestamp,durationMs:10000,status:'ready',videoPath:'C:/recordings/video.mp4',sourceId:'display1',microphoneId:'mic1'});
-const readySetup:SetupStatus={ready:true,issues:[],modelReady:true,dependencies:[{name:'whisper-cli',available:true}]};
+const readySetup:SetupStatus={ready:true,issues:[],modelReady:true,dependencies:['ffmpeg','ffprobe','whisper-cli','whisper-vad-speech-segments','adb','scrcpy'].map(name=>({name,available:true}))};
 
 beforeEach(()=>{
   vi.clearAllMocks();
@@ -142,13 +142,14 @@ describe('keyboard interaction',()=>{
     expect(backend.start).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog',{name:'New section'})).toBeVisible();
     await user.keyboard('{Escape}');
+    await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await user.click(screen.getByRole('button',{name:'Settings'}));
     screen.getByRole('button',{name:'Close settings'}).focus();
     await user.keyboard('{Control>}r{/Control}');
     expect(backend.start).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog',{name:'Settings'})).toBeVisible();
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await user.keyboard('{Control>}r{/Control}');
     expect(await screen.findByRole('button',{name:'Stop'})).toBeEnabled();
     expect(backend.start).toHaveBeenCalledTimes(1);
@@ -368,6 +369,18 @@ describe('section ordering and deletion',()=>{
     await user.keyboard('{Control>}r{/Control}');expect(backend.start).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button',{name:'Cancel'}));
     expect(backend.deleteSession).not.toHaveBeenCalled();expect(document.querySelector('video')).toBe(media);
+    await waitFor(()=>expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('button',{name:'Recording options'})).toHaveFocus();
+  });
+  it('does not delete when Enter follows Escape while the confirmation is fading out',async()=>{
+    const user=await review();
+    await user.click(screen.getByRole('button',{name:'Recording options'}));await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));
+    await user.tab();expect(screen.getByRole('button',{name:'Delete recording'})).toHaveFocus();
+    await user.keyboard('{Escape}{Enter}');
+    expect(backend.deleteSession).not.toHaveBeenCalled();
+    await waitFor(()=>expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(backend.deleteSession).not.toHaveBeenCalled();
+    expect(screen.getByRole('button',{name:'Recording options'})).toHaveFocus();
   });
   it('releases the selected media file before deleting and returns to a fresh recording',async()=>{
     const load=vi.spyOn(HTMLMediaElement.prototype,'load').mockImplementation(()=>{});
@@ -376,6 +389,8 @@ describe('section ordering and deletion',()=>{
     await user.click(screen.getByRole('button',{name:'Recording options'}));await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));await user.click(screen.getByRole('button',{name:'Delete recording'}));
     await waitFor(()=>expect(screen.getByRole('heading',{level:1})).toHaveTextContent('New recording'));
     expect(backend.deleteSession).toHaveBeenCalledWith('s1');expect(document.querySelector('[data-session-id="s1"]')).toBeNull();expect(document.querySelector('video')).toBeNull();
+    await waitFor(()=>expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('main')).toHaveFocus();
     load.mockRestore();
   });
   it('restores the selected video and playback position if deletion fails',async()=>{
@@ -566,6 +581,26 @@ describe('review handoff',()=>{
     await waitFor(()=>expect(clipboard).toHaveBeenCalledWith('Review local session s1. Transcript and frame instructions.'));
     await user.click(screen.getByRole('button',{name:'Open recording folder'}));expect(backend.openFolder).toHaveBeenCalledWith('s1');
   });
+  it('anchors a delayed marker note to the session and time when it was opened',async()=>{
+    const user=await review();
+    await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));
+    const media=document.querySelector('video')!;
+    await user.click(screen.getByRole('button',{name:'Add marker'}));
+    expect(within(screen.getByRole('dialog',{name:'Add marker'})).getByText('At 0:02')).toBeVisible();
+    // Playback continues while the author writes; the original moment must remain anchored.
+    media.currentTime=9;fireEvent.timeUpdate(media);
+    await user.type(screen.getByLabelText('Note'),'This was the earlier moment');
+    await user.click(screen.getByRole('button',{name:'Save'}));
+    expect(backend.addMarker).toHaveBeenCalledWith('s1',2500,'This was the earlier moment');
+  });
+  it('does not request smooth transcript scrolling when reduced motion is selected',async()=>{
+    document.documentElement.dataset.motion='reduced';
+    try {
+      const user=await review();vi.mocked(Element.prototype.scrollIntoView).mockClear();
+      await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({behavior:'auto',block:'nearest'});
+    } finally {delete document.documentElement.dataset.motion;}
+  });
   it('retries a failed transcript and returns to usable review after processing',async()=>{
     sessions=[{...newSession(),status:'error',error:'Speech model not found'}];transcript={segments:[],error:'Speech model not found'};
     const user=await ready();await user.click(within(screen.getByLabelText('Recordings')).getByRole('button',{name:/Review Alpha/}));
@@ -653,9 +688,27 @@ describe('local setup recovery and request races',()=>{
     await user.click(screen.getByRole('button',{name:'Install transcription'}));
     expect(await screen.findByRole('alert')).toHaveTextContent('Check your connection');
     await user.click(screen.getByRole('button',{name:'Install transcription'}));
-    expect(await screen.findByText('Ready to transcribe on this computer.')).toBeVisible();
+    await waitFor(()=>expect(screen.getByText('Transcription').parentElement).toHaveTextContent('Available'));
     expect(screen.queryByRole('button',{name:'Install transcription'})).not.toBeInTheDocument();
     expect(backend.installTranscription).toHaveBeenCalledTimes(2);
+  });
+  it('allows Settings to close during a background installation so an active recording remains controllable',async()=>{
+    setup={ready:false,issues:['Speech model missing'],modelReady:false,dependencies:readySetup.dependencies};
+    let finishInstall!:()=>void;
+    backend.installTranscription.mockImplementationOnce(()=>new Promise<void>(resolve=>{finishInstall=()=>{setup={...readySetup};resolve();};}));
+    const user=await ready();await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
+    await user.click(screen.getByRole('button',{name:'Settings'}));
+    await user.click(screen.getByRole('button',{name:'Install transcription'}));
+    expect(screen.getByRole('button',{name:'Downloading speech tools…'})).toBeDisabled();
+    expect(screen.getByRole('button',{name:'Close settings'})).toBeEnabled();
+    await user.keyboard('{Escape}');
+    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Settings'})).not.toBeInTheDocument());
+    expect(screen.getByRole('button',{name:'Stop'})).toBeEnabled();
+    await user.click(screen.getByRole('button',{name:'Stop'}));expect(backend.stop).toHaveBeenCalledOnce();
+    await act(async()=>finishInstall());
+    await user.click(screen.getByRole('button',{name:'Settings'}));
+    expect(screen.getByText('Transcription').parentElement).toHaveTextContent('Available');
+    expect(backend.installTranscription).toHaveBeenCalledOnce();
   });
   it('ignores an old source preview that arrives after the user selects another source',async()=>{
     let resolveOld!:(value:{id:string;url:string})=>void;

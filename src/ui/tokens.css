@@ -1,0 +1,68 @@
+/* Shared foundation for compact desktop tools. Values describe roles, not screens. */
+:root {
+  --font-family: system-ui, 'Segoe UI', sans-serif;
+  --font-body: 13px;
+  --font-control: 12px;
+  --font-meta: 11px;
+  --font-title: 16px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-dialog: 10px;
+  --control-height: 30px;
+  --icon-hit-area: 28px;
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-slow: 220ms;
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --bg: #ffffff;
+  --side: #f7f8fa;
+  --surface: #f3f4f6;
+  --hover: #eceef2;
+  --line: #e2e5eb;
+  --text: #292d35;
+  --muted: #5f6774;
+  --faint: #626a78;
+  --accent: #505da8;
+  --active: #e9ecf5;
+  --red: #b83e4c;
+  --on-red: #ffffff;
+  --shadow: 0 12px 32px #1d263b16, 0 2px 6px #1d263b0a;
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: #17191e;
+  --side: #13151a;
+  --surface: #20232a;
+  --hover: #2a2e37;
+  --line: #30353f;
+  --text: #e7e9ef;
+  --muted: #a4abba;
+  --faint: #9aa3b4;
+  --accent: #a0aaff;
+  --active: #292f43;
+  --red: #f18c97;
+  --on-red: #17191e;
+  --shadow: 0 12px 32px #0004, 0 2px 6px #0003;
+  color-scheme: dark;
+}
+
+:root[data-motion='reduced'] {
+  --motion-fast: 0ms;
+  --motion-normal: 0ms;
+  --motion-slow: 0ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) {
+    --motion-fast: 0ms;
+    --motion-normal: 0ms;
+    --motion-slow: 0ms;
+  }
+}

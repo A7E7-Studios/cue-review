@@ -1,0 +1,19 @@
+.workshop-root { min-height: 100vh; background: var(--bg); color: var(--text); }
+.workshop-page { padding: 32px; max-width: 1000px; margin: auto; }
+.workshop-page > h1 { font-size: 18px; font-weight: 600; margin: 0 0 8px; }
+.workshop-page > p { color: var(--muted); max-width: 650px; margin: 0 0 24px; }
+.workshop-section { margin-top: 28px; }
+.workshop-section h2 { font-size: 13px; margin-bottom: 12px; }
+.workshop-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.workshop-swatch { width: 112px; display: grid; gap: 6px; color: var(--muted); }
+.workshop-swatch > span { height: 52px; border: 1px solid var(--line); border-radius: 6px; }
+.workshop-sidebar { display: flex; height: min(720px, 100vh); }
+.workshop-sidebar > .sidebar { width: 210px; flex-shrink: 0; }
+.workshop-sidebar-note { padding: 32px; max-width: 430px; color: var(--muted); }
+.workshop-sidebar-note h2 { font-size: 14px; margin-bottom: 8px; color: var(--text); }
+.workshop-sidebar-note p { margin-bottom: 16px; }
+.workshop-dialog-launcher { padding: 32px; min-height: 500px; }
+.workshop-dialog-launcher > p { color: var(--muted); margin: 12px 0; max-width: 440px; }
+.workshop-dialog-label { display: grid; gap: 6px; color: var(--muted); }
+.workshop-dialog-label input { width: 100%; }
+@media (max-width: 600px) { .workshop-page { padding: 20px; } .workshop-sidebar-note { padding: 20px; } }
