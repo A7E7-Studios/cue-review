@@ -3,12 +3,13 @@ CueReview records visual feedback, transcribes it locally, and makes recordings 
 ## What's new in 0.2.0
 
 - **A new workspace (Float v2).** Recordings on the left, the video with its controls under it in the center, and the transcript in a full-height column on the right. Windows gets a custom title bar with search and Settings; macOS uses the native traffic lights inside the sidebar. The interface uses the bundled Figtree font.
-- **Record more.** Continue a finished recording as a new take from the same source. Takes play back as one video, with a tick on the scrubber and a "Take 2 · 0:42" divider in the transcript. Only the new take is transcribed.
+- **Record more.** Continue a finished recording as a new take from the same source. Takes play back as one video, with a tick on the scrubber and a "Take 2 · 0:42" divider in the transcript. Only the new take is transcribed. Record more continues only the original window or display; if that source is gone, CueReview says so and offers a new recording. A take that cannot be added can be discarded from the error message.
 - **Keyboard shortcuts.** `Ctrl+R` (`⌘R` on macOS) records, records more or stops; `Ctrl+N` starts a new recording; `Ctrl+K` searches recordings by name. Hints appear when you hover over a control.
 - **Vocabulary.** In Settings, list names and terms the transcriber should expect. It is off by default.
 - **Pointer tracking (Windows).** Display and window recordings remember where the pointer was and when you clicked, so agents can see what "this" and "here" referred to.
 - **Agent CLI.** `cue transcript ID --segments` prints a compact, timestamped transcript; `cue frames` exports many frames in one call, one per segment if you like, scaled with `--max-width` and with the pointer ringed by `--mark-cursor`; `cue moments` lists spoken pointing moments with the pointer and nearby clicks; `cue rename` renames a session while the app is open; every command has `--help`. Copy for agent now suggests this workflow.
 - The transcript follows playback until you scroll away, then offers Return to playback, and you can search inside it. The theme setting moved to Settings → Appearance.
+- **Fixes.** The live preview no longer freezes after a few frames on some displays, and reconnects if its stream drops. Recordings in a copied or moved data folder play again. `Ctrl+R` and `F5` can no longer reload the window.
 
 ## Removed
 
@@ -17,7 +18,7 @@ CueReview records visual feedback, transcribes it locally, and makes recordings 
 
 ## Known limits
 
-- Pointer tracking works only for Windows display and window recordings, not for macOS, Linux, cameras or Android/Quest devices. Very short clicks (under about 16 ms) can be missed. For a take recorded after its window was resized, pointer positions can be slightly off.
+- Pointer tracking works only for Windows display and window recordings, not for macOS, Linux, cameras or Android/Quest devices. Very short clicks (under about 16 ms) can be missed.
 - On Windows, hovering the custom maximize button does not show the Snap Layouts menu.
 - The vocabulary takes at most 20 terms (200 characters) of plain ASCII. It makes those spellings more likely, not certain, and only affects transcriptions made after you save it.
 - Adding a take briefly needs about twice the recording's size in free disk space. If another program has the recording open, CueReview finishes adding the take after you close it and choose Retry, or the next time it starts.
