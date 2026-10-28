@@ -55,9 +55,15 @@ export const backend = {
    */
   discardTake: (id: string, index: number) => call<Session>('discard_take', { id, index }),
   transcript: (id: string) => call<Transcript>('get_transcript', { id }),
-  preview: (sourceId: string, id:string, onError:(error:string)=>void) => {
+  /**
+   * Starts the live preview of `sourceId`. `onError` hears that the stream failed and stopped;
+   * `onDrop` hears the `view` label (`?view=N` on the URL) of an image connection that ended
+   * while the stream goes on, so that image can reconnect to the same URL.
+   */
+  preview: (sourceId: string, id:string, onError:(error:string)=>void, onDrop:(view:string)=>void = () => {}) => {
     const errors=new Channel<string>();errors.onmessage=onError;
-    return previewOperation(()=>call<{id:string;url:string}>('start_preview', { sourceId,id,errors }));
+    const drops=new Channel<string>();drops.onmessage=onDrop;
+    return previewOperation(()=>call<{id:string;url:string}>('start_preview', { sourceId,id,errors,drops }));
   },
   stopPreview: (id:string) => previewOperation(()=>call<void>('stop_preview',{id})),
   openFolder: (id: string) => call<void>('open_session_folder', { id }),

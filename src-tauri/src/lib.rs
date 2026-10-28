@@ -313,6 +313,7 @@ async fn start_preview(
     id: String,
     source_id: String,
     errors: tauri::ipc::Channel<String>,
+    drops: tauri::ipc::Channel<String>,
 ) -> Result<preview::StreamInfo, String> {
     let s = s.inner().clone();
     blocking(move || {
@@ -329,6 +330,11 @@ async fn start_preview(
             &source_id,
             Arc::new(move |error| {
                 let _ = errors.send(error);
+            }),
+            // The `view` label of a viewer connection that ended; the frontend
+            // reconnects that image to the same stream.
+            Arc::new(move |view| {
+                let _ = drops.send(view);
             }),
         )
     })

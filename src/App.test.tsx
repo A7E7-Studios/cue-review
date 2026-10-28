@@ -1230,9 +1230,25 @@ describe('local setup recovery and request races', () => {
     backend.preview.mockImplementation((sourceId: string, id: string) => sourceId === 'display1' ? new Promise<{ id: string; url: string }>(resolve => { resolveOld = resolve; }) : Promise.resolve({ id, url: 'http://127.0.0.1:9999/quest' }));
     const user = await ready(); await user.click(screen.getByRole('button', { name: 'Display 1' })); await chooseSource(user, 'Quest USB');
     const image = await screen.findByRole('img', { name: 'Live preview of Quest USB' });
-    expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/quest');
+    expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/quest?view=1');
     await act(async () => resolveOld({ id: 'old', url: 'http://127.0.0.1:9999/old' }));
-    expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/quest');
+    expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/quest?view=1');
+  });
+  it('reconnects a dropped preview image to the same stream, and Retry restarts a failed one', async () => {
+    const user = await ready();
+    const image = await screen.findByRole('img', { name: 'Live preview of Display 1' });
+    expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=1');
+    const onDrop = backend.preview.mock.calls[0][3] as (view: string) => void;
+    act(() => onDrop('1'));
+    await waitFor(() => expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=2'));
+    expect(backend.preview).toHaveBeenCalledTimes(1);
+    fireEvent.error(image);
+    await waitFor(() => expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=3'));
+    act(() => backend.preview.mock.calls[0][2]('Preview stream ended. Reconnect the source and select it again.'));
+    await screen.findByText('Preview stream ended. Reconnect the source and select it again.');
+    await user.click(screen.getByRole('button', { name: NAMES.retryPreview }));
+    expect(await screen.findByRole('img', { name: 'Live preview of Display 1' })).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=4');
+    expect(backend.preview).toHaveBeenCalledTimes(2);
   });
   it('does not let an old session response replace a newly prepared recording', async () => {
     let resolveOld!: (value: Session) => void; backend.session.mockImplementationOnce(() => new Promise<Session>(resolve => { resolveOld = resolve; }));

@@ -100,6 +100,35 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     result
 }
+/// `session` as read from its folder `folder`. `session.json` stores absolute
+/// paths, so after the data folder is copied or moved (`CUEREVIEW_DATA_DIR`
+/// pointing at the copy) they still name the old place, which is outside the
+/// asset scope the app grants. A `folderPath` that points elsewhere becomes
+/// `folder`, and a `videoPath` that points elsewhere becomes the same file in
+/// `folder` when that file exists. Nothing is written; the next save keeps it.
+fn located(mut session: Session, folder: &Path) -> Session {
+    let stored = PathBuf::from(&session.folder_path);
+    if let Some(video) = session.video_path.as_deref().map(Path::new) {
+        if !video.starts_with(folder) {
+            let relative = video
+                .strip_prefix(&stored)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .or_else(|| video.file_name().map(PathBuf::from));
+            if let Some(moved) = relative.map(|relative| folder.join(relative)) {
+                if moved.is_file() {
+                    session.video_path = Some(moved.to_string_lossy().into());
+                }
+            }
+        }
+    }
+    if stored != folder {
+        session.folder_path = folder.to_string_lossy().into();
+    }
+    session
+}
+
 fn valid_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control) {
@@ -390,7 +419,8 @@ impl Store {
         Ok(())
     }
     pub fn session(&self, id: &str) -> Result<Session, String> {
-        read_json(&self.session_dir(id)?.join("session.json"))
+        let folder = self.session_dir(id)?;
+        read_json(&folder.join("session.json")).map(|session| located(session, &folder))
     }
     /// Writes `s` as the session's metadata under its write lock. Prefer
     /// [`Store::update_session`] when the change is based on a fresh read.
@@ -408,16 +438,17 @@ impl Store {
         }
         let mut entries = Vec::new();
         for entry in fs::read_dir(self.root.join("sessions")).map_err(|e| e.to_string())? {
-            let path = match entry {
-                Ok(entry) => entry.path().join("session.json"),
+            let folder = match entry {
+                Ok(entry) => entry.path(),
                 Err(error) => {
                     eprintln!("A recording folder could not be listed: {error}");
                     continue;
                 }
             };
+            let path = folder.join("session.json");
             if path.is_file() {
                 let session: Session = match read_json(&path) {
-                    Ok(session) => session,
+                    Ok(session) => located(session, &folder),
                     Err(error) => {
                         eprintln!("Skipped {}: {error}", path.display());
                         continue;
@@ -806,6 +837,66 @@ mod tests {
             assert!(store.project(&project.id).is_ok());
             assert!(store.session_dir(&active.id).unwrap().exists());
         }
+    }
+    #[test]
+    fn a_copied_data_folder_uses_its_own_session_files() {
+        fn copy_tree(from: &Path, to: &Path) {
+            fs::create_dir_all(to).unwrap();
+            for entry in fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &to.join(entry.file_name()));
+                } else {
+                    fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let original = Store::open(dir.path().join("original")).unwrap();
+        let mut played = ready_session(&original, None);
+        let mut missing = ready_session(&original, None);
+        for session in [&mut played, &mut missing] {
+            let video = original.session_dir(&session.id).unwrap().join("video.mp4");
+            fs::write(&video, b"recording").unwrap();
+            session.video_path = Some(video.to_string_lossy().into());
+            original.save_session(session).unwrap();
+        }
+        let copy_root = dir.path().join("copied");
+        copy_tree(&original.root, &copy_root);
+        let copy = Store::open(copy_root).unwrap();
+        // The copy lacks this one's video, so its stored path is kept.
+        fs::remove_file(copy.session_dir(&missing.id).unwrap().join("video.mp4")).unwrap();
+
+        let folder = copy.session_dir(&played.id).unwrap();
+        let loaded = copy.session(&played.id).unwrap();
+        assert_eq!(Path::new(&loaded.folder_path), folder);
+        assert_eq!(
+            loaded.video_path.as_deref().map(Path::new),
+            Some(folder.join("video.mp4").as_path())
+        );
+        let listed = copy.sessions(None).unwrap();
+        let listed_played = listed.iter().find(|s| s.id == played.id).unwrap();
+        assert_eq!(listed_played.folder_path, loaded.folder_path);
+        assert_eq!(listed_played.video_path, loaded.video_path);
+        let listed_missing = listed.iter().find(|s| s.id == missing.id).unwrap();
+        assert_eq!(
+            Path::new(&listed_missing.folder_path),
+            copy.session_dir(&missing.id).unwrap()
+        );
+        assert_eq!(listed_missing.video_path, missing.video_path);
+
+        // Loading writes nothing; the next save keeps the derived paths.
+        let raw: Session = read_json(&folder.join("session.json")).unwrap();
+        assert_eq!(raw.video_path, played.video_path);
+        copy.rename_session(&played.id, "Moved").unwrap();
+        let raw: Session = read_json(&folder.join("session.json")).unwrap();
+        assert_eq!(raw.folder_path, loaded.folder_path);
+        assert_eq!(raw.video_path, loaded.video_path);
+
+        // The original data folder still names its own files, unchanged.
+        let unchanged = original.session(&played.id).unwrap();
+        assert_eq!(unchanged.folder_path, played.folder_path);
+        assert_eq!(unchanged.video_path, played.video_path);
     }
     #[test]
     fn deleting_a_session_removes_all_owned_files_and_ignores_metadata_paths() {

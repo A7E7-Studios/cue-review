@@ -79,6 +79,10 @@ export interface MediaStageProps {
   /** Captured source, also shown as the "Live · {name}" badge while recording. */
   sourceName?: string;
   previewError?: string;
+  /** The live preview image failed to load its stream; the stream hook reconnects it. */
+  onPreviewError?: () => void;
+  /** Offered as NAMES.retryPreview beside a preview error: starts the preview again. */
+  onRetryPreview?: () => void;
   /** Review video source (`videoUrl(session.videoPath)`). */
   videoSrc?: string;
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
@@ -281,6 +285,7 @@ export const NAMES = {
   capturePreview: 'Capture preview',
   recordingVideo: 'Recording video',
   livePreview: (source: string) => `Live preview of ${source}`,
+  retryPreview: 'Retry preview',
 
   // Playback
   playback: 'Playback',

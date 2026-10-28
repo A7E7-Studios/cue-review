@@ -2,6 +2,7 @@ import { createRef } from 'react';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { captureEmptyState, MediaStage, reviewEmptyState } from './MediaStage';
+import { NAMES } from './types';
 
 describe('MediaStage', () => {
   it('plays the review video in one bordered box and forwards its element and handlers', () => {
@@ -28,6 +29,19 @@ describe('MediaStage', () => {
     const image = within(screen.getByRole('region', { name: 'Capture preview' })).getByRole('img', { name: 'Live preview of Display 1' });
     expect(image).toHaveClass('preview-image');
     expect(screen.queryByText(/^Live/)).not.toBeInTheDocument();
+  });
+  it('reports a preview image that fails to load and offers Retry beside a preview error', () => {
+    const onPreviewError = vi.fn();
+    const onRetryPreview = vi.fn();
+    const { rerender } = render(<MediaStage mode="draft" previewUrl="http://127.0.0.1:9999/live?view=1" sourceName="Display 1" onPreviewError={onPreviewError} onRetryPreview={onRetryPreview}/>);
+    fireEvent.error(screen.getByRole('img', { name: 'Live preview of Display 1' }));
+    expect(onPreviewError).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: NAMES.retryPreview })).not.toBeInTheDocument();
+    rerender(<MediaStage mode="draft" previewError="The preview stopped updating." empty={captureEmptyState({ source: { available: true }, previewError: 'The preview stopped updating.' })} onPreviewError={onPreviewError} onRetryPreview={onRetryPreview}/>);
+    expect(screen.getByRole('heading', { name: 'Preview unavailable' })).toBeVisible();
+    expect(screen.getByText('The preview stopped updating.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: NAMES.retryPreview }));
+    expect(onRetryPreview).toHaveBeenCalledTimes(1);
   });
   it('marks a recording with the red ring and a "Live · source" badge', () => {
     render(<MediaStage mode="recording" previewUrl="http://127.0.0.1:9999/live" sourceName="Display 1"/>);

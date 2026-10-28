@@ -124,7 +124,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const mode: WorkspaceMode = recording ? 'recording' : draft ? 'draft' : 'review';
   const locked = recording || busy;
   const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
-  const { preview, previewError } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
+  const { preview, previewError, onPreviewError } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
   const mediaHeld = !!session && (heldMedia === session.id || takeInFlight(session));
   const videoSrc = session && !draft && !mediaHeld ? sessionVideoUrl(session, videoUrl) : undefined;
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
@@ -649,6 +649,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       {errorBanner}
       {setupBanner}
       <MediaStage mode={mode} previewUrl={preview || undefined} sourceName={source?.name} previewError={previewError || undefined}
+        onPreviewError={onPreviewError} onRetryPreview={() => setPreviewRevision(value => value + 1)}
         videoSrc={videoSrc} videoKey={`${session?.id}:${mediaRevision}`} videoRef={video} videoProps={videoProps} empty={empty}
         focused={focusVideo && mode === 'review'}>
         {controls}
