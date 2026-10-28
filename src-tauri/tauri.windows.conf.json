@@ -1,4 +1,7 @@
 {
+  "app": {
+    "windows": [{ "label": "main", "title": "CueReview", "width": 1280, "height": 820, "minWidth": 640, "minHeight": 480, "backgroundColor": "#ECEEF2", "dragDropEnabled": false, "decorations": false, "shadow": true }]
+  },
   "bundle": {
     "targets": ["nsis"],
     "windows": { "nsis": { "installMode": "currentUser" } }
