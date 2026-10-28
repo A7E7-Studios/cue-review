@@ -99,7 +99,7 @@ Tell the user before these start: they record the screen, a window or the microp
 ### Still hardware-only or open
 
 - Cursor tracking on real input: pointer mapping across monitors with different DPI, window moves during capture, occlusion, the secure desktop gap and clicks shorter than about 16 ms.
-- `px`/`py` for a later take recorded at a different window size: the recorded `normalize` scale and padding are not applied to cursor positions yet.
+- `px`/`py` for a later take recorded at a different window size are covered by unit tests (`normalize` scale and padding); they have not been measured on hardware.
 - Record more on a real display or window with microphone commentary, including a take whose window was resized between takes.
 - The swap retry while another program holds `video.mp4` open, on a real player.
 - Snap Layouts: the custom maximize button does not show the Windows 11 snap flyout on hover.
