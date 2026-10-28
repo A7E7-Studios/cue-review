@@ -78,6 +78,10 @@ pub enum Command {
     Transcribe {
         id: String,
     },
+    DiscardTake {
+        id: String,
+        index: u32,
+    },
     Setup {
         install: bool,
     },
@@ -99,9 +103,37 @@ impl Command {
     pub fn needs_ownership(&self) -> bool {
         matches!(
             self,
-            Command::Record { .. } | Command::Transcribe { .. } | Command::Setup { install: true }
+            Command::Record { .. }
+                | Command::Transcribe { .. }
+                | Command::DiscardTake { .. }
+                | Command::Setup { install: true }
         )
     }
+}
+
+/// What `cue` does with its arguments, in this order: parse them; print help
+/// (returned as `Ok(Some(text))`) or report an argument error without calling
+/// anything else; `open` the store; take the data folder's process lock with
+/// `lock` when the command needs it; run the command with `execute` while
+/// that lock is held. `src/bin/cue.rs` is only this call.
+pub fn dispatch<S, L>(
+    args: &[String],
+    open: impl FnOnce() -> Result<S, String>,
+    lock: impl FnOnce(&S) -> Result<L, String>,
+    execute: impl FnOnce(&S, Command) -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    let command = match parse(args)? {
+        Invocation::Help(text) => return Ok(Some(text)),
+        Invocation::Run(command) => command,
+    };
+    let store = open()?;
+    let _held = if command.needs_ownership() {
+        Some(lock(&store)?)
+    } else {
+        None
+    };
+    execute(&store, command)?;
+    Ok(None)
 }
 
 struct Opt {
@@ -289,6 +321,15 @@ const SPECS: &[Spec] = &[
         required: 1,
         options: &[],
         notes: "",
+    },
+    Spec {
+        name: "discard-take",
+        usage: "SESSION_ID INDEX",
+        about: "Drop take INDEX when it cannot be added to the recording, so the session can be recorded more and transcribed again. Prints the session JSON. Takes the recording lock.",
+        positionals: &["SESSION_ID", "INDEX"],
+        required: 2,
+        options: &[],
+        notes: "Only a take still waiting to be added (status swapping) can be dropped; take 1 never can. The take becomes interrupted and keeps its files in takes/INDEX.",
     },
     Spec {
         name: "setup",
@@ -648,6 +689,20 @@ fn build(spec: &Spec, found: &Matches) -> Result<Command, String> {
             }
         }
         "transcribe" => Command::Transcribe { id: id() },
+        "discard-take" => {
+            let index = found.positional(1);
+            Command::DiscardTake {
+                id: id(),
+                index: index
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|index: &u32| *index >= 2)
+                    .ok_or_else(|| {
+                        format!("INDEX must be a take number from 2 on, not {index:?}.")
+                    })?,
+            }
+        }
         "setup" => Command::Setup {
             install: found.has("--install"),
         },
@@ -936,21 +991,110 @@ mod tests {
         assert!(fails("nope").contains("Run cue --help"));
     }
 
+    /// Runs [`dispatch`] with fakes that log each step, as `cue` would.
+    fn steps(line: &str) -> (Result<Option<String>, String>, Vec<String>) {
+        struct Held<'a>(&'a std::cell::RefCell<Vec<String>>);
+        impl Drop for Held<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("unlock".into());
+            }
+        }
+        let log = std::cell::RefCell::new(Vec::new());
+        let note = |step: &str| log.borrow_mut().push(step.to_owned());
+        let result = dispatch(
+            &args(line),
+            || {
+                note("open");
+                Ok("store")
+            },
+            |store: &&str| {
+                note(&format!("lock {store}"));
+                Ok(Held(&log))
+            },
+            |_, command| {
+                note(&format!("run {command:?}"));
+                Ok(())
+            },
+        );
+        let log = log.borrow().clone();
+        (result, log)
+    }
+
     #[test]
     fn help_never_takes_the_lock_but_mutating_commands_do() {
+        // Help and argument errors print before the store is opened.
         for line in [
             "record --help",
             "transcribe --help",
             "setup --install --help",
+            "discard-take --help",
+            "help record",
+            "--help",
         ] {
-            help_text(line);
+            let (result, log) = steps(line);
+            assert!(result.unwrap().unwrap().contains("cue"), "{line}");
+            assert!(log.is_empty(), "{line}: {log:?}");
         }
-        assert!(run("record --source monitor:1 --seconds 5").needs_ownership());
-        assert!(run(&format!("transcribe {ID}")).needs_ownership());
-        assert!(run("setup --install").needs_ownership());
-        assert!(!run("setup").needs_ownership());
-        assert!(!run(&format!("rename {ID} Better")).needs_ownership());
-        assert!(!run(&format!("frames {ID} --per-segment")).needs_ownership());
+        for line in ["record --seconds 5", "transcribe", "frames --bogus"] {
+            let (result, log) = steps(line);
+            assert!(result.unwrap_err().contains("--help"), "{line}");
+            assert!(log.is_empty(), "{line}: {log:?}");
+        }
+        // Mutating commands run inside the lock, which is released after.
+        for line in [
+            "record --source monitor:1 --seconds 5".to_owned(),
+            format!("transcribe {ID}"),
+            format!("discard-take {ID} 2"),
+            "setup --install".to_owned(),
+        ] {
+            let (result, log) = steps(&line);
+            assert_eq!(result, Ok(None));
+            assert_eq!(log.len(), 4, "{line}: {log:?}");
+            assert_eq!(
+                (&*log[0], &*log[1], &*log[3]),
+                ("open", "lock store", "unlock")
+            );
+            assert!(log[2].starts_with("run "), "{line}: {log:?}");
+        }
+        // Everything else runs beside the app, without the lock.
+        for line in [
+            "setup".to_owned(),
+            format!("rename {ID} Better"),
+            format!("frames {ID} --per-segment"),
+        ] {
+            let (_, log) = steps(&line);
+            assert_eq!(log.len(), 2, "{line}: {log:?}");
+            assert_eq!(log[0], "open");
+            assert!(log[1].starts_with("run "));
+        }
+        // A refused lock stops before the command runs.
+        let refused = dispatch(
+            &args(&format!("transcribe {ID}")),
+            || Ok(()),
+            |_| Err::<(), _>("CueReview is already using this data folder.".to_string()),
+            |_, _| panic!("ran without the lock"),
+        );
+        assert!(refused.unwrap_err().contains("already using"));
+    }
+
+    #[test]
+    fn discard_take_names_a_later_take() {
+        assert_eq!(
+            run(&format!("discard-take {ID} 3")),
+            Command::DiscardTake {
+                id: ID.into(),
+                index: 3
+            }
+        );
+        for index in ["1", "0", "two", "4294967296"] {
+            let error = fails(&format!("discard-take {ID} {index}"));
+            assert!(error.contains("take number from 2"), "{index}: {error}");
+        }
+        assert!(fails(&format!("discard-take {ID}")).contains("Missing INDEX"));
+        assert!(fails(&format!("discard-take {ID} 2 3")).contains("Unexpected argument 3"));
+        let help = help_text("discard-take --help");
+        assert!(help.starts_with("Usage: cue discard-take SESSION_ID INDEX"));
+        assert!(help.contains("Takes the recording lock"));
     }
 
     #[test]

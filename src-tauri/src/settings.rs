@@ -26,10 +26,12 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
 };
 
 /// Most terms a vocabulary may hold.
@@ -220,54 +222,112 @@ fn decoding_args_with(
     args
 }
 
+/// How long a token probe may take. It normally takes about one model load;
+/// the caller may hold the inference lock, so a hung runtime must not stall it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Counts measured in this process, failures (`None`) included, so a runtime
+/// that cannot count is not probed again before every transcription.
+type TokenCounts = Mutex<HashMap<String, Option<usize>>>;
+
 /// The prompt's exact token count from the transcription model's own tokenizer,
 /// remembered for the life of the process.
 fn prompt_tokens(prompt: &str) -> Option<usize> {
-    static COUNTS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    static COUNTS: OnceLock<TokenCounts> = OnceLock::new();
     let model = deps::model_path();
-    let key = format!("{}\n{prompt}", model.display());
-    let counts = COUNTS.get_or_init(Default::default);
-    if let Some(count) = counts.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Some(*count);
+    // Not remembered: the model can still be installed while the app runs.
+    if !model.is_file() {
+        return None;
     }
-    let count = probe_prompt_tokens(&model, prompt)?;
+    let key = format!("{}\n{prompt}", model.display());
+    remembered(COUNTS.get_or_init(Default::default), key, || {
+        probe_prompt_tokens(&model, prompt)
+    })
+}
+
+/// The count stored for `key`, or `probe`'s result, which is stored whether
+/// or not it found one.
+fn remembered(
+    counts: &TokenCounts,
+    key: String,
+    probe: impl FnOnce() -> Option<usize>,
+) -> Option<usize> {
+    if let Some(count) = counts.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return *count;
+    }
+    let count = probe();
     counts
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(key, count);
-    Some(count)
+    count
 }
 
 /// whisper.cpp logs a carried prompt's token count when it exceeds the budget.
 /// With a one-token budget every longer prompt is reported, and `-d 100` stops
 /// decoding before the encoder runs, so this takes about one model load.
 fn probe_prompt_tokens(model: &Path, prompt: &str) -> Option<usize> {
-    if !model.is_file() {
-        return None;
-    }
     let mut command = deps::command("whisper-cli").ok()?;
     command
         .arg("-m")
         .arg(model)
         .args(["-f", "-", "-ng", "-d", "100", "-mc", "2"])
-        .args(["--carry-initial-prompt", "--prompt", prompt, "-t", "1"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().ok()?;
-    let Some(mut stdin) = child.stdin.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    };
-    // Write from another thread so a full stderr pipe cannot stall either side.
-    let writer = std::thread::spawn(move || stdin.write_all(&silent_wav()));
-    let output = child.wait_with_output().ok()?;
-    let _ = writer.join();
-    if !output.status.success() {
+        .args(["--carry-initial-prompt", "--prompt", prompt, "-t", "1"]);
+    let (success, log) = stderr_within(command, silent_wav(), PROBE_TIMEOUT)?;
+    if !success {
         return None;
     }
-    parse_prompt_tokens(&String::from_utf8_lossy(&output.stderr), prompt)
+    parse_prompt_tokens(&log, prompt)
+}
+
+/// Runs `command` with `input` on stdin and returns whether it succeeded and
+/// what it wrote to stderr. A process still running after `timeout` is killed
+/// and gives `None`.
+fn stderr_within(
+    mut command: Command,
+    input: Vec<u8>,
+    timeout: Duration,
+) -> Option<(bool, String)> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    // Separate threads write stdin and drain stderr, so neither full pipe can
+    // stall the child while this thread watches the clock.
+    let mut stdin = child.stdin.take();
+    let mut stderr = child.stderr.take();
+    let writer = thread::spawn(move || {
+        if let Some(stdin) = stdin.as_mut() {
+            let _ = stdin.write_all(&input);
+        }
+    });
+    let reader = thread::spawn(move || {
+        let mut log = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut log);
+        }
+        log
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let _ = writer.join();
+    let log = reader.join().unwrap_or_default();
+    Some((
+        status?.success(),
+        String::from_utf8_lossy(&log).into_owned(),
+    ))
 }
 
 fn parse_prompt_tokens(log: &str, prompt: &str) -> Option<usize> {
@@ -497,6 +557,85 @@ mod tests {
             (&wav[..4], &wav[8..16], wav.len()),
             (&b"RIFF"[..], &b"WAVEfmt "[..], 8044)
         );
+    }
+
+    #[test]
+    fn failed_token_probes_are_remembered_too() {
+        let counts = TokenCounts::default();
+        let mut probes = 0;
+        assert_eq!(
+            remembered(&counts, "model\nCueReview".into(), || {
+                probes += 1;
+                None
+            }),
+            None
+        );
+        assert_eq!(
+            remembered(&counts, "model\nCueReview".into(), || {
+                probes += 1;
+                Some(3)
+            }),
+            None
+        );
+        assert_eq!(probes, 1, "a failed probe is not repeated");
+        assert_eq!(
+            remembered(&counts, "model\nTauri".into(), || Some(4)),
+            Some(4)
+        );
+        assert_eq!(
+            remembered(&counts, "model\nTauri".into(), || panic!("counted twice")),
+            Some(4)
+        );
+    }
+
+    fn child_probe(test: &str, variable: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env(variable, "1");
+        command
+    }
+
+    #[test]
+    fn a_hung_token_probe_is_killed_and_a_finished_one_reports_its_log() {
+        let began = Instant::now();
+        // The child never reads stdin, so the writer must not stall either.
+        let hung = child_probe("settings::tests::hanging_child_probe", HANG_PROBE);
+        assert_eq!(
+            stderr_within(hung, vec![0; 256 * 1024], Duration::from_millis(500)),
+            None
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            began.elapsed()
+        );
+        let finished = child_probe("settings::tests::stderr_child_probe", STDERR_PROBE);
+        let (success, log) =
+            stderr_within(finished, silent_wav(), Duration::from_secs(60)).unwrap();
+        assert!(success);
+        assert_eq!(
+            parse_prompt_tokens(&log, "CueReview, Tauri"),
+            Some(7),
+            "{log}"
+        );
+    }
+
+    const HANG_PROBE: &str = "CUEREVIEW_HANG_PROBE";
+    const STDERR_PROBE: &str = "CUEREVIEW_STDERR_PROBE";
+
+    #[test]
+    fn hanging_child_probe() {
+        if std::env::var_os(HANG_PROBE).is_some() {
+            thread::sleep(Duration::from_secs(120));
+        }
+    }
+
+    #[test]
+    fn stderr_child_probe() {
+        if std::env::var_os(STDERR_PROBE).is_some() {
+            eprintln!("whisper_full_with_state: initial prompt is too long (7 tokens), will use only the last 1 tokens");
+        }
     }
 
     #[test]

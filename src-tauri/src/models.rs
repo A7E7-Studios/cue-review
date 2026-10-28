@@ -30,6 +30,35 @@ pub struct Session {
     /// recorded before takes existed: their root files are take 1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<Take>,
+    /// What `source_id` named when the session was first recorded. Record
+    /// more checks it again, because a window handle or display number can
+    /// name something else later. `None` for sessions recorded before this
+    /// existed and for sources other than Windows windows and displays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<SourceIdentity>,
+}
+
+/// A Windows window or display as it was at first capture, serialized with a
+/// `kind` of `"window"` or `"display"`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SourceIdentity {
+    Window {
+        title: String,
+        /// Image name of the owning process, for example `"Code.exe"`.
+        process: String,
+        /// Window class name.
+        class: String,
+    },
+    Display {
+        /// GDI device name, for example `"\\\\.\\DISPLAY1"`.
+        device: String,
+        /// Monitor bounds in physical pixels.
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    },
 }
 
 /// Lifecycle of one take. Serialized in lowercase, for example `"swapping"`.
@@ -299,6 +328,36 @@ mod tests {
         );
         let restored: Session = serde_json::from_value(value).unwrap();
         assert_eq!(restored.takes, session.takes);
+        assert!(serde_json::to_value(&session)
+            .unwrap()
+            .get("sourceIdentity")
+            .is_none());
+        for (identity, expected) in [
+            (
+                SourceIdentity::Window {
+                    title: "Review — Notes".into(),
+                    process: "notes.exe".into(),
+                    class: "NotesWindow".into(),
+                },
+                json!({"kind":"window","title":"Review — Notes","process":"notes.exe","class":"NotesWindow"}),
+            ),
+            (
+                SourceIdentity::Display {
+                    device: r"\\.\DISPLAY1".into(),
+                    left: -1920,
+                    top: 0,
+                    right: 0,
+                    bottom: 1080,
+                },
+                json!({"kind":"display","device":r"\\.\DISPLAY1","left":-1920,"top":0,"right":0,"bottom":1080}),
+            ),
+        ] {
+            session.source_identity = Some(identity.clone());
+            let value = serde_json::to_value(&session).unwrap();
+            assert_eq!(value["sourceIdentity"], expected);
+            let restored: Session = serde_json::from_value(value).unwrap();
+            assert_eq!(restored.source_identity, Some(identity));
+        }
         for (status, name) in [
             (TakeStatus::Recording, "recording"),
             (TakeStatus::Finalizing, "finalizing"),

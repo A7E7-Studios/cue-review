@@ -466,9 +466,16 @@ async fn start_recording(
             system_audio,
             fps: 30,
         };
+        // What the chosen window or display is, so Record more can make sure
+        // it captures the same one again.
+        let identity = capture::source_identity(&config.source_id);
         let mut session =
             s.store
                 .create_session(project_id.as_deref(), name.as_deref(), &config)?;
+        if identity.is_some() {
+            session.source_identity = identity;
+            s.store.save_session(&session)?;
+        }
         match capture::start_muted(
             config,
             &s.store.session_dir(&session.id)?,
@@ -745,6 +752,11 @@ fn start_take(
     }
     let mut session = s.store.session(id)?;
     takes::check_can_record_more(&session)?;
+    // A window handle or display number can name something else by now.
+    takes::check_source(
+        &session,
+        capture::source_identity(&session.source_id).as_ref(),
+    )?;
     // The offset is the duration of the combined video as it is on disk.
     attach_finished_video(&s.store, &mut session)
         .map_err(|e| format!("Record more needs a playable recording: {e}"))?;
@@ -806,6 +818,23 @@ async fn record_more(
 ) -> Result<Session, String> {
     let s = s.inner().clone();
     blocking(move || start_take(&s, &id, microphone_id, system_audio, muted.unwrap_or(false))).await
+}
+/// Drops take `index` of session `id` when it cannot be added to the
+/// recording; see [`takes::discard`]. Refused while that session records or
+/// processes.
+fn discard_take_in(s: &Shared, id: &str, index: u32) -> Result<Session, String> {
+    // Held throughout, so Retry or Record more cannot start meanwhile.
+    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    ensure_session_not_in_use(&runtime, id)?;
+    takes::discard(&s.store, id, index)
+}
+/// Drops a take whose swap keeps failing (index 2 or later): it becomes
+/// interrupted, keeps its folder, and the session settles, usually to ready.
+/// Returns the updated session; the transcript's take dividers are updated.
+#[tauri::command]
+async fn discard_take(s: CmdState<'_>, id: String, index: u32) -> Result<Session, String> {
+    let s = s.inner().clone();
+    blocking(move || discard_take_in(&s, &id, index)).await
 }
 #[tauri::command]
 fn get_settings(s: CmdState<'_>) -> Settings {
@@ -872,7 +901,12 @@ pub fn run() {
             deps::set_resource_dir(app.path().resource_dir()?);
             let store = Store::open(store::data_root()).map_err(std::io::Error::other)?;
             let ownership = store.acquire_ownership().map_err(std::io::Error::other)?;
-            store.recover_interrupted().map_err(std::io::Error::other)?;
+            // A recording that cannot be recovered is logged and left as it
+            // is; it never keeps the app from starting.
+            match store.recover_interrupted() {
+                Ok(skipped) => skipped.iter().for_each(|problem| eprintln!("{problem}")),
+                Err(error) => eprintln!("Interrupted recordings were not checked: {error}"),
+            }
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
             app.manage(Arc::new(AppState {
@@ -926,6 +960,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             record_more,
+            discard_take,
             retry_transcription,
             set_microphone_muted,
             get_recording_status,
@@ -1141,13 +1176,17 @@ mod orchestration_tests {
         assert_eq!((status.take_index, status.take_offset_ms), (None, None));
     }
     fn ready_with_takes(state: &Shared) -> Session {
+        ready_from(state, "android:R3CN90")
+    }
+    /// A ready single-take session recorded from `source_id`.
+    fn ready_from(state: &Shared, source_id: &str) -> Session {
         let mut session = state
             .store
             .create_session(
                 None,
                 Some("Takes"),
                 &CaptureConfig {
-                    source_id: "monitor:1".into(),
+                    source_id: source_id.into(),
                     microphone_id: None,
                     system_audio: false,
                     fps: 30,
@@ -1190,6 +1229,91 @@ mod orchestration_tests {
             .unwrap()
             .join("takes")
             .exists());
+    }
+    #[test]
+    fn record_more_refuses_a_window_or_display_that_is_gone() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        // HWND 1 is never a window, and display 99 is never attached. A
+        // window recorded before identities were stored is refused outright.
+        let window = SourceIdentity::Window {
+            title: "Review".into(),
+            process: "notes.exe".into(),
+            class: "NotesWindow".into(),
+        };
+        let display = SourceIdentity::Display {
+            device: r"\\.\DISPLAY99".into(),
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        for (source, identity) in [
+            ("window:1", None),
+            ("window:1", Some(window)),
+            ("monitor:99", None),
+            ("monitor:99", Some(display)),
+        ] {
+            let mut session = ready_from(&state, source);
+            session.source_identity = identity;
+            state.store.save_session(&session).unwrap();
+            let before = std::fs::read(
+                state
+                    .store
+                    .session_dir(&session.id)
+                    .unwrap()
+                    .join("session.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                start_take(&state, &session.id, None, None, false).unwrap_err(),
+                "The original window/display for this recording is no longer available. Start a new recording to capture another source.",
+                "{source}"
+            );
+            let dir = state.store.session_dir(&session.id).unwrap();
+            assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), before);
+            assert!(!dir.join("takes").exists());
+            assert!(state.runtime.lock().unwrap().active.is_none());
+        }
+    }
+    #[test]
+    fn discarding_a_take_waits_until_the_session_is_not_in_use() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let mut session = ready_with_takes(&state);
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: None,
+            system_audio: false,
+        };
+        session.status = "error".into();
+        session.error = Some("Take 2 could not be added.".into());
+        session.takes = vec![
+            take(1, 0, 2000, TakeStatus::Ready),
+            take(2, 2000, 1500, TakeStatus::Swapping),
+        ];
+        state.store.save_session(&session).unwrap();
+        state.runtime.lock().unwrap().processing = Some(session.id.clone());
+        assert!(discard_take_in(&state, &session.id, 2)
+            .unwrap_err()
+            .contains("Finish recording and processing"));
+        assert_eq!(
+            state.store.session(&session.id).unwrap().takes[1].status,
+            TakeStatus::Swapping
+        );
+        state.runtime.lock().unwrap().processing = None;
+        let discarded = discard_take_in(&state, &session.id, 2).unwrap();
+        assert_eq!(discarded.takes[1].status, TakeStatus::Interrupted);
+        assert_eq!(
+            (discarded.status.as_str(), discarded.error.as_deref()),
+            ("ready", None)
+        );
+        assert!(takes::check_can_record_more(&discarded).is_ok());
     }
     #[test]
     fn retrying_a_take_transcribes_only_it_and_settles_the_session() {

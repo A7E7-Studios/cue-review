@@ -121,6 +121,20 @@ pub fn sources() -> Result<Vec<CaptureSource>, String> {
     Ok(result)
 }
 
+/// What a `window:HWND` or `monitor:N` source is right now: the window's
+/// title, process image name and class, or the display's device name and
+/// bounds, resolved as capture resolves the id. `None` when the source is
+/// gone, for every other kind of source, and on macOS and Linux.
+#[cfg(windows)]
+pub fn source_identity(id: &str) -> Option<crate::models::SourceIdentity> {
+    identity::read(id)
+}
+/// Sources on macOS and Linux have no identity to check.
+#[cfg(not(windows))]
+pub fn source_identity(_id: &str) -> Option<crate::models::SourceIdentity> {
+    None
+}
+
 fn unavailable_source() -> String {
     "This capture source is not available on this platform. Refresh sources and select an available display, camera, or authorized USB device.".into()
 }
@@ -794,6 +808,68 @@ fn button_steps(previous: u8, readings: [i16; 3]) -> Vec<u8> {
         }
     }
     result
+}
+
+/// Reads what a window or display source is, for [`source_identity`].
+#[cfg(windows)]
+mod identity {
+    use super::pointer::monitor_bounds;
+    use crate::models::SourceIdentity;
+    use std::ffi::c_void;
+    use windows_capture::{monitor::Monitor, window::Window};
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetClassNameW(window: *mut c_void, name: *mut u16, length: i32) -> i32;
+        fn SetThreadDpiAwarenessContext(context: *mut c_void) -> *mut c_void;
+    }
+    /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
+    const PER_MONITOR_AWARE_V2: isize = -4;
+
+    /// Runs `read` with physical-pixel coordinates on this thread, then
+    /// restores the thread's DPI awareness, so the app and `cue.exe` (which
+    /// declares none) read the same bounds.
+    fn in_physical_pixels<T>(read: impl FnOnce() -> T) -> T {
+        let previous = unsafe { SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2 as *mut c_void) };
+        let value = read();
+        if !previous.is_null() {
+            unsafe { SetThreadDpiAwarenessContext(previous) };
+        }
+        value
+    }
+
+    fn class_name(window: *mut c_void) -> String {
+        let mut name = [0u16; 256];
+        let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+        String::from_utf16_lossy(&name[..length.clamp(0, name.len() as i32) as usize])
+    }
+
+    pub(super) fn read(id: &str) -> Option<SourceIdentity> {
+        if let Some(index) = id.strip_prefix("monitor:") {
+            // The display `native_start` would capture for this id.
+            let monitor = Monitor::from_index(index.parse().ok()?).ok()?;
+            let device = monitor.device_name().ok()?;
+            let bounds = in_physical_pixels(|| monitor_bounds(monitor.as_raw_hmonitor() as usize))?;
+            return Some(SourceIdentity::Display {
+                device,
+                left: bounds.left,
+                top: bounds.top,
+                right: bounds.right,
+                bottom: bounds.bottom,
+            });
+        }
+        let handle: usize = id.strip_prefix("window:")?.parse().ok()?;
+        // Only a window capture would accept: visible, top-level, not a tool window.
+        let window = Window::enumerate()
+            .ok()?
+            .into_iter()
+            .find(|window| window.as_raw_hwnd() as usize == handle)?;
+        Some(SourceIdentity::Window {
+            title: window.title().unwrap_or_default(),
+            process: window.process_name().unwrap_or_default(),
+            class: class_name(window.as_raw_hwnd()),
+        })
+    }
 }
 
 /// The Windows cursor sampler. [`crate::cursor`] documents what it records.
@@ -2438,6 +2514,46 @@ fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_identity_names_only_windows_and_displays_that_exist() {
+        for id in [
+            "window:1",
+            "window:x",
+            "monitor:0",
+            "monitor:99",
+            "dshow:Camera",
+            "android:R3CN90",
+        ] {
+            assert_eq!(source_identity(id), None, "{id}");
+        }
+        #[cfg(windows)]
+        {
+            use crate::models::SourceIdentity;
+            // Whatever this machine has attached; nothing is recorded.
+            if let Ok(monitor) = Monitor::from_index(1) {
+                let Some(SourceIdentity::Display {
+                    device,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                }) = source_identity("monitor:1")
+                else {
+                    panic!("display 1 has no identity");
+                };
+                assert_eq!(device, monitor.device_name().unwrap());
+                assert!(right > left && bottom > top);
+                assert_eq!(source_identity("monitor:1"), source_identity("monitor:1"));
+            }
+            if let Some(window) = Window::enumerate().unwrap().first() {
+                let id = format!("window:{}", window.as_raw_hwnd() as usize);
+                if let Some(SourceIdentity::Window { process, class, .. }) = source_identity(&id) {
+                    assert!(!class.is_empty());
+                    assert_eq!(process, window.process_name().unwrap_or_default());
+                }
+            }
+        }
+    }
     #[test]
     fn avfoundation_listing_keeps_video_indices_and_excludes_audio() {
         let sources = avfoundation_sources("[AVFoundation indev @ 123] AVFoundation video devices:\n[AVFoundation indev @ 123] [0] FaceTime HD Camera\n[AVFoundation indev @ 123] [1] Capture screen 0\n[AVFoundation indev @ 123] AVFoundation audio devices:\n[AVFoundation indev @ 123] [0] MacBook Microphone\n");
