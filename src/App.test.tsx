@@ -72,6 +72,24 @@ async function chooseSource(user:TestUser,name:string) {
 }
 
 describe('keyboard interaction',()=>{
+  it('pauses an exclusive camera preview during startup and recording, then restores it after a failed start',async()=>{
+    backend.sources.mockResolvedValue([{id:'v4l2:/dev/video0',name:'USB camera',kind:'camera',available:true}]);
+    let rejectStart!:(error:Error)=>void;
+    backend.start.mockImplementationOnce(()=>new Promise((_,reject)=>{rejectStart=reject;}));
+    const user=await ready();await screen.findByRole('img',{name:'Live preview of USB camera'});
+    const id=backend.preview.mock.calls[0][1];
+    await user.click(screen.getByRole('button',{name:'Record'}));
+    await screen.findByRole('heading',{name:'Camera preview paused'});
+    await waitFor(()=>expect(backend.stopPreview).toHaveBeenCalledWith(id));
+    expect(backend.preview).toHaveBeenCalledTimes(1);
+    await act(async()=>rejectStart(new Error('Camera failed to start')));
+    await screen.findByRole('img',{name:'Live preview of USB camera'});
+    expect(backend.preview).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('button',{name:'Record'}));
+    await screen.findByRole('button',{name:'Stop'});
+    expect(screen.getByRole('heading',{name:'Camera preview paused'})).toBeInTheDocument();
+    expect(backend.preview).toHaveBeenCalledTimes(2);
+  });
   it('keeps one continuous preview through recording startup and stops it for review',async()=>{
     const user=await ready();await screen.findByRole('img',{name:'Live preview of Display 1'});
     const id=backend.preview.mock.calls[0][1];

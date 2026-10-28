@@ -38,6 +38,13 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let store = Store::open(data_root())?;
+    let _ownership = if matches!(cmd, "record" | "transcribe")
+        || (cmd == "setup" && args.iter().any(|arg| arg == "--install"))
+    {
+        Some(store.acquire_ownership()?)
+    } else {
+        None
+    };
     let id = args.get(1).map(String::as_str).unwrap_or("");
     match cmd {
         "projects" => print_json(&store.projects()?),

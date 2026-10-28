@@ -1,4 +1,4 @@
-//! Windows Graphics Capture + WASAPI. Failed captures retain their original tracks for recovery.
+//! Native Windows capture and portable FFmpeg/device capture. Failed captures retain their original tracks for recovery.
 use crate::{
     deps,
     models::{CaptureConfig, CaptureSource, Microphone},
@@ -17,6 +17,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+#[cfg(windows)]
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     encoder::{
@@ -53,30 +54,36 @@ fn source(id: String, name: String, kind: &str, detail: Option<String>) -> Captu
 
 pub fn sources() -> Result<Vec<CaptureSource>, String> {
     let mut result = Vec::new();
-    for m in Monitor::enumerate().map_err(|e| e.to_string())? {
-        let index = m.index().map_err(|e| e.to_string())?;
-        result.push(source(
-            format!("monitor:{index}"),
-            format!("Display {index} — {}", m.name().unwrap_or_default()),
-            "display",
-            Some(format!(
-                "{} × {}",
-                m.width().unwrap_or(0),
-                m.height().unwrap_or(0)
-            )),
-        ));
-    }
-    for w in Window::enumerate().map_err(|e| e.to_string())? {
-        let name = w.title().unwrap_or_default();
-        if !name.trim().is_empty() && w.width().unwrap_or(0) > 0 && w.height().unwrap_or(0) > 0 {
+    #[cfg(windows)]
+    {
+        for m in Monitor::enumerate().map_err(|e| e.to_string())? {
+            let index = m.index().map_err(|e| e.to_string())?;
             result.push(source(
-                format!("window:{}", w.as_raw_hwnd() as usize),
-                name,
-                "window",
-                w.process_name().ok(),
+                format!("monitor:{index}"),
+                format!("Display {index} — {}", m.name().unwrap_or_default()),
+                "display",
+                Some(format!(
+                    "{} × {}",
+                    m.width().unwrap_or(0),
+                    m.height().unwrap_or(0)
+                )),
             ));
         }
+        for w in Window::enumerate().map_err(|e| e.to_string())? {
+            let name = w.title().unwrap_or_default();
+            if !name.trim().is_empty() && w.width().unwrap_or(0) > 0 && w.height().unwrap_or(0) > 0
+            {
+                result.push(source(
+                    format!("window:{}", w.as_raw_hwnd() as usize),
+                    name,
+                    "window",
+                    w.process_name().ok(),
+                ));
+            }
+        }
     }
+    #[cfg(not(windows))]
+    result.extend(platform_sources());
     let mut devices = None;
     if let Ok(mut cmd) = deps::command("adb") {
         cmd.args(["devices", "-l"]);
@@ -87,6 +94,7 @@ pub fn sources() -> Result<Vec<CaptureSource>, String> {
         }
     }
     result.extend(devices.unwrap_or_else(|| adb_sources("")));
+    #[cfg(windows)]
     if let Ok(mut cmd) = deps::command("ffmpeg") {
         cmd.args([
             "-hide_banner",
@@ -109,6 +117,200 @@ pub fn sources() -> Result<Vec<CaptureSource>, String> {
         }
     }
     Ok(result)
+}
+
+fn unavailable_source() -> String {
+    "This capture source is not available on this platform. Refresh sources and select an available display, camera, or authorized USB device.".into()
+}
+
+fn is_process_source(id: &str) -> bool {
+    ["dshow:", "avfoundation:", "x11:", "v4l2:"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+
+/// Shared input selection keeps recording and continuous preview on the same backend.
+pub(crate) fn configure_video_input(
+    command: &mut std::process::Command,
+    id: &str,
+    _fps: u32,
+    _buffer: &str,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(name) = id.strip_prefix("dshow:") {
+        command.args([
+            "-f",
+            "dshow",
+            "-rtbufsize",
+            _buffer,
+            "-i",
+            &format!("video={name}"),
+        ]);
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(index) = id
+        .strip_prefix("avfoundation:")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        command.args([
+            "-f",
+            "avfoundation",
+            "-framerate",
+            &_fps.to_string(),
+            "-capture_cursor",
+            "1",
+            "-i",
+            &format!("{index}:none"),
+        ]);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(display) = id.strip_prefix("x11:").filter(|s| !s.is_empty()) {
+            command.args([
+                "-f",
+                "x11grab",
+                "-framerate",
+                &_fps.to_string(),
+                "-i",
+                display,
+            ]);
+            return Ok(());
+        }
+        if let Some(device) = id
+            .strip_prefix("v4l2:")
+            .filter(|s| video_device_name(s).is_some())
+        {
+            command.args(["-f", "v4l2", "-framerate", &_fps.to_string(), "-i", device]);
+            return Ok(());
+        }
+    }
+    Err(unavailable_source())
+}
+
+#[cfg(not(windows))]
+fn unavailable_display(detail: &str) -> CaptureSource {
+    let mut display = source(
+        "desktop:unavailable".into(),
+        "Display unavailable".into(),
+        "display",
+        Some(detail.into()),
+    );
+    display.available = false;
+    display
+}
+
+#[cfg(target_os = "macos")]
+fn platform_sources() -> Vec<CaptureSource> {
+    let found = (|| {
+        let mut command = deps::command("ffmpeg").ok()?;
+        command.args([
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ]);
+        let output = output_with_timeout(command, Duration::from_secs(5)).ok()?;
+        Some(avfoundation_sources(&String::from_utf8_lossy(
+            &output.stderr,
+        )))
+    })()
+    .unwrap_or_default();
+    if found.is_empty() {
+        vec![unavailable_display("Install FFmpeg with AVFoundation support, allow Screen Recording and Camera access in macOS System Settings, then refresh sources.")]
+    } else {
+        found
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn avfoundation_sources(text: &str) -> Vec<CaptureSource> {
+    let mut video = false;
+    let mut sources = Vec::new();
+    for line in text.lines() {
+        if line.contains("AVFoundation video devices:") {
+            video = true;
+            continue;
+        }
+        if line.contains("AVFoundation audio devices:") {
+            video = false;
+        }
+        if !video {
+            continue;
+        }
+        let Some((_, entry)) = line.rsplit_once('[') else {
+            continue;
+        };
+        let Some((index, name)) = entry.split_once(']') else {
+            continue;
+        };
+        let Ok(index) = index.parse::<u32>() else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        sources.push(source(format!("avfoundation:{index}"), name.into(),
+            if name.starts_with("Capture screen") { "display" } else { "camera" },
+            Some("Allow Screen Recording or Camera access in macOS System Settings if capture is blocked.".into())));
+    }
+    sources
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn video_device_name(path: &str) -> Option<&str> {
+    let index = path.strip_prefix("/dev/video")?;
+    (!index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())).then_some(index)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_sources() -> Vec<CaptureSource> {
+    let mut sources = Vec::new();
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|s| s == "wayland");
+    if wayland {
+        sources.push(unavailable_display("Wayland screen capture is not supported yet. Sign into an X11 desktop session, or select a camera or USB device."));
+    } else if let Some(display) = std::env::var("DISPLAY").ok().filter(|s| !s.is_empty()) {
+        sources.push(source(
+            format!("x11:{display}"),
+            "Desktop".into(),
+            "display",
+            Some("X11 full desktop capture; requires FFmpeg with x11grab support.".into()),
+        ));
+    } else {
+        sources.push(unavailable_display("No X11 desktop is available. Start CueReview in an X11 desktop session, or select a camera or USB device."));
+    }
+    if let Ok(entries) = fs::read_dir("/dev") {
+        let mut devices: Vec<_> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path().to_string_lossy().into_owned();
+                video_device_name(&path).map(|_| path.clone())
+            })
+            .collect();
+        devices.sort();
+        for path in devices {
+            sources.push(source(
+                format!("v4l2:{path}"),
+                format!("Camera — {path}"),
+                "camera",
+                Some("V4L2 device. Preview to verify video support and camera permissions.".into()),
+            ));
+        }
+    }
+    sources
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn platform_sources() -> Vec<CaptureSource> {
+    vec![unavailable_display(
+        "Desktop capture is not supported on this operating system.",
+    )]
 }
 
 fn adb_sources(text: &str) -> Vec<CaptureSource> {
@@ -154,6 +356,7 @@ fn adb_sources(text: &str) -> Vec<CaptureSource> {
     devices
 }
 
+#[cfg(any(windows, test))]
 fn dshow_names(text: &str) -> Vec<String> {
     text.lines()
         .filter(|l| l.contains("(video)"))
@@ -161,6 +364,7 @@ fn dshow_names(text: &str) -> Vec<String> {
         .filter(|name| !is_quest_virtual_camera(name))
         .collect()
 }
+#[cfg(any(windows, test))]
 fn is_quest_virtual_camera(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.starts_with("meta quest") || name.starts_with("oculus quest")
@@ -186,6 +390,7 @@ pub fn microphones() -> Result<Vec<Microphone>, String> {
     Ok(result)
 }
 
+#[cfg(windows)]
 struct NativeFlags {
     path: PathBuf,
     fps: u32,
@@ -195,12 +400,14 @@ struct NativeFlags {
     preview: bool,
     preview_sink: Option<crate::preview::FrameSink>,
 }
+#[cfg(windows)]
 struct NativeCapture {
     flags: NativeFlags,
     encoder: Option<PacedEncoder>,
     first_frame: Option<f64>,
     ready_sent: bool,
 }
+#[cfg(windows)]
 impl NativeCapture {
     fn finish(&mut self) -> Result<(), String> {
         if let Some(encoder) = self.encoder.take() {
@@ -209,6 +416,7 @@ impl NativeCapture {
         Ok(())
     }
 }
+#[cfg(windows)]
 struct PacedEncoder {
     latest: Arc<Mutex<Arc<Vec<u8>>>>,
     width: u32,
@@ -216,6 +424,7 @@ struct PacedEncoder {
     stop: mpsc::Sender<()>,
     join: JoinHandle<Result<(), String>>,
 }
+#[cfg(windows)]
 impl PacedEncoder {
     fn new(
         mut encoder: VideoEncoder,
@@ -279,6 +488,7 @@ impl PacedEncoder {
             .map_err(|_| "Native encoder worker panicked".to_string())?
     }
 }
+#[cfg(windows)]
 fn owned_bgra(frame: &mut Frame, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let frame_width = frame.width();
     let frame_height = frame.height();
@@ -294,6 +504,7 @@ fn owned_bgra(frame: &mut Frame, width: u32, height: u32) -> Result<Vec<u8>, Str
     }
     Ok(pixels)
 }
+#[cfg(windows)]
 impl GraphicsCaptureApiHandler for NativeCapture {
     type Flags = NativeFlags;
     type Error = String;
@@ -398,6 +609,7 @@ impl GraphicsCaptureApiHandler for NativeCapture {
         self.finish()
     }
 }
+#[cfg(windows)]
 impl Drop for NativeCapture {
     fn drop(&mut self) {
         if let Err(e) = self.finish() {
@@ -406,6 +618,7 @@ impl Drop for NativeCapture {
     }
 }
 
+#[cfg(windows)]
 fn native_start(
     id: &str,
     flags: NativeFlags,
@@ -445,10 +658,12 @@ fn native_start(
     Err("Unknown native capture source".into())
 }
 
+#[cfg(windows)]
 pub struct NativePreview {
     control: Option<CaptureControl<NativeCapture, String>>,
     pub error: SharedError,
 }
+#[cfg(windows)]
 impl Drop for NativePreview {
     fn drop(&mut self) {
         if let Some(control) = self.control.take() {
@@ -456,6 +671,7 @@ impl Drop for NativePreview {
         }
     }
 }
+#[cfg(windows)]
 pub fn stream_preview(
     source: &str,
     sink: crate::preview::FrameSink,
@@ -500,16 +716,11 @@ pub fn preview(source_id: &str) -> Result<String, String> {
             return Err(String::from_utf8_lossy(&out.stderr).into_owned());
         }
         out.stdout
-    } else if let Some(name) = source_id.strip_prefix("dshow:") {
+    } else if is_process_source(source_id) {
         let mut cmd = deps::command("ffmpeg")?;
+        cmd.args(["-hide_banner", "-loglevel", "error"]);
+        configure_video_input(&mut cmd, source_id, 30, "32M")?;
         cmd.args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "dshow",
-            "-i",
-            &format!("video={name}"),
             "-frames:v",
             "1",
             "-f",
@@ -524,33 +735,40 @@ pub fn preview(source_id: &str) -> Result<String, String> {
         }
         out.stdout
     } else {
-        let path =
-            std::env::temp_dir().join(format!("cuereview-preview-{}.png", uuid::Uuid::new_v4()));
-        let (tx, rx) = mpsc::sync_channel(1);
-        let control = native_start(
-            source_id,
-            NativeFlags {
-                path: path.clone(),
-                fps: 15,
-                epoch: Instant::now(),
-                error: Arc::default(),
-                ready: tx,
-                preview: true,
-                preview_sink: None,
-            },
-        )?;
-        let captured = rx
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| {
-                "Preview timed out. Restore the selected window and try again.".to_string()
-            })
-            .and_then(|r| r);
-        let stopped = control.stop().map_err(|e| e.to_string());
-        let bytes = captured
-            .and(stopped)
-            .and_then(|_| fs::read(&path).map_err(|e| e.to_string()));
-        let _ = fs::remove_file(path);
-        bytes?
+        #[cfg(not(windows))]
+        {
+            return Err(unavailable_source());
+        }
+        #[cfg(windows)]
+        {
+            let path = std::env::temp_dir()
+                .join(format!("cuereview-preview-{}.png", uuid::Uuid::new_v4()));
+            let (tx, rx) = mpsc::sync_channel(1);
+            let control = native_start(
+                source_id,
+                NativeFlags {
+                    path: path.clone(),
+                    fps: 15,
+                    epoch: Instant::now(),
+                    error: Arc::default(),
+                    ready: tx,
+                    preview: true,
+                    preview_sink: None,
+                },
+            )?;
+            let captured = rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| {
+                    "Preview timed out. Restore the selected window and try again.".to_string()
+                })
+                .and_then(|r| r);
+            let stopped = control.stop().map_err(|e| e.to_string());
+            let bytes = captured
+                .and(stopped)
+                .and_then(|_| fs::read(&path).map_err(|e| e.to_string()));
+            let _ = fs::remove_file(path);
+            bytes?
+        }
     };
     if bytes.is_empty() {
         return Err("Capture source returned an empty preview".into());
@@ -916,6 +1134,7 @@ impl AudioWorker {
 }
 
 enum VideoCapture {
+    #[cfg(windows)]
     Native(CaptureControl<NativeCapture, String>),
     Process {
         child: Mutex<Child>,
@@ -946,6 +1165,10 @@ pub fn start_muted(
 ) -> Result<ActiveCapture, String> {
     if config.fps == 0 || config.fps > 60 {
         return Err("Frame rate must be between 1 and 60".into());
+    }
+    #[cfg(not(windows))]
+    if config.system_audio && !config.source_id.starts_with("android:") {
+        return Err("Desktop system audio is not supported on this platform yet. Turn off system audio and select a microphone. Android/Quest device audio remains available.".into());
     }
     deps::tool("ffmpeg")?;
     fs::create_dir_all(folder).map_err(|e| e.to_string())?;
@@ -1005,21 +1228,14 @@ pub fn start_muted(
                 .spawn()
                 .map_err(|e| e.to_string())?;
             ready_process(child, input, Some(window_title), capture.epoch)
-        } else if let Some(name) = config.source_id.strip_prefix("dshow:") {
+        } else if is_process_source(&config.source_id) {
             let input = folder.join("native-video.mkv");
             let log = File::create(folder.join("capture.log")).map_err(|e| e.to_string())?;
-            let child = deps::command("ffmpeg")?
+            let mut command = deps::command("ffmpeg")?;
+            command.args(["-y", "-hide_banner", "-loglevel", "warning"]);
+            configure_video_input(&mut command, &config.source_id, config.fps, "256M")?;
+            let child = command
                 .args([
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "warning",
-                    "-f",
-                    "dshow",
-                    "-rtbufsize",
-                    "256M",
-                    "-i",
-                    &format!("video={name}"),
                     "-an",
                     "-vf",
                     "scale=trunc(iw/2)*2:trunc(ih/2)*2",
@@ -1040,31 +1256,38 @@ pub fn start_muted(
                 .map_err(|e| e.to_string())?;
             ready_process(child, input, None, capture.epoch)
         } else {
-            let (ready, rx) = mpsc::sync_channel(1);
-            let control = native_start(
-                &config.source_id,
-                NativeFlags {
-                    path: folder.join("native-video.mp4"),
-                    fps: config.fps,
-                    epoch: capture.epoch,
-                    error: capture.error.clone(),
-                    ready,
-                    preview: false,
-                    preview_sink: None,
-                },
-            )?;
-            let initialized = rx
-                .recv_timeout(Duration::from_secs(8))
-                .map_err(|_| {
-                    "No video frames arrived. Restore the selected window and try again."
-                        .to_string()
-                })
-                .and_then(|r| r);
-            if let Err(e) = initialized {
-                let _ = control.stop();
-                return Err(e);
+            #[cfg(not(windows))]
+            {
+                Err(unavailable_source())
             }
-            Ok(VideoCapture::Native(control))
+            #[cfg(windows)]
+            {
+                let (ready, rx) = mpsc::sync_channel(1);
+                let control = native_start(
+                    &config.source_id,
+                    NativeFlags {
+                        path: folder.join("native-video.mp4"),
+                        fps: config.fps,
+                        epoch: capture.epoch,
+                        error: capture.error.clone(),
+                        ready,
+                        preview: false,
+                        preview_sink: None,
+                    },
+                )?;
+                let initialized = rx
+                    .recv_timeout(Duration::from_secs(8))
+                    .map_err(|_| {
+                        "No video frames arrived. Restore the selected window and try again."
+                            .to_string()
+                    })
+                    .and_then(|r| r);
+                if let Err(e) = initialized {
+                    let _ = control.stop();
+                    return Err(e);
+                }
+                Ok(VideoCapture::Native(control))
+            }
         }
     })();
     match result {
@@ -1107,6 +1330,7 @@ impl ActiveCapture {
     pub fn error(&self) -> Option<String> {
         if self.stopped.is_none() {
             match self.video.as_ref() {
+                #[cfg(windows)]
                 Some(VideoCapture::Native(control)) if control.is_finished() => {
                     fail(&self.error, "Native capture stopped unexpectedly")
                 }
@@ -1140,6 +1364,7 @@ impl ActiveCapture {
             }
         }
         let input = match self.video.take() {
+            #[cfg(windows)]
             Some(VideoCapture::Native(control)) => {
                 let handler = control.callback();
                 if let Err(e) = control.stop() {
@@ -1161,6 +1386,7 @@ impl ActiveCapture {
                 device_capture = window_title.is_some();
                 delay = process_delay;
                 let mut child = child.into_inner().unwrap_or_else(|e| e.into_inner());
+                #[cfg(windows)]
                 if let Some(title) = window_title {
                     if let Ok(window) = Window::from_name(&title) {
                         #[link(name = "user32")]
@@ -1181,6 +1407,17 @@ impl ActiveCapture {
                     if let Some(mut stdin) = child.stdin.take() {
                         let _ = stdin.write_all(b"q\n");
                     }
+                }
+                #[cfg(unix)]
+                if device_capture {
+                    // scrcpy flushes its recorder on SIGINT; kill() would discard the trailer.
+                    match std::process::Command::new("/bin/kill")
+                        .args(["-INT", &child.id().to_string()]).status() {
+                        Ok(status) if status.success() => (),
+                        _ => failures.push("Could not request a clean device stop; original tracks will be retained".into()),
+                    }
+                } else if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(b"q\n");
                 }
                 let deadline = Instant::now() + Duration::from_secs(8);
                 loop {
@@ -1353,6 +1590,7 @@ fn ready_process(
                 .map(|_| epoch.elapsed().as_secs_f64())
         };
         if let Some(delay) = ready_delay {
+            #[cfg(windows)]
             if let Some(title) = window_title.as_ref() {
                 if let Ok(window) = Window::from_name(title) {
                     #[link(name = "user32")]
@@ -1772,6 +2010,36 @@ fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn avfoundation_listing_keeps_video_indices_and_excludes_audio() {
+        let sources = avfoundation_sources("[AVFoundation indev @ 123] AVFoundation video devices:\n[AVFoundation indev @ 123] [0] FaceTime HD Camera\n[AVFoundation indev @ 123] [1] Capture screen 0\n[AVFoundation indev @ 123] AVFoundation audio devices:\n[AVFoundation indev @ 123] [0] MacBook Microphone\n");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].id, "avfoundation:0");
+        assert_eq!(sources[0].kind, "camera");
+        assert_eq!(sources[1].id, "avfoundation:1");
+        assert_eq!(sources[1].kind, "display");
+        assert!(avfoundation_sources("permission denied").is_empty());
+    }
+
+    #[test]
+    fn v4l2_names_reject_non_device_paths() {
+        assert_eq!(video_device_name("/dev/video12"), Some("12"));
+        for path in [
+            "/dev/video",
+            "/dev/video0/other",
+            "/dev/video0:audio",
+            "/tmp/video0",
+        ] {
+            assert_eq!(video_device_name(path), None);
+        }
+    }
+
+    #[test]
+    fn unavailable_input_is_rejected_before_spawning() {
+        let mut command = std::process::Command::new("ffmpeg");
+        assert!(configure_video_input(&mut command, "desktop:unavailable", 30, "32M").is_err());
+        assert_eq!(command.get_args().count(), 0);
+    }
     #[test]
     fn native_cleanup_is_limited_to_the_owned_intermediate() {
         let root = tempfile::tempdir().unwrap();
@@ -2199,6 +2467,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Records the actual Windows display, microphone and system audio for 3 seconds"]
+    #[cfg(windows)]
     fn actual_windows_capture() {
         let folder = PathBuf::from(
             std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR")
@@ -2241,6 +2510,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Plays two quiet test tones and records actual WASAPI loopback"]
+    #[cfg(windows)]
     fn actual_loopback_silence_gaps() {
         let folder =
             PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap()).join("loopback");
@@ -2372,6 +2642,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Records the actual foreground Windows window"]
+    #[cfg(windows)]
     fn actual_window_capture() {
         let folder =
             PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap()).join("window");
@@ -2396,6 +2667,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Creates a temporary odd-sized Windows window, captures it, then closes the source"]
+    #[cfg(windows)]
     fn actual_source_close_and_odd_geometry() {
         use std::ffi::c_void;
         #[link(name = "user32")]
@@ -2526,6 +2798,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Records the microphone with mute enabled before capture initialization"]
+    #[cfg(windows)]
     fn actual_initial_mute() {
         let folder = PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap())
             .join("initial-mute");
@@ -2551,6 +2824,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Takes consistent microphone snapshots while actual Windows recording continues"]
+    #[cfg(windows)]
     fn actual_live_audio_snapshots() {
         let folder = PathBuf::from(std::env::var_os("CUEREVIEW_CAPTURE_TEST_DIR").unwrap())
             .join("snapshots");
@@ -2597,6 +2871,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Records 31 seconds of actual desktop/system audio with early and late audiovisual pulses"]
+    #[cfg(windows)]
     fn actual_desktop_sync_over_static_interval() {
         const SYNC_FPS: u32 = 30;
         use std::ffi::c_void;
@@ -2850,6 +3125,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Verifies selected-window preview and recording through an actual opaque occluding window"]
+    #[cfg(windows)]
     fn actual_selected_window_occlusion() {
         use std::ffi::c_void;
         #[repr(C)]
@@ -3022,6 +3298,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Stops an owned native source before readiness and immediately after start, then verifies a fresh capture"]
+    #[cfg(windows)]
     fn actual_immediate_stop_then_restart() {
         use std::ffi::c_void;
         #[repr(C)]

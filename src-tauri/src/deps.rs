@@ -8,8 +8,13 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::Duration,
 };
+static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+pub fn set_resource_dir(path: PathBuf) {
+    let _ = RESOURCE_DIR.set(path);
+}
 
 pub fn tool(name: &str) -> Result<PathBuf, String> {
     let exe = if cfg!(windows) {
@@ -25,8 +30,25 @@ pub fn tool(name: &str) -> Result<PathBuf, String> {
     if local.is_file() {
         return Ok(local);
     }
+    for dir in RESOURCE_DIR.get().cloned().into_iter().chain(
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_owned)),
+    ) {
+        let bundled = dir.join("tools/whisper-b5454").join(&exe);
+        if bundled.is_file() {
+            return Ok(bundled);
+        }
+    }
     for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
         let path = dir.join(&exe);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    #[cfg(not(windows))]
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        let path = Path::new(dir).join(&exe);
         if path.is_file() {
             return Ok(path);
         }
@@ -160,65 +182,72 @@ pub fn install_transcription() -> Result<SetupStatus, String> {
     fs::create_dir_all(root.join("tools")).map_err(|e| e.to_string())?;
     fs::create_dir_all(root.join("models")).map_err(|e| e.to_string())?;
     if !runtime_works("whisper-cli") || !runtime_works("whisper-vad-speech-segments") {
-        let archive = root.join("tools/whisper.zip");
-        download(
+        #[cfg(not(windows))]
+        return Err("The bundled speech runtime is unavailable. Reinstall CueReview for your architecture, or install whisper.cpp with both whisper-cli and whisper-vad-speech-segments on PATH.".into());
+        #[cfg(windows)]
+        {
+            let archive = root.join("tools/whisper.zip");
+            download(
             "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
             &archive,
             Some("6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb"),
         )?;
-        let staging = root
-            .join("tools")
-            .join(format!("whisper-install-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&staging).map_err(|e| e.to_string())?;
-        let mut zip = zip::ZipArchive::new(fs::File::open(&archive).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        for i in 0..zip.len() {
-            let mut file = zip.by_index(i).map_err(|e| e.to_string())?;
-            if file.is_dir() {
-                continue;
+            let staging = root
+                .join("tools")
+                .join(format!("whisper-install-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&staging).map_err(|e| e.to_string())?;
+            let mut zip =
+                zip::ZipArchive::new(fs::File::open(&archive).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            for i in 0..zip.len() {
+                let mut file = zip.by_index(i).map_err(|e| e.to_string())?;
+                if file.is_dir() {
+                    continue;
+                }
+                let enclosed = file.enclosed_name().ok_or("Unsafe archive entry")?;
+                let name = enclosed.file_name().ok_or("Invalid archive entry")?;
+                if matches!(
+                    enclosed.extension().and_then(|x| x.to_str()),
+                    Some("exe" | "dll" | "txt")
+                ) {
+                    let mut out =
+                        fs::File::create(staging.join(name)).map_err(|e| e.to_string())?;
+                    std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+                }
             }
-            let enclosed = file.enclosed_name().ok_or("Unsafe archive entry")?;
-            let name = enclosed.file_name().ok_or("Invalid archive entry")?;
-            if matches!(
-                enclosed.extension().and_then(|x| x.to_str()),
-                Some("exe" | "dll" | "txt")
-            ) {
-                let mut out = fs::File::create(staging.join(name)).map_err(|e| e.to_string())?;
-                std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+            for name in ["whisper-cli.exe", "whisper-vad-speech-segments.exe"] {
+                let mut check = Command::new(staging.join(name));
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    check.creation_flags(0x08000000);
+                }
+                if !check
+                    .arg("-h")
+                    .output()
+                    .map_err(|e| format!("Speech runtime failed to start: {e}"))?
+                    .status
+                    .success()
+                {
+                    return Err(
+                        "Speech runtime verification failed; existing installation was preserved."
+                            .into(),
+                    );
+                }
             }
+            let destination = root.join("tools/whisper-b5454");
+            if destination.exists() {
+                fs::rename(
+                    &destination,
+                    root.join("tools")
+                        .join(format!("whisper-backup-{}", uuid::Uuid::new_v4())),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            fs::rename(staging, destination).map_err(|e| e.to_string())?;
+            drop(zip);
+            let _ = fs::remove_file(archive);
         }
-        for name in ["whisper-cli.exe", "whisper-vad-speech-segments.exe"] {
-            let mut check = Command::new(staging.join(name));
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                check.creation_flags(0x08000000);
-            }
-            if !check
-                .arg("-h")
-                .output()
-                .map_err(|e| format!("Speech runtime failed to start: {e}"))?
-                .status
-                .success()
-            {
-                return Err(
-                    "Speech runtime verification failed; existing installation was preserved."
-                        .into(),
-                );
-            }
-        }
-        let destination = root.join("tools/whisper-b5454");
-        if destination.exists() {
-            fs::rename(
-                &destination,
-                root.join("tools")
-                    .join(format!("whisper-backup-{}", uuid::Uuid::new_v4())),
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        fs::rename(staging, destination).map_err(|e| e.to_string())?;
-        drop(zip);
-        let _ = fs::remove_file(archive);
     }
     if !speech_model_ready() {
         if std::env::var_os("CUEREVIEW_MODEL").is_some() {

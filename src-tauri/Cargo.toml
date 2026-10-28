@@ -32,6 +32,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 dunce = "1"
+dirs = "7"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 hound = "3.5"
 cpal = "0.16"

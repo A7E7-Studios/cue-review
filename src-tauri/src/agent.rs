@@ -8,16 +8,13 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-pub fn handoff(store: &Store, id: &str) -> Result<String, String> {
+pub fn handoff(store: &Store, id: &str, exe: &Path) -> Result<String, String> {
     let s = store.session(id)?;
-    let exe = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .with_file_name(if cfg!(windows) { "cue.exe" } else { "cue" });
     let root = std::path::absolute(&store.root).map_err(|e| e.to_string())?;
     Ok(handoff_text(
         &s.name,
         id,
-        &exe,
+        exe,
         &root,
         &store.session_dir(id)?,
     ))
@@ -25,10 +22,32 @@ pub fn handoff(store: &Store, id: &str) -> Result<String, String> {
 fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
 fn handoff_text(name: &str, id: &str, exe: &Path, root: &Path, folder: &Path) -> String {
-    let command = format!("& {}", ps_quote(&exe.to_string_lossy()));
-    let session = ps_quote(id);
-    format!("Review CueReview session {id} ({name}) locally. Run these commands in PowerShell.\n\nUse the same local data directory as the app:\n$env:CUEREVIEW_DATA_DIR = {}\n\nRead word timestamps:\n{command} transcript {session} --json\n\nFind a visual reference (replace the example phrase):\n{command} find {session} --phrase 'here'\n\nInspect its frame:\n{command} frame {session} --phrase 'here' --occurrence 1\n\nExport a clip using millisecond bounds from the transcript:\n{command} clip {session} --start-ms START_MS --end-ms END_MS\n\nSession folder: {}\nThe CLI is installed beside CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous.",ps_quote(&root.to_string_lossy()),folder.display())
+    let (command, session, shell, environment) = if cfg!(windows) {
+        (
+            format!("& {}", ps_quote(&exe.to_string_lossy())),
+            ps_quote(id),
+            "PowerShell",
+            format!(
+                "$env:CUEREVIEW_DATA_DIR = {}",
+                ps_quote(&root.to_string_lossy())
+            ),
+        )
+    } else {
+        (
+            sh_quote(&exe.to_string_lossy()),
+            sh_quote(id),
+            "a POSIX shell (bash or zsh)",
+            format!(
+                "export CUEREVIEW_DATA_DIR={}",
+                sh_quote(&root.to_string_lossy())
+            ),
+        )
+    };
+    format!("Review CueReview session {id} ({name}) locally. Run these commands in {shell}.\n\nUse the same local data directory as the app:\n{environment}\n\nRead word timestamps:\n{command} transcript {session} --json\n\nFind a visual reference (replace the example phrase):\n{command} find {session} --phrase 'here'\n\nInspect its frame:\n{command} frame {session} --phrase 'here' --occurrence 1\n\nExport a clip using millisecond bounds from the transcript:\n{command} clip {session} --start-ms START_MS --end-ms END_MS\n\nSession folder: {}\nThe CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous.",folder.display())
 }
 pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String> {
     let mut session = store.session(id)?;
@@ -318,8 +337,13 @@ mod tests {
             Path::new("D:\\Review's Data"),
             Path::new("D:\\Review's Data\\sessions\\session"),
         );
-        assert!(text.contains("& 'C:\\User''s Tools\\cue.exe' transcript 'session' --json"));
-        assert!(text.contains("$env:CUEREVIEW_DATA_DIR = 'D:\\Review''s Data'"));
+        if cfg!(windows) {
+            assert!(text.contains("& 'C:\\User''s Tools\\cue.exe' transcript 'session' --json"));
+            assert!(text.contains("$env:CUEREVIEW_DATA_DIR = 'D:\\Review''s Data'"));
+        } else {
+            assert!(text.contains("'C:\\User'\"'\"'s Tools\\cue.exe' transcript 'session' --json"));
+            assert!(text.contains("export CUEREVIEW_DATA_DIR='D:\\Review'\"'\"'s Data'"));
+        }
     }
     #[test]
     fn cli_transcription_rejects_active_session_before_mutation() {

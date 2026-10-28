@@ -28,6 +28,7 @@ struct Runtime {
 }
 struct AppState {
     store: Store,
+    _ownership: std::fs::File,
     runtime: Mutex<Runtime>,
     installer: Mutex<()>,
     inference: Mutex<()>,
@@ -284,6 +285,14 @@ async fn start_preview(
 ) -> Result<preview::StreamInfo, String> {
     let s = s.inner().clone();
     blocking(move || {
+        // The runtime lock precedes preview everywhere both are needed. Keep it
+        // through startup so preview cannot reopen an exclusive camera mid-start.
+        let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+        if preview::requires_exclusive_capture(&source_id)
+            && runtime.active.as_ref().is_some_and(|(session, _)| session.source_id == source_id)
+        {
+            return Err("Camera preview is paused while recording because this device supports one capture stream. Stop recording to preview it again.".into());
+        }
         s.preview.lock().map_err(|e| e.to_string())?.start(
             id,
             &source_id,
@@ -317,16 +326,42 @@ async fn install_transcription(s: CmdState<'_>) -> Result<SetupStatus, String> {
     .await
 }
 #[tauri::command]
-fn get_agent_handoff(s: CmdState<'_>, id: String) -> Result<String, String> {
-    agent::handoff(&s.store, &id)
+fn get_agent_handoff(s: CmdState<'_>, app: tauri::AppHandle, id: String) -> Result<String, String> {
+    let name = if cfg!(windows) { "cue.exe" } else { "cue" };
+    let bundled = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join(name);
+    let sibling = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name(name);
+    agent::handoff(
+        &s.store,
+        &id,
+        if bundled.is_file() {
+            &bundled
+        } else {
+            &sibling
+        },
+    )
 }
 #[tauri::command]
 fn open_session_folder(s: CmdState<'_>, id: String) -> Result<(), String> {
     let folder = session_folder_for_shell(&s.store, &id)?;
-    Command::new("explorer.exe")
-        .arg(&folder)
-        .spawn()
-        .map_err(|e| format!("Could not open {} in File Explorer: {e}", folder.display()))?;
+    let opener = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(opener).arg(&folder).spawn().map_err(|e| {
+        format!(
+            "Could not open {} in the file manager: {e}",
+            folder.display()
+        )
+    })?;
     Ok(())
 }
 fn session_folder_for_shell(store: &Store, id: &str) -> Result<std::path::PathBuf, String> {
@@ -358,6 +393,10 @@ async fn start_recording(
         if runtime.active.is_some() || runtime.processing.is_some() {
             return Err("Finish the current recording or processing job first.".into());
         }
+        s.preview
+            .lock()
+            .map_err(|e| e.to_string())?
+            .stop_for_recording(&source_id);
         let config = CaptureConfig {
             source_id,
             microphone_id,
@@ -565,12 +604,15 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            deps::set_resource_dir(app.path().resource_dir()?);
             let store = Store::open(store::data_root()).map_err(std::io::Error::other)?;
+            let ownership = store.acquire_ownership().map_err(std::io::Error::other)?;
             store.recover_interrupted().map_err(std::io::Error::other)?;
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
             app.manage(Arc::new(AppState {
                 store,
+                _ownership: ownership,
                 runtime: Mutex::new(Runtime::default()),
                 installer: Mutex::new(()),
                 inference: Mutex::new(()),
@@ -656,8 +698,11 @@ mod orchestration_tests {
         assert!(session_folder_for_shell(&store, &uuid::Uuid::new_v4().to_string()).is_err());
     }
     fn state(root: std::path::PathBuf) -> Shared {
+        let store = Store::open(root).unwrap();
+        let ownership = store.acquire_ownership().unwrap();
         Arc::new(AppState {
-            store: Store::open(root).unwrap(),
+            store,
+            _ownership: ownership,
             runtime: Mutex::new(Runtime::default()),
             installer: Mutex::new(()),
             inference: Mutex::new(()),

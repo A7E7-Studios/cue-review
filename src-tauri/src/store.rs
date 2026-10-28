@@ -16,7 +16,8 @@ pub fn data_root() -> PathBuf {
     std::env::var_os("CUEREVIEW_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| ".".into()))
+            dirs::data_local_dir()
+                .expect("CueReview needs a writable user data directory")
                 .join("CueReview")
         })
 }
@@ -106,6 +107,22 @@ fn delete_session_payloads(folder: &Path) -> Result<(), String> {
 }
 
 impl Store {
+    /// Hold this handle for the lifetime of every process that can mutate recordings.
+    /// Readers (the agent CLI) remain usable while the desktop app is running.
+    pub fn acquire_ownership(&self) -> Result<fs::File, String> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(".instance.lock"))
+            .map_err(|e| e.to_string())?;
+        file.try_lock().map_err(|e| match e {
+            fs::TryLockError::WouldBlock => "CueReview is already using this data folder. Close the other app or recording command before continuing.".to_owned(),
+            fs::TryLockError::Error(error) => format!("Could not lock the recording data folder: {error}"),
+        })?;
+        Ok(file)
+    }
     pub fn open(root: PathBuf) -> Result<Self, String> {
         for dir in ["projects", "sessions", "tools", "models"] {
             fs::create_dir_all(root.join(dir)).map_err(|e| e.to_string())?;
@@ -437,6 +454,37 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ownership_blocks_a_second_process_without_recovering_live_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let ownership = store.acquire_ownership().unwrap();
+        let session = store.create_session(None, None, &video_only()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::ownership_child_probe",
+                "--nocapture",
+            ])
+            .env("CUEREVIEW_LOCK_TEST_ROOT", dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(store.session(&session.id).unwrap().status, "recording");
+        drop(ownership);
+        assert!(store.acquire_ownership().is_ok());
+    }
+    #[test]
+    fn ownership_child_probe() {
+        let Some(path) = std::env::var_os("CUEREVIEW_LOCK_TEST_ROOT") else {
+            return;
+        };
+        let store = Store::open(path.into()).unwrap();
+        assert!(store
+            .acquire_ownership()
+            .unwrap_err()
+            .contains("already using"));
+    }
     fn video_only() -> CaptureConfig {
         CaptureConfig {
             source_id: "monitor:1".into(),

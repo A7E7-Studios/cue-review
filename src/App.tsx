@@ -33,6 +33,7 @@ export default function App() {
   const [preview,setPreview] = useState('');
   const [previewError,setPreviewError] = useState('');
   const [previewRevision,setPreviewRevision] = useState(0);
+  const [startingRecording,setStartingRecording] = useState(false);
   const [error,setError] = useState('');
   const [notice,setNotice] = useState('');
   const [busy,setBusy] = useState(false);
@@ -61,7 +62,8 @@ export default function App() {
   const runtimeState = useRef<RecordingStatus['state']>('idle');
   const restoredSize = useRef<{width:number;height:number}|null>(null);
   const recording = status.state === 'recording';
-  const previewEnabled = draft || recording;
+  const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
+  const previewEnabled = (draft || recording) && !previewPaused;
   const processing = session?.status === 'processing' || status.state === 'processing';
   const locked = recording || busy;
   const project = projects.find(item => item.id === session?.projectId);
@@ -183,10 +185,11 @@ export default function App() {
       else {
         if(!source?.available)throw new Error(source?.detail||'Choose an available screen, window, or connected device first.');
         if(microphoneUnavailable)throw new Error('The selected microphone is unavailable. Reconnect it and refresh microphones, choose another input, or select No microphone.');
+        setStartingRecording(true);
         const next=await backend.start(null,null,sourceId,microphoneId||null,systemAudio,muted);
         setSession(next);setDraft(false);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);runtimeState.current='recording';setStatus({state:'recording',sessionId:next.id,elapsedMs:0});setTime(0);setPlaying(false);await refreshProjects();
       }
-    }catch(problem){report(problem);}finally{setBusy(false);}
+    }catch(problem){report(problem);}finally{setStartingRecording(false);setBusy(false);}
   },[busy,processing,loading,recording,sourceId,source?.available,source?.detail,muted,microphoneId,microphoneUnavailable,systemAudio,refreshProjects,compact,toggleCompact,report]);
   const addMarker=useCallback(()=>{if(!session)return;setDialog({kind:'marker',id:session.id,value:''});},[session]);
   useEffect(()=>{
@@ -303,7 +306,7 @@ export default function App() {
           <section className="player" aria-label={draft||recording?'Capture preview':'Recording video'}>
             <div className="video-surface">
               {draft||recording?<>
-                {preview?<img className="preview-image" src={preview} alt={`Live preview of ${source?.name||'capture source'}`}/>:<div className="video-empty"><Icon name="monitor"/><h2>{loading?'Loading…':source&&!source.available?'Capture source unavailable':source?'Loading preview…':'Choose a source'}</h2>{source&&!source.available&&<p>{source.detail||'Reconnect the selected source and refresh, or choose another source.'}</p>}</div>}
+                {preview?<img className="preview-image" src={preview} alt={`Live preview of ${source?.name||'capture source'}`}/>:<div className="video-empty"><Icon name="monitor"/><h2>{previewPaused?'Camera preview paused':loading?'Loading…':source&&!source.available?'Capture source unavailable':source?'Loading preview…':'Choose a source'}</h2>{previewPaused&&<p>The camera is in use for recording. Preview returns when you start a new session.</p>}{source&&!source.available&&<p>{source.detail||'Reconnect the selected source and refresh, or choose another source.'}</p>}</div>}
                 {previewError&&<div className="preview-error">{previewError}</div>}
                 {recording&&<div className="record-badge"><i/>Recording <span>{formatTime(status.elapsedMs||0)}</span></div>}
               </>:session?.videoPath?<video key={`${session.id}:${mediaRevision}`} ref={video} src={videoUrl(session.videoPath)} playsInline preload="metadata" onTimeUpdate={event=>setTime(event.currentTarget.currentTime*1000)} onLoadedMetadata={event=>{setDuration(Number.isFinite(event.currentTarget.duration)?event.currentTarget.duration*1000:session.durationMs);event.currentTarget.playbackRate=speed;const restore=restorePlayback.current;if(restore?.id===session?.id){restorePlayback.current=null;event.currentTarget.currentTime=restore.time;setTime(restore.time*1000);if(restore.playing)void event.currentTarget.play().catch(report);}}} onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)} onClick={()=>void play()} onError={()=>{const restoring=restorePlayback.current?.id===session?.id;if(restoring)restorePlayback.current=null;if(!deletingFiles.current&&!restoring)setError('This recording could not be played. Open its folder to inspect the video file.');}} />:<div className="video-empty"><Icon name="monitor"/><h2>{loading?'Opening recording…':processing?'Finishing your recording':'No video available'}</h2><p>{processing?'Finishing video and transcript…':'Open the session folder to inspect its files.'}</p></div>}

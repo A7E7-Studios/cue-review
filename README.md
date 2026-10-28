@@ -1,8 +1,14 @@
 # CueReview
 
-**Show it. Say it. Fix it.** A Windows desktop recorder for local, word-aligned review feedback.
+**Show it. Say it. Fix it.** A desktop recorder for local, word-aligned review feedback.
 
 CueReview uses Tauri 2, React, and a small Rust backend. It opens directly into a fresh recording draft. Record a display, application window, or supported Android/Quest source with microphone commentary; no project or name is required. Review the original transcript beside the video, click a word to seek, add markers, and give an agent a local session reference. No account or hosted transcription service is involved.
+
+## Install
+
+Download the Windows installer, Linux Debian package/AppImage, or macOS Apple Silicon/Intel DMG from [GitHub Releases](https://github.com/A7E7-Studios/cue-review/releases). The packages include the agent CLI and speech runtime. Install FFmpeg/ffprobe separately (`winget install Gyan.FFmpeg` on Windows, `brew install ffmpeg` on macOS, or `sudo apt install ffmpeg` on Ubuntu), then use Settings → Install transcription to download the speech models. Android/Quest capture additionally needs ADB and scrcpy.
+
+Windows is the hardware-verified platform. macOS uses AVFoundation; Linux uses X11/V4L2. Linux Wayland desktop capture, macOS/Linux per-window capture, and macOS/Linux desktop system audio are not supported yet. Native macOS/Linux hardware validation remains outstanding. Initial Windows builds are unsigned; macOS builds are ad-hoc signed without notarization. See each release's installation notes and SHA256SUMS.
 
 ## Run from source
 
@@ -49,7 +55,7 @@ Default storage is `%LOCALAPPDATA%\CueReview`. Projects and sessions are plain J
 
 Each word retains its original `startMs`/`endMs` and may include `seekMs`, an estimated alignment point used by word clicks and phrase-based frame retrieval. Existing transcripts without this field still work. Custom speech models use their original intervals unless `CUEREVIEW_DTW_MODEL` explicitly names a compatible alignment preset, such as `base` or `base.en`; the preset is never inferred from a custom filename. The standard installed base model enables alignment automatically.
 
-The Windows package includes `cue.exe` beside the application. Copy for agent uses its absolute path, so adding it to PATH is optional.
+The packages include `cue.exe` on Windows and `cue` on macOS/Linux in the application resources. Copy for agent uses its absolute path and the appropriate shell syntax, so adding it to PATH is optional. Default storage outside Windows is `~/Library/Application Support/CueReview` on macOS and `$XDG_DATA_HOME/CueReview` (normally `~/.local/share/CueReview`) on Linux. A process lock prevents two app/CLI writers from recovering or modifying the same active recording; read-only CLI commands remain available while the app runs.
 
 ```powershell
 & 'C:\path\to\cue.exe' sessions
@@ -70,7 +76,9 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
 powershell -File scripts/package.ps1
 ```
 
-The Windows installer is produced under `src-tauri/target/release/bundle/nsis`. The packaging script first builds the sibling agent CLI, then the Tauri app and installer.
+The portable packaging command is `node scripts/package.mjs`. Release builds first run `node scripts/build-speech-runtime.mjs` (requires CMake and a C++ compiler), then package with `--require-speech-runtime`. Installers are produced under `src-tauri/target/release/bundle`; named release copies go to `.local/release-assets`. Explicit `--target` builds use `target/<triple>/release` and require a matching native host.
+
+Pull requests and main run `.github/workflows/ci.yml` on Windows x64, Linux x64, macOS ARM64 and macOS x64. Each job runs frontend/Rust tests and Clippy, builds the speech runtime, packages, and checks bundled executables. A `v<version>` tag contained in main triggers `.github/workflows/release.yml`; it publishes only after all five installers and their checksums are available. Package, Cargo and Tauri versions must match the tag. Workflow dispatch can retry an existing tag; published releases are never overwritten.
 
 Real capture checks are deliberately opt-in because they record the screen/microphone and play two quiet tones:
 

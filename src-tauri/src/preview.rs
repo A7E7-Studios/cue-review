@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::{
     io::{Read, Write},
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -17,6 +17,9 @@ use std::{
 
 pub type FrameSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 pub type ErrorSink = Arc<dyn Fn(String) + Send + Sync>;
+pub(crate) fn requires_exclusive_capture(source: &str) -> bool {
+    source.starts_with("v4l2:")
+}
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 #[derive(Default)]
 struct Frames {
@@ -66,6 +69,13 @@ impl Drop for Stream {
     }
 }
 impl Preview {
+    /// Dropping the stream joins its worker, whose drop waits for the decoder to exit.
+    /// The camera is fully released before the recording process opens it.
+    pub fn stop_for_recording(&mut self, source: &str) {
+        if requires_exclusive_capture(source) {
+            self.active = None;
+        }
+    }
     pub fn start(
         &mut self,
         id: String,
@@ -195,11 +205,13 @@ fn serve(listener: TcpListener, token: &str, frames: &Frames, source: &Source, e
 }
 
 enum Source {
+    #[cfg(windows)]
     Native(capture::NativePreview),
     Process(Box<ProcessSource>),
 }
 impl Source {
     fn start(id: &str, sink: FrameSink, frames: Arc<Frames>) -> Result<Self, String> {
+        #[cfg(windows)]
         if id.starts_with("monitor:") || id.starts_with("window:") {
             return capture::stream_preview(id, sink).map(Self::Native);
         }
@@ -207,6 +219,7 @@ impl Source {
     }
     fn error(&self) -> Option<String> {
         match self {
+            #[cfg(windows)]
             Self::Native(source) => source.error.lock().ok()?.clone(),
             Self::Process(source) => source
                 .reader
@@ -245,17 +258,8 @@ impl ProcessSource {
                 "-i",
                 &format!("tcp://127.0.0.1:{}", device.port),
             ]);
-        } else if let Some(name) = id.strip_prefix("dshow:") {
-            command.args([
-                "-f",
-                "dshow",
-                "-rtbufsize",
-                "32M",
-                "-i",
-                &format!("video={name}"),
-            ]);
         } else {
-            return Err("Unknown preview source".into());
+            capture::configure_video_input(&mut command, id, 30, "32M")?;
         }
         let mut decoder = command
             .args([
@@ -352,13 +356,10 @@ impl DeviceServer {
         let executable = deps::tool("scrcpy")?
             .canonicalize()
             .map_err(|e| e.to_string())?;
-        let jar: PathBuf = executable
-            .parent()
-            .ok_or("scrcpy folder is unavailable")?
-            .join("scrcpy-server");
-        if !jar.is_file() {
-            return Err("Reinstall scrcpy with its matching scrcpy-server file to enable live device preview.".into());
-        }
+        let jar = scrcpy_server_path(
+            &executable,
+            std::env::var_os("SCRCPY_SERVER_PATH").map(PathBuf::from),
+        )?;
         let mut version_command = deps::command("scrcpy")?;
         version_command.arg("--version");
         let version_output = capture::output_with_timeout(version_command, Duration::from_secs(5))?;
@@ -460,6 +461,18 @@ impl DeviceServer {
         Ok(server)
     }
 }
+fn scrcpy_server_path(executable: &Path, configured: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(path) = configured {
+        return path.is_file().then_some(path).ok_or_else(|| "SCRCPY_SERVER_PATH does not point to a file. Set it to the server matching your installed scrcpy version.".into());
+    }
+    let bin = executable.parent().ok_or("scrcpy folder is unavailable")?;
+    let mut candidates = vec![bin.join("scrcpy-server")];
+    if let Some(prefix) = bin.parent() {
+        // Linux packages and Homebrew install the server beneath their prefix's share directory.
+        candidates.push(prefix.join("share/scrcpy/scrcpy-server"));
+    }
+    candidates.into_iter().find(|path| path.is_file()).ok_or_else(|| "Reinstall scrcpy with its matching scrcpy-server file, or set SCRCPY_SERVER_PATH, to enable live device preview.".into())
+}
 impl Drop for DeviceServer {
     fn drop(&mut self) {
         if let Some(mut process) = self.process.take() {
@@ -485,13 +498,65 @@ impl Drop for DeviceServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exclusive_camera_start_waits_for_preview_worker_to_release_source() {
+        let frames = Arc::new(Frames::default());
+        let released = Arc::new(AtomicBool::new(false));
+        let worker_frames = frames.clone();
+        let worker_released = released.clone();
+        let mut preview = Preview {
+            active: Some(Stream {
+                id: "owned-preview".into(),
+                frames,
+                worker: Some(thread::spawn(move || {
+                    let guard = worker_frames.latest.lock().unwrap();
+                    let _guard = worker_frames
+                        .available
+                        .wait_while(guard, |_| !worker_frames.stopped.load(Ordering::Relaxed))
+                        .unwrap();
+                    worker_released.store(true, Ordering::Release);
+                })),
+            }),
+        };
+        for source in ["monitor:1", "x11::0", "android:quest"] {
+            preview.stop_for_recording(source);
+            assert!(preview.active.is_some());
+        }
+        preview.stop_for_recording("v4l2:/dev/video0");
+        assert!(preview.active.is_none());
+        assert!(released.load(Ordering::Acquire));
+    }
+    #[test]
+    fn device_preview_finds_packaged_and_explicit_servers() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let share = root.path().join("share/scrcpy");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&share).unwrap();
+        let executable = bin.join("scrcpy");
+        let server = share.join("scrcpy-server");
+        std::fs::write(&server, b"server").unwrap();
+        assert_eq!(scrcpy_server_path(&executable, None).unwrap(), server);
+        let adjacent = bin.join("scrcpy-server");
+        std::fs::write(&adjacent, b"server").unwrap();
+        assert_eq!(scrcpy_server_path(&executable, None).unwrap(), adjacent);
+        assert_eq!(
+            scrcpy_server_path(&executable, Some(server.clone())).unwrap(),
+            server
+        );
+        assert!(scrcpy_server_path(&executable, Some(root.path().join("missing"))).is_err());
+    }
+    #[cfg(windows)]
     use std::io::{BufRead, BufReader};
+    #[cfg(windows)]
     use std::net::TcpStream;
+    #[cfg(windows)]
     struct AnimatedWindow {
         handle: usize,
         stop: std::sync::mpsc::Sender<()>,
         worker: Option<JoinHandle<()>>,
     }
+    #[cfg(windows)]
     impl AnimatedWindow {
         fn new() -> Self {
             let (stop, stopped) = std::sync::mpsc::channel();
@@ -590,6 +655,7 @@ mod tests {
             }
         }
     }
+    #[cfg(windows)]
     impl Drop for AnimatedWindow {
         fn drop(&mut self) {
             let _ = self.stop.send(());
@@ -600,6 +666,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Streams an actual display/window/camera/authorized device through the production MJPEG transport"]
+    #[cfg(windows)]
     fn actual_continuous_preview() {
         let mut source = std::env::var("CUEREVIEW_TEST_SOURCE").expect("Set CUEREVIEW_TEST_SOURCE");
         let animation =
