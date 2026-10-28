@@ -79,7 +79,10 @@ npm test; npm run build; npm run build-storybook
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
-cargo build --manifest-path src-tauri/Cargo.toml --release --locked   # app and cue.exe for the scripts
+npx tauri build --no-bundle   # app with the embedded frontend, and cue.exe, for the scripts
+# cargo build --release alone builds an app that loads the dev URL.
+# If the build cannot find RC.EXE, set RC to the Windows SDK's rc.exe
+# (for example C:\Program Files (x86)\Windows Kits\10\bin\<version>\x64\rc.exe).
 powershell -File scripts/verify-pipeline.ps1                          # needs the debug cue.exe too
 node scripts/verify-cli.cjs --release
 node scripts/verify-failures.cjs; node scripts/verify-alignment.cjs
