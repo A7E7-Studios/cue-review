@@ -107,7 +107,7 @@ export interface CaptureControlsViewProps extends CaptureControlsProps {
 
 /** Draft controls: source and microphone pickers and Record. Keeps the `.source-trigger` and `.mic-trigger` hooks. */
 export function CaptureControls(props: CaptureControlsViewProps) {
-  const { sources, source, microphones, microphoneId, microphoneUnavailable, systemAudio, muted, menu, onMenu, locked, busy, recordLabel, recordDisabled, onRecord, platform } = props;
+  const { sources, source, microphones, microphoneId, microphoneUnavailable, systemAudio, muted, menu, onMenu, locked, busy, recordLabel, recordDisabled, recordBusy = false, onRecord, platform } = props;
   const sourceTrigger = useRef<HTMLButtonElement>(null);
   const micTrigger = useRef<HTMLButtonElement>(null);
   const sourceRef = useForwardedRef(sourceTrigger, props.sourceTriggerRef);
@@ -184,7 +184,7 @@ export function CaptureControls(props: CaptureControlsViewProps) {
       </Popover>}
     </div>
     <span className="cr-spacer"/>
-    <button type="button" className="cr-btn cr-dark-pill cr-record" title={`Start recording (${record.label})`} aria-keyshortcuts={record.aria} disabled={recordDisabled} onClick={onRecord}>
+    <button type="button" className="cr-btn cr-dark-pill cr-record" title={`Start recording (${record.label})`} aria-keyshortcuts={record.aria} disabled={recordDisabled} aria-disabled={recordBusy || undefined} onClick={recordBusy ? undefined : onRecord}>
       <span className="cr-record-dot" aria-hidden="true"/>{recordLabel}
     </button>
   </div>;

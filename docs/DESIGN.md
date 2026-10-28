@@ -17,7 +17,7 @@ Keep the shell compact and neutral. Recording starts immediately into a temporar
 ## Layout
 
 - **Ground and sheet.** The window ground (`--color-ground`) carries the sidebar; the white sheet (`--color-sheet`) holds the workspace. On Windows the sheet has a 1px `--color-sheet-edge` top and left border and an 8px top-left radius.
-- **Sidebar, 232px.** New recording is the primary button at the top, with a New section icon button beside it. Rows show the session name only; duration and date appear on hover or focus as `aria-hidden` text. No section counts. Rows are 32px with a 7px radius; hover is `--color-row-hover`, and the selected row is white with a small shadow (on macOS, an accent tint in the inset sidebar panel). The sidebar auto-hides below about 1000px wide.
+- **Sidebar, 232px.** New recording is the primary button at the top, with a New section icon button beside it. Rows show the session name only; duration and date appear on hover or focus as `aria-hidden` text. No section counts. Rows are 32px with a 7px radius; hover is `--color-row-hover`, and the selected row is white with a small shadow (on macOS, an accent tint in the inset sidebar panel). Section headings are 21.4px (12px text at 1.45 over 4px). A recording in progress shows an 8px dot before its name: `#E5484D` while recording, an accent ring (no pulse) while processing. The status is visually hidden text (the row is named `Name, recording`), so no visible label truncates the name. The sidebar auto-hides below about 1000px wide; when it hides or shows, focus moves to the toggle that brings it back.
 - **Center.** The title row holds the title (click to rename), Open recording folder and the **Copy for agent** accent pill; no metadata chips. Below it, the video has exactly one border (a 1px ring drawn as a shadow, 10px radius, 12px on macOS), is top-aligned under the title and keeps its aspect ratio; unused space shows the neutral surface. The controls sit directly under the video.
 - **Transcript column, 320px (at least 280px),** running the full height on the right. Focus video hides it and gives the video the space. There is no resizable split yet.
 - **Compact recording mode, about 520×320:** the dock and a drag strip only.
@@ -29,7 +29,7 @@ This replaces the v0.1 rule of keeping native window chrome.
 | Platform | Chrome |
 | --- | --- |
 | Windows | `decorations: false` and a 40px custom title bar: logo, sidebar toggle, centered search (`Ctrl+K`), Settings, then Minimize, Maximize/Restore and Close at 46×40. Close hovers `#C42B1C` with white. Drag regions (`data-tauri-drag-region`) sit only on empty bar areas, never on a control or the search field; double-clicking them maximizes. |
-| macOS | `titleBarStyle: Overlay` with a hidden title. The native traffic lights sit inside the inset sidebar panel (78×28 reserved); the content toolbar is 52px with search and Settings, and shows a sidebar toggle only while the sidebar is hidden. |
+| macOS | `titleBarStyle: Overlay` with a hidden title. The native traffic lights sit inside the inset sidebar panel (78×28 reserved). `trafficLightPosition` (24, 26) puts their top edge 26px down, so the panel's first row (the Hide sidebar button) is centred on y = 32 and New recording starts at y = 60, as in the mock. The content toolbar is 52px with search (`#F2F3F6`) and Settings (8px corners), and shows a Show sidebar toggle only while the sidebar is hidden. |
 | Linux | Native decorations, with the Windows bar layout minus window controls and drag regions. |
 
 Window control names are "Minimize window", "Maximize window" or "Restore window", and "Close window". Compact mode keeps only a drag strip: Minimize and Close on Windows, room for the traffic lights on macOS, nothing on Linux. Close stays guarded while recording or processing, whichever control asks. Known cost: custom controls lose the Windows 11 Snap Layouts flyout on the maximize button.
@@ -38,7 +38,7 @@ Window control names are "Minimize window", "Maximize window" or "Restore window
 
 - **Family:** Figtree, bundled as a variable font through `@fontsource-variable/figtree` and imported in `src/main.tsx` and `.storybook/preview.tsx`. Fallbacks are `system-ui`, `Segoe UI` and sans-serif. Inter is the documented alternative. No Google Fonts: the CSP allows only `'self'`.
 - **Scale:** title 18/700; body 13.5; transcript 14 with 1.55 line height; meta 12; controls 12.5; shortcut hints 11; the dock timer 19 with tabular numbers.
-- **Attribution:** Figtree is Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree), licensed under the SIL Open Font License 1.1. The license text is in `node_modules/@fontsource-variable/figtree/LICENSE`. The bundled WOFF2 files carry the copyright notice and the license URL but not the license text. Open item: ship the OFL text with the app's other third-party licenses.
+- **Attribution:** Figtree is Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree), licensed under the SIL Open Font License 1.1. The license text ships with the app: `public/licenses/Figtree-OFL.txt` (copied from `node_modules/@fontsource-variable/figtree/LICENSE`) is built into `dist/licenses/`, and Settings ends with the font's notice.
 
 ## Tokens (light)
 
@@ -50,22 +50,27 @@ Window control names are "Minimize window", "Maximize window" or "Restore window
 | Text | `#18181B`; secondary `#52525B`; tertiary `#66666F`; rows `#27272A`; transcript `#3F3F46`, past `#52525B` |
 | Accent | `#5B5BD6`. The current transcript row is an 8% accent tint (`#F2F2FC`); the spoken word is accent with white text in a 999px pill |
 | Neutral pill | `#F4F4F7` |
-| New recording | White with a 1px `#DCDFE5` ring |
-| Scrubber | Track `#F0F0F4`, unplayed speech `#DCDCE5`, played speech accent, take tick `#A1A1AA`, white knob |
+| New recording | White with a 1px `#DCDFE5` ring; on macOS `rgba(24, 24, 27, .07)` |
+| macOS selected row | `#D9DBF0`; tertiary text on it is `#5E5E68` (4.6:1; `#66666F` is 4.15:1 there) |
+| Scrubber | Track `#F0F0F4`, unplayed speech `#DCDCE5`, played speech accent, take tick `#7A7A84` (the mock's `#A1A1AA` is 2.25:1 on the track; this is 3.7:1, and 3.1:1 over speech), white knob |
 | Recording | Record dot `#E5484D`; Stop `#D7333A` with white text; live dot `#FF6369`; status chip `#FDECEC` with `#B42318`; preview ring 2px `#E5484D` |
 | Recording dock | `#18181B`, divider `#3F3F46`, secondary text `#A1A1AA`, meter `#4ADE80` / `#FACC15` / `#3F3F46` |
 | Radii | Window 8 (16 on macOS); rows 7; pills 999; video 10 (12 on macOS); macOS sidebar panel 16; current transcript row 12 |
 | Sizes | Windows title bar 40 with 46×40 controls; macOS toolbar 52; sidebar 232; transcript 320 (min 280); rows 32; New recording 36; play 40; pills 32–36; dock controls 44 |
 
-The dark theme (`:root[data-theme='dark']`) is derived from these roles. It has not been designed in the mocks yet and needs its own review. The theme is chosen only in **Settings → Appearance**; there is no theme button in the sidebar or title bar.
+The dark theme (`:root[data-theme='dark']`) is derived from these roles. It has not been designed in the mocks yet and needs its own review. The theme is chosen only in **Settings → Appearance**; there is no theme button in the sidebar or title bar. `src/chrome/platformAttribute.ts` applies the saved theme to `<html>` before React loads, so the page never paints light first. The native window background (`backgroundColor` in the platform configs) is still light and shows for a moment before the webview paints; following the theme there needs the Rust side or a window capability.
 
 ## States and components
 
 - **Status.** A status chip shows only while Recording or Processing; nothing shows once the recording is ready, and there is no "Synced" badge. Errors appear inline where they happen, with Retry; empty states appear in the body.
-- **One slot, two modes.** In review, the slot under the video is the scrubber and controls: a visually hidden native range named "Playback position" with speech segments, take ticks and the played part drawn over it, then play, time, speed, focus and the **Record more** pill. While recording, the same slot becomes the dark dock: timer (`role=timer`), "Take N" from take 2, level meter, the locked source, mute, compact and Stop. There is no progress bar while recording; the Live badge and the red ring appear on the preview.
+- **One slot, two modes.** In review, the slot under the video is the scrubber and controls: a visually hidden native range named "Playback position" with speech segments, take ticks and the played part drawn over it, then play, time, speed (no minimum width, as in the mock), focus and the **Record more** pill. While recording, the same slot becomes the dark dock: timer (`role=timer`), "Take N" from take 2, level meter, the locked source, mute, compact and Stop. There is no progress bar while recording; the Live badge and the red ring appear on the preview.
+- **The dock stays on one row.** It needs 527px with take 2 and a microphone. As its slot narrows (container queries in `workspace.css`, with their own steps for compact mode's 36px controls), a long source name truncates, then the source drops to an icon, then "Take N" goes, then Stop becomes a round icon button and the divider goes, then the meter goes. Labels become visually hidden text, so every control keeps its name, and Stop is always shown. It fits at 900×650, 1000–1135px with the sidebar, and the 420×250 compact minimum.
+- **Busy is not disabled.** While another action runs, Copy for agent, Record, Record more, Retry and Stop stay focusable with `aria-disabled` and ignore activation, so keyboard focus never drops to the page. When a control does go away (Record becomes Stop, Stop becomes the review controls, Compact becomes Expand), focus moves to the control that takes its place.
 - **Draft.** Source and microphone pickers and Record sit in the same slot. The pickers are anchored popovers that flip within the viewport, with arrow keys, Home/End and typeahead.
 - **Takes.** The transcript shows a "Take N · m:ss" divider where each take starts, and "Take N · recording" with a live tail and its note while recording. Copy for agent is disabled while recording.
-- **Transcript.** Word-level seek stays: words render inline with one roving tab stop, labelled "Seek to {word} at m:ss" or "Seek to m:ss". The column follows playback until the reader scrolls away, then offers **Return to playback**. **Find in transcript** searches the text. Title bar search filters sessions by name only.
+- **Transcript.** Word-level seek stays: words are inline `role=button` spans (a `<button>` lays out as one unbreakable box, so phrase-length tokens overflowed) with one roving tab stop, Enter and Space, labelled "Seek to {word} at m:ss" or "Seek to m:ss". The column follows playback until the reader scrolls away, then offers **Return to playback**. **Find in transcript** searches the text in review; it is hidden while recording. Title bar search filters sessions by name only.
+- **Spoken-word pill.** The pill is painted by `::before` around the word: 1px above and below the text (19px tall, as in the mock) and `--size-spoken-pill-x` (4px) into the word gap on each side. It takes no room, so moving it never reflows the line. To keep a visible space beside it, transcript text adds `--size-transcript-word-gap` (0.18em, 2.5px) to each space: the pill is 32px wide around "grid" with 2px of space on each side.
+- **Accepted deviations from the mock, so playback never reflows text.** The mock's pill has 7px of padding, which only fits beside a 3.5px space by pushing the neighbouring words apart; a layout-free pill can reach as far as the word gap minus the space left visible, hence 4px into a widened gap. The current row keeps weight 400 (mock 500) and 8px vertical padding (mock 10px), because changing either when a row becomes current would rewrap it and shift every row below.
 - **Settings dialog.** Appearance, the recording tools' status with Install transcription and technical details, the vocabulary field, and the shortcut list.
 
 ## Shortcuts and hints
@@ -117,7 +122,6 @@ Keep the foundation local until another helper app needs it. Export tokens, Dial
 - The dark theme review, and the fresh draft, compact and Linux states that the mocks do not cover.
 - A resizable media/transcript split (decision 13 defers it) and full transcript search in the sidebar (search covers names only).
 - From the v0.1 review, not part of v0.2.0: grouping sources by type, drag edge autoscroll with delayed expansion of collapsed sections and a spoken announcement of moves, and tracking acknowledged errors by failure identity.
-- Shipping the Figtree OFL text with the app.
 
 ## History: the v0.1 review
 

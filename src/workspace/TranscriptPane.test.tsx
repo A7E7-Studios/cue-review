@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Transcript } from '../backend';
-import { takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from '../stories/fixtures';
+import { transcript as phraseTranscript, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from '../stories/fixtures';
 import { LIVE_NOTE, TranscriptPane } from './TranscriptPane';
 import type { TranscriptPaneProps } from './types';
 
@@ -34,6 +34,22 @@ describe('TranscriptPane in review', () => {
     await user.click(screen.getByRole('button', { name: 'Seek to 0:24' }));
     await user.click(screen.getByRole('button', { name: 'Now if I open the filters, the panel covers the first row of results.' }));
     expect(onSeek.mock.calls.map(call => call[0])).toEqual([33200, 24000, 24000]);
+  });
+  it('renders words as inline text buttons that wrap with the sentence, activated by click, Enter and Space', async () => {
+    const user = userEvent.setup();
+    const onSeek = vi.fn();
+    const { rerender } = render(<TranscriptPane {...props({ onSeek })}/>);
+    const grid = screen.getByRole('button', { name: 'Seek to grid at 0:33' });
+    grid.focus();
+    await user.keyboard('{Enter}');
+    await user.keyboard(' ');
+    rerender(<TranscriptPane {...props({ onSeek, transcript: phraseTranscript, timeMs: 0 })}/>);
+    const phrase = screen.getByRole('button', { name: 'Seek to the details should update alongside it. at 0:08' });
+    // A <button> is laid out as one unbreakable box; an inline span wraps like the text around it.
+    expect(phrase.tagName).toBe('SPAN');
+    expect(phrase).toHaveClass('word');
+    await user.click(phrase);
+    expect(onSeek.mock.calls.map(call => call[0])).toEqual([33200, 33200, 8000]);
   });
   it('divides takes with "Take N · m:ss" before the first row of each later take', () => {
     render(<TranscriptPane {...props()}/>);
@@ -98,8 +114,10 @@ describe('TranscriptPane while recording', () => {
     expect(tail).toHaveTextContent('Picking this up again: the export dialog needs');
     expect(within(tail as HTMLElement).getByText(LIVE_NOTE)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Seek to 0:31' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Seek to grid at 0:33' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Seek to grid at 0:33' })).toHaveAttribute('aria-disabled', 'true');
     expect(tabStops()).toHaveLength(0);
+    // While recording the column shows the live tail only: no Find in transcript.
+    expect(screen.queryByRole('button', { name: 'Find in transcript' })).not.toBeInTheDocument();
   });
   it('keeps a tail with its note before the take has words, and shows live problems', () => {
     const transcript = { ...liveTranscript, segments: liveTranscript.segments.slice(0, -1) };
@@ -108,6 +126,28 @@ describe('TranscriptPane while recording', () => {
     expect(screen.getByText('Listening… transcript updates in short batches.')).toBeVisible();
     expect(screen.getByText(LIVE_NOTE)).toBeVisible();
     expect(screen.getByText('Live transcription paused.')).toBeVisible();
+  });
+  it('ignores clicks and keys on live words', async () => {
+    const user = userEvent.setup();
+    const onSeek = vi.fn();
+    render(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs }, onSeek })}/>);
+    const grid = screen.getByRole('button', { name: 'Seek to grid at 0:33' });
+    expect(grid).toHaveAttribute('tabindex', '-1');
+    await user.click(grid);
+    fireEvent.keyDown(grid, { key: 'Enter' });
+    expect(onSeek).not.toHaveBeenCalled();
+  });
+  it('closes Find in transcript when recording starts', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<TranscriptPane {...props()}/>);
+    await user.click(screen.getByRole('button', { name: 'Find in transcript' }));
+    await user.type(screen.getByRole('searchbox', { name: 'Find in transcript' }), 'grid');
+    rerender(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } })}/>);
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    expect(document.querySelector('.found, .cr-find-mark')).toBeNull();
+    rerender(<TranscriptPane {...props()}/>);
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Find in transcript' })).toHaveAttribute('aria-expanded', 'false');
   });
   it('treats a first recording as one live take without a divider', () => {
     render(<TranscriptPane {...props({ mode: 'recording', transcript: takeTwoLiveTranscript, timeMs: 8000, status: 'recording' })}/>);

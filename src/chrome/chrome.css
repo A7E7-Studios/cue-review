@@ -31,7 +31,8 @@
 .chrome-icon:hover { background: var(--color-window-control-hover); color: var(--color-text); }
 .chrome-icon:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 0; }
 .chrome-brand + .chrome-sidebar-toggle { margin-left: 6px; }
-.chrome-toolbar[data-platform='macos'] .chrome-icon { width: 32px; height: 30px; border-radius: var(--radius-button); }
+/* Settings and Show sidebar: 8px corners on macOS too (FloatV2ReviewMac). */
+.chrome-toolbar[data-platform='macos'] .chrome-icon { width: 32px; height: 30px; border-radius: 8px; }
 
 /* Fills the bar between the leading controls and Settings; its empty sides are drag regions. */
 .chrome-center { flex: 1; min-width: 0; align-self: stretch; display: flex; align-items: center; justify-content: center; padding: 0 12px; }
@@ -51,7 +52,7 @@
   color: var(--color-text-tertiary);
   cursor: text;
 }
-.chrome-toolbar[data-platform='macos'] .chrome-search { max-width: 380px; height: 30px; padding: 0 12px; border-radius: var(--radius-pill); background: var(--color-pill); box-shadow: none; }
+.chrome-toolbar[data-platform='macos'] .chrome-search { max-width: 380px; height: 30px; padding: 0 12px; border-radius: var(--radius-pill); background: var(--color-toolbar-search); box-shadow: none; }
 .chrome-bar .chrome-search:focus-within { box-shadow: 0 0 0 2px var(--color-focus); }
 .chrome-search > svg { flex: none; }
 .chrome-search input {

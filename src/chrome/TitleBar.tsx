@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
+import { shortcutLetter } from '../app/useShortcuts';
 import { Icon } from '../icons';
 import { NAMES } from '../workspace/types';
 import type { TitleBarProps } from '../workspace/types';
@@ -43,7 +44,7 @@ function useSearchShortcut(os: Platform, input: RefObject<HTMLInputElement | nul
     if (!enabled) return;
     const onKey = (event: KeyboardEvent) => {
       const modifier = os === 'macos' ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
-      if (!modifier || event.altKey || event.shiftKey || event.defaultPrevented || event.key.toLowerCase() !== 'k') return;
+      if (!modifier || event.altKey || event.shiftKey || event.defaultPrevented || shortcutLetter(event) !== 'k') return;
       const field = input.current;
       if (!field || field.disabled || field.closest('[inert]')) return;
       if (event.target instanceof Element && event.target.closest('[role=dialog],[role=alertdialog],[role=menu]')) return;
@@ -124,7 +125,7 @@ export function CompactDragStrip({ platform: os }: { platform: Platform }) {
 /**
  * Windows: the custom title bar (logo, sidebar toggle, centered search, settings, window controls).
  * macOS: the content toolbar beside the inset sidebar panel. Its sidebar toggle appears only while the
- * sidebar is hidden, because the panel carries its own Collapse sidebar button.
+ * sidebar is hidden, because the panel carries its own Hide sidebar button.
  * Linux: the Windows layout without window controls or drag regions (native decorations).
  */
 export function TitleBar(props: TitleBarProps) {

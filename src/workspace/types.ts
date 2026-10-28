@@ -47,7 +47,7 @@ export interface SidebarProps {
   onMove: (sessionId: string, sectionId: string | null) => Promise<boolean>;
   /** Shows only sessions whose name contains it, case-insensitively, with a NAMES.noMatches state. */
   filter?: string;
-  /** Render the NAMES.collapseSidebar button inside the sidebar (macOS panel). Defaults to true. */
+  /** Render the NAMES.hideSidebar button inside the sidebar (macOS panel). Defaults to true. */
   showCollapse?: boolean;
   /** macOS reserves the traffic-light row at the top of the panel. */
   platform?: Platform;
@@ -63,8 +63,10 @@ export interface SessionHeaderProps {
   renameDisabled: boolean;
   onRename: () => void;
   onOpenFolder: () => void;
-  /** Disabled while recording, processing or busy (decision 10). */
+  /** Disabled while recording or processing (decision 10). */
   copyDisabled: boolean;
+  /** Another action is under way: the pill stays focusable but inert (aria-disabled). */
+  copyBusy?: boolean;
   onCopyForAgent: () => void;
 }
 
@@ -120,6 +122,8 @@ export interface PlaybackBarProps {
   /** Labelled NAMES.focusVideo or NAMES.restoreTranscript. */
   onToggleFocus: () => void;
   recordMoreDisabled: boolean;
+  /** Another action is under way: Record more stays focusable but inert (aria-disabled). */
+  recordMoreBusy?: boolean;
   onRecordMore: () => void;
 }
 
@@ -154,6 +158,8 @@ export interface CaptureControlsProps {
   /** NAMES.record, NAMES.pleaseWait or NAMES.transcribing. */
   recordLabel: string;
   recordDisabled: boolean;
+  /** Recording is starting: Record stays focusable but inert (aria-disabled). */
+  recordBusy?: boolean;
   onRecord: () => void;
 }
 
@@ -173,6 +179,7 @@ export interface RecordingDockProps {
   /** Labelled NAMES.compact or NAMES.expand. */
   compact: boolean;
   onToggleCompact: () => void;
+  /** Stop is under way. Stop stays visible and focusable but inert (aria-disabled). */
   stopDisabled: boolean;
   /** Labelled NAMES.stop. */
   onStop: () => void;
@@ -199,6 +206,8 @@ export interface TranscriptPaneProps {
   error?: string;
   onRetry?: () => void;
   retryDisabled?: boolean;
+  /** Another action is under way: Retry stays focusable but inert (aria-disabled). */
+  retryBusy?: boolean;
 }
 
 /** Settings → Appearance, capability statuses, technical details and the vocabulary (decision 14, C5). */
@@ -238,7 +247,6 @@ export const NAMES = {
 
   // Sidebar
   recordings: 'Recordings',
-  collapseSidebar: 'Collapse sidebar',
   newRecording: 'New recording',
   newSection: 'New section',
   recents: 'Recents',

@@ -81,6 +81,10 @@
   --size-pill: 32px;
   --size-pill-large: 36px;
   --size-dock-control: 44px;
+  /* Transcript words: the gap added to each space, the spoken pill's reach into it, and Figtree's text box (ascent + descent). */
+  --size-transcript-word-gap: 0.18em;
+  --size-spoken-pill-x: 4px;
+  --size-transcript-text-box: 1.2143em;
 
   /* Surfaces */
   --color-ground: #ECEEF2;
@@ -106,6 +110,9 @@
   --color-on-accent: #FFFFFF;
   --color-accent-text: #5B5BD6;
   --color-current-row: #F2F2FC; /* 8% accent over the sheet */
+  /* Opaque, because a wrapped word's own background and its pill overlap. */
+  --color-word-hover: color-mix(in srgb, var(--color-accent) 12%, var(--color-sheet));
+  --color-word-found: color-mix(in srgb, var(--color-meter-high) 45%, var(--color-sheet));
   --color-link: #4A4AC4;
   --color-link-hover: #3A3AA8;
   --color-focus: #5B5BD6;
@@ -115,9 +122,14 @@
   --color-row-selected: #FFFFFF;
   --shadow-row-selected: 0 1px 2px rgba(16, 24, 40, .07);
   --color-panel-row-selected: #D9DBF0; /* macOS: 14% accent over the panel */
+  /* Tertiary text on that row: #66666F is only 4.15:1 there; this is 4.6:1. */
+  --color-text-tertiary-on-selected: #5E5E68;
   --color-button: #FFFFFF;
   --color-control-ring: #DCDFE5;
   --shadow-button: 0 0 0 1px var(--color-control-ring), 0 1px 2px rgba(16, 24, 40, .06);
+  --shadow-new-recording: var(--shadow-button);
+  /* The macOS toolbar's search field. */
+  --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #E4E6EB;
   --color-record-disabled: #C9A3A6;
 
@@ -136,7 +148,8 @@
   --color-scrubber-track: #F0F0F4;
   --color-scrubber-speech: #DCDCE5;
   --color-scrubber-played: var(--color-accent);
-  --color-scrubber-tick: #A1A1AA;
+  /* Take ticks are 3.7:1 on the track and 3.1:1 on speech (#A1A1AA was 2.25:1 on the track). */
+  --color-scrubber-tick: #7A7A84;
   --color-scrubber-knob: #FFFFFF;
   --shadow-scrubber-knob: 0 0 0 1px rgba(16, 24, 40, .10), 0 2px 6px rgba(16, 24, 40, .22);
 
@@ -168,6 +181,9 @@
   --radius-field: 7px;
   --radius-row: 8px;
   --radius-video: 12px;
+  /* FloatV2ReviewMac: a lighter ring on New recording and a cooler search field. */
+  --shadow-new-recording: 0 0 0 1px rgba(24, 24, 27, .07), 0 1px 2px rgba(16, 24, 40, .06);
+  --color-toolbar-search: #F2F3F6;
 }
 
 :root[data-theme='dark'] {
@@ -229,8 +245,11 @@
   --color-row-selected: #2B2B31;
   --shadow-row-selected: 0 1px 2px rgba(0, 0, 0, .35);
   --color-panel-row-selected: #2B2B45;
+  --color-text-tertiary-on-selected: #9393A0;
   --color-button: #232328;
   --color-control-ring: #34343B;
+  --shadow-new-recording: var(--shadow-button);
+  --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #232328;
   --color-record-disabled: #6B4446;
 

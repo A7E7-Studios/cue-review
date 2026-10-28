@@ -168,8 +168,11 @@ export function Sidebar(props: SidebarProps) {
           event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', item.id);
         }}
         onDragEnd={finishDrag}>
+        {/* A dot marks a recording in progress (red while recording, muted while processing); its status is
+            spoken from visually hidden text, so the name keeps the row's full width. */}
+        {inProgress(item) && <span className="session-status-dot" data-status={item.status} aria-hidden="true"/>}
         <span className="session-name">{item.name}</span>
-        {inProgress(item) && <small>{item.status === 'recording' ? 'Recording' : 'Processing…'}</small>}
+        {inProgress(item) && <span className="session-status-text">{item.status === 'recording' ? ', recording' : ', processing'}</span>}
         {/* Drawn from data-meta by CSS, so the row's name and text stay the session name alone. */}
         {meta && <span className="session-meta" aria-hidden="true" data-meta={meta}/>}
       </button>
@@ -186,7 +189,7 @@ export function Sidebar(props: SidebarProps) {
     {(os === 'macos' || showCollapse) && <div className="side-header" {...(os === 'macos' ? { 'data-tauri-drag-region': '' } : {})}>
       {/* macOS draws its traffic lights here (tauri.macos.conf.json trafficLightPosition). */}
       {os === 'macos' && <span className="side-traffic-lights" aria-hidden="true" data-tauri-drag-region=""/>}
-      {showCollapse && <button className="side-collapse" aria-label={NAMES.collapseSidebar} onClick={props.onCollapse}><Icon name="panel" size={16} strokeWidth={1.7}/></button>}
+      {showCollapse && <button className="side-collapse" aria-label={NAMES.hideSidebar} onClick={props.onCollapse}><Icon name="panel" size={16} strokeWidth={1.7}/></button>}
     </div>}
     <div className="side-tools">
       <button className="new-recording has-kbd" disabled={locked} onClick={props.onNew} aria-keyshortcuts={newKey.aria}>

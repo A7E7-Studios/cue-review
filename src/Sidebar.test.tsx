@@ -97,11 +97,19 @@ describe('Float v2 sidebar', () => {
     expect(screen.queryByText(/\(\d+\)/)).not.toBeInTheDocument();
   });
 
-  test('in-progress rows keep their status and show no duration', () => {
-    renderSidebar({sessions: [{...session, status: 'recording'}]});
-    const row = screen.getByRole('button', {name:/^Library review/});
-    expect(row).toHaveTextContent(/^Library reviewRecording$/);
+  test('in-progress rows show a status dot, speak their status, and show no duration', () => {
+    const {rerender} = renderSidebar({sessions: [{...session, status: 'recording'}]});
+    const row = screen.getByRole('button', {name:'Library review, recording'});
+    // The dot is decorative; the status is visually hidden text, so no visible label truncates the name.
+    expect(row.querySelector('.session-status-dot')).toHaveAttribute('aria-hidden', 'true');
+    expect(row.querySelector('.session-status-dot')).toHaveAttribute('data-status', 'recording');
+    expect(row.querySelector('.session-status-text')).toHaveTextContent(', recording');
+    expect(row.querySelector('small')).toBeNull();
     expect(row.querySelector('.session-meta')).toBeNull();
+    rerender({sessions: [{...session, status: 'processing'}]});
+    expect(screen.getByRole('button', {name:'Library review, processing'}).querySelector('.session-status-dot')).toHaveAttribute('data-status', 'processing');
+    rerender({sessions: [{...session, status: 'ready'}]});
+    expect(screen.getByRole('button', {name:'Library review'}).querySelector('.session-status-dot')).toBeNull();
   });
 
   test('filters by session name, opens collapsed sections for matches, and leaves the saved state alone', async () => {
@@ -139,14 +147,14 @@ describe('Float v2 sidebar', () => {
     expect(screen.getByRole('button', {name:'New recording'})).toBeEnabled();
   });
 
-  test('renders the Collapse sidebar button unless showCollapse is false', async () => {
+  test('renders the Hide sidebar button unless showCollapse is false', async () => {
     const user = userEvent.setup();
     const onCollapse = vi.fn();
     const {rerender} = renderSidebar({onCollapse, platform: 'windows'});
-    await user.click(screen.getByRole('button', {name:'Collapse sidebar'}));
+    await user.click(screen.getByRole('button', {name:'Hide sidebar'}));
     expect(onCollapse).toHaveBeenCalledTimes(1);
     rerender({showCollapse: false});
-    expect(screen.queryByRole('button', {name:'Collapse sidebar'})).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', {name:'Hide sidebar'})).not.toBeInTheDocument();
     expect(document.querySelector('.side-header')).toBeNull();
   });
 

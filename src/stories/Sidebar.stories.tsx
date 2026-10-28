@@ -15,9 +15,9 @@ export function usePlatformAttribute(os: Platform) {
   }, [os]);
 }
 
-/** Workshop stand-in for the native macOS traffic lights at trafficLightPosition (24, 26). */
+/** Workshop stand-in for the native macOS traffic lights at trafficLightPosition (24, 26): their top edge is 26px down. */
 export function TrafficLights() {
-  return <div aria-hidden="true" style={{ position: 'absolute', left: 24, top: 20, zIndex: 5, display: 'flex', gap: 8, pointerEvents: 'none' }}>
+  return <div aria-hidden="true" style={{ position: 'absolute', left: 24, top: 26, zIndex: 5, display: 'flex', gap: 8, pointerEvents: 'none' }}>
     {['#FF5F57', '#FEBC2E', '#28C840'].map(color => <span key={color} style={{ width: 12, height: 12, borderRadius: '50%', background: color, boxShadow: 'inset 0 0 0 .5px rgba(0, 0, 0, .12)' }}/>)}
   </div>;
 }

@@ -25,6 +25,7 @@ import type { NameDialogState } from './app/dialogs';
 import { liveTake, recordingTranscript, releaseMedia, sessionVideoUrl, takeInFlight, takeMarks, takeSwapping } from './app/media';
 import { MICROPHONE_UNAVAILABLE, useCaptureDevices } from './app/useCaptureDevices';
 import { useCompactWindow } from './app/useCompactWindow';
+import { canTakeFocus, useFocusRescue } from './app/useFocusRescue';
 import { usePreviewStream } from './app/usePreviewStream';
 import { useShortcuts } from './app/useShortcuts';
 import { useSidebarLayout } from './app/useSidebarLayout';
@@ -33,6 +34,10 @@ import { useTheme } from './app/useTheme';
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
 const SPEEDS = [1, 1.5, 2, 0.75];
 const STARTING_TAKE: MediaEmptyState = { title: 'Starting the next take…' };
+/** Runtime status polling: every 700 ms, backing off up to 10 s while the backend keeps failing. */
+const POLL_MS = 700;
+const POLL_MAX_MS = 10000;
+const pollDelay = (failures: number) => Math.min(POLL_MS * 2 ** failures, POLL_MAX_MS);
 type Playback = { id: string; time: number; playing: boolean };
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
 const settled = (item: Session) => item.status === 'ready' || item.status === 'error';
@@ -44,9 +49,12 @@ export interface AppProps {
 
 export default function App({ platform: requested }: AppProps = {}) {
   const os = requested ?? detectPlatform();
+  /** The workspace's inline error. Dialogs show only `dialogError`, so a stale banner never reads as a dialog failure. */
   const [error, setError] = useState('');
+  const [dialogError, setDialogError] = useState('');
   const [notice, setNotice] = useState('');
   const report = useCallback((problem: unknown) => { setError(errorMessage(problem)); }, []);
+  const reportInDialog = useCallback((problem: unknown) => { setDialogError(errorMessage(problem)); }, []);
   const [theme, setTheme] = useTheme(report);
   const sidebar = useSidebarLayout();
   const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
@@ -86,26 +94,39 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   const video = useRef<HTMLVideoElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const appRoot = useRef<HTMLDivElement>(null);
   const sheet = useRef<HTMLElement>(null);
   const deletionFocus = useRef<HTMLElement | null>(null);
   /** Set while the app itself unloads the video, so the resulting media events are not failures. */
   const releasing = useRef(false);
   const restorePlayback = useRef<Playback | null>(null);
   const selection = useRef(0);
+  /** The recording shown or about to be shown, set as soon as it is chosen (before React re-renders). */
+  const shownId = useRef<string | null>(null);
   const actionEpoch = useRef(0);
   const runtimeState = useRef<RecordingStatus['state']>('idle');
   /** The last runtime error shown, so the poll does not bring back a dismissed one. */
   const runtimeError = useRef('');
+  /** The last poll failure shown, so a backend that keeps failing reports it once. */
+  const pollError = useRef('');
+  /** Whether a dialog is open, for errors that arrive from outside it. */
+  const dialogOpen = useRef(false);
 
   const recording = status.state === 'recording';
-  const processing = session?.status === 'processing' || status.state === 'processing';
+  /** The runtime transcribes one job at a time and refuses a new capture meanwhile, whichever recording it is. */
+  const captureBlocked = status.state === 'processing';
+  /** Processing of the open recording. A background job for another recording does not count. */
+  const processing = session?.status === 'processing' || (captureBlocked && !!session && status.sessionId === session.id);
   const mode: WorkspaceMode = recording ? 'recording' : draft ? 'draft' : 'review';
   const locked = recording || busy;
   const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
   const { preview, previewError } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
   const mediaHeld = !!session && (heldMedia === session.id || takeInFlight(session));
   const videoSrc = session && !draft && !mediaHeld ? sessionVideoUrl(session, videoUrl) : undefined;
-  const canRecordMore = !!session && !draft && settled(session) && !!videoSrc;
+  /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
+  const devicesReady = microphoneId !== undefined;
+  const canRecordMore = !!session && !draft && settled(session) && !!videoSrc && devicesReady;
+  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
 
@@ -130,6 +151,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
       if (request !== selection.current) return;
+      shownId.current = next.id;
       setSession(next); setTranscript(text); setDraft(false); setTime(0); setPlaying(false); setDuration(next.durationMs);
       if (settled(next)) setHeldMedia(current => current === next.id ? null : current);
       if (next.status === 'recording') {
@@ -161,7 +183,8 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   useEffect(() => {
     if (!isTauri()) return;
-    const subscription = listen<string>('close-blocked', event => setError(event.payload));
+    // The window refused to close: say why where the user is, in an open dialog or in the workspace.
+    const subscription = listen<string>('close-blocked', event => (dialogOpen.current ? setDialogError : setError)(event.payload));
     return () => { void subscription.then(unlisten => unlisten()); };
   }, []);
 
@@ -179,37 +202,55 @@ export default function App({ platform: requested }: AppProps = {}) {
   useEffect(() => {
     if (!isTauri()) return;
     let alive = true;
-    let polling = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
     const poll = async () => {
-      if (polling) return;
-      polling = true;
       const epoch = actionEpoch.current;
+      const current = () => alive && epoch === actionEpoch.current;
+      // A response about this recording lands only if it is still the one shown and the user has not
+      // asked for another one (or a new draft) since this poll began, even before React re-renders.
+      const picked = selection.current;
+      const stillOpen = () => current() && picked === selection.current && !!session && shownId.current === session.id;
       try {
         const next = await backend.status();
-        if (!alive || epoch !== actionEpoch.current) return;
+        if (!current()) return;
         setStatus(next);
         const finished = runtimeState.current === 'processing' && next.state === 'idle';
         runtimeState.current = next.state;
         if (finished) await refreshProjects();
-        if (!alive || epoch !== actionEpoch.current) return;
+        if (!current()) return;
         if (next.error && next.error !== runtimeError.current) setError(next.error);
         runtimeError.current = next.error || '';
-        if (session && inProgress(session) && next.state !== 'recording') {
+        if (session && inProgress(session) && next.state !== 'recording' && stillOpen()) {
           const fresh = await backend.session(session.id);
-          if (!alive || epoch !== actionEpoch.current) return;
+          if (!stillOpen()) return;
           if (settled(fresh)) {
-            const text = await backend.transcript(fresh.id);
-            if (!alive || epoch !== actionEpoch.current) return;
-            setSession(fresh); setTranscript(text); setDuration(fresh.durationMs);
-            setHeldMedia(current => current === fresh.id ? null : current);
+            // The recording is done even if its transcript cannot be read yet: show it, then report the read.
+            let text: Transcript | undefined;
+            let unreadable: unknown;
+            try { text = await backend.transcript(fresh.id); } catch (problem) { unreadable = problem; }
+            if (!stillOpen()) return;
+            setSession(fresh); setDuration(fresh.durationMs);
+            if (text) setTranscript(text);
+            setHeldMedia(held => held === fresh.id ? null : held);
+            if (unreadable !== undefined) report(unreadable);
             if (!finished) await refreshProjects();
           } else setSession(fresh);
         }
-      } catch (problem) { if (alive) report(problem); }
-      finally { polling = false; }
+        failures = 0;
+        pollError.current = '';
+      } catch (problem) {
+        if (!alive) return;
+        failures++;
+        // Report a failure once, not every poll; a dismissed one stays dismissed until it changes or recovers.
+        const message = errorMessage(problem);
+        if (message !== pollError.current) { pollError.current = message; setError(message); }
+      } finally {
+        if (alive) timer = setTimeout(() => void poll(), pollDelay(failures));
+      }
     };
-    const timer = setInterval(poll, 700);
-    return () => { alive = false; clearInterval(timer); };
+    timer = setTimeout(() => void poll(), POLL_MS);
+    return () => { alive = false; clearTimeout(timer); };
   }, [session?.id, session?.status, refreshProjects, report]);
 
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(timer); }, [notice]);
@@ -218,7 +259,7 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   const prepare = useCallback(() => {
     if (locked) return;
-    selection.current++; restorePlayback.current = null; dismissOverlay();
+    selection.current++; shownId.current = null; restorePlayback.current = null; dismissOverlay();
     setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null);
   }, [locked, dismissOverlay]);
   const seek = useCallback((ms: number) => {
@@ -253,13 +294,14 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
 
   const start = async () => {
-    if (busy || processing || loading || recording) return;
+    if (busy || captureBlocked || loading || recording || !devicesReady) return;
     actionEpoch.current++; setBusy(true); setError(''); setCaptureMenu(null);
     try {
       if (!source?.available) throw new Error(source?.detail || 'Choose an available screen, window, or connected device first.');
       if (microphoneUnavailable) throw new Error(MICROPHONE_UNAVAILABLE);
       setStartingRecording(true);
       const next = await backend.start(null, null, sourceId, microphoneId || null, systemAudio, muted);
+      shownId.current = next.id;
       setSession(next); setDraft(false); setTranscript(EMPTY_TRANSCRIPT); runtimeState.current = 'recording';
       setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0 }); setTime(0); setPlaying(false);
       await refreshProjects();
@@ -273,7 +315,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       const next = await backend.stop();
       setSession(next); setDraft(false);
       runtimeState.current = next.status === 'processing' ? 'processing' : 'idle';
-      setStatus({ state: runtimeState.current }); setDuration(next.durationMs);
+      setStatus({ state: runtimeState.current, sessionId: runtimeState.current === 'processing' ? next.id : undefined }); setDuration(next.durationMs);
       if (settled(next)) {
         setTranscript(await backend.transcript(next.id));
         setHeldMedia(current => current === next.id ? null : current);
@@ -284,7 +326,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
   /** Continues the open recording as a new take on its own source (decision 10). */
   const recordMore = async () => {
-    if (!session || !canRecordMore || busy || loading || recording || processing) return;
+    if (!session || !canRecordMore || busy || loading || recording || processing || captureBlocked) return;
     if (microphoneUnavailable) { report(MICROPHONE_UNAVAILABLE); return; }
     actionEpoch.current++; setBusy(true); setError('');
     // Windows keeps an open file locked and the backend replaces video.mp4 after the take,
@@ -328,16 +370,20 @@ export default function App({ platform: requested }: AppProps = {}) {
   const changeMuted = async (next: boolean) => {
     try { await backend.mute(next); setMuted(next); } catch (problem) { report(problem); }
   };
+  /** Every dialog opens without an error of its own. */
+  const openDialog = (next: NameDialogState) => { setDialogError(''); setDialog(next); };
   const submitDialog = async (event: FormEvent) => {
     event.preventDefault();
     if (!dialog) return;
     const name = dialog.value.trim();
     if (!name) return;
-    setBusy(true); setError('');
+    setBusy(true); setDialogError('');
+    // A new section closes the dialog before moving a recording into it; a failed move belongs to the workspace.
+    let closed = false;
     try {
       if (dialog.kind === 'section') {
         const next = await backend.createProject(name);
-        setDialog(null);
+        setDialog(null); closed = true;
         await refreshProjects();
         if (dialog.sessionId) {
           const moved = await backend.moveSession(dialog.sessionId, next.id);
@@ -352,11 +398,11 @@ export default function App({ platform: requested }: AppProps = {}) {
         await refreshProjects();
       }
       setDialog(null);
-    } catch (problem) { report(problem); }
+    } catch (problem) { (closed ? report : reportInDialog)(problem); }
     finally { setBusy(false); }
   };
   const copyHandoff = async () => {
-    if (!session || recording || processing) return;
+    if (!session || recording || processing || busy) return;
     setBusy(true);
     try {
       const text = await backend.handoff(session.id);
@@ -405,7 +451,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     if (!deletion || locked) return;
     const item = sessions.find(entry => entry.id === deletion.id);
     if (!item || inProgress(item)) return;
-    setBusy(true); setError(''); selection.current++; actionEpoch.current++;
+    setBusy(true); setDialogError(''); selection.current++; actionEpoch.current++;
     // Windows holds the playing file open. Release it before deleting the folder.
     const playback = session?.id === item.id ? unloadVideo(item.id) : null;
     let deleted = false;
@@ -415,17 +461,18 @@ export default function App({ platform: requested }: AppProps = {}) {
       setSessions(items => items.filter(entry => entry.id !== item.id));
       setDeletion(null);
       if (session?.id === item.id) {
+        shownId.current = null;
         setSession(null); setDraft(true); setTranscript(EMPTY_TRANSCRIPT); setTime(0); setDuration(0); setPlaying(false); setLoading(false); setFocusVideo(false);
       }
       await refreshProjects();
       setNotice('Recording deleted');
     } catch (problem) {
       if (!deleted && playback) reloadVideo(playback);
-      report(problem);
+      reportInDialog(problem);
     } finally { releasing.current = false; setBusy(false); }
   };
   const retry = async () => {
-    if (!session) return;
+    if (!session || busy) return;
     setBusy(true);
     // Retry may finish appending a take to video.mp4 first.
     const swapping = takeSwapping(session);
@@ -442,15 +489,17 @@ export default function App({ platform: requested }: AppProps = {}) {
       report(problem);
     } finally { releasing.current = false; setBusy(false); }
   };
+  /** Settings may close while it works: a late failure then goes to the workspace. */
+  const reportFromSettings = (problem: unknown) => (dialogOpen.current ? reportInDialog : report)(problem);
   const install = async () => {
-    setInstalling(true); setError('');
+    setInstalling(true); setDialogError('');
     try { await backend.installTranscription(); setSetup(await backend.setup()); setNotice('Transcription tools installed'); }
-    catch (problem) { report(problem); }
+    catch (problem) { reportFromSettings(problem); }
     finally { setInstalling(false); }
   };
   const openSettings = () => {
-    setSettingsOpen(true);
-    backend.settings().then(setSettings).catch(report);
+    setDialogError(''); setSettingsOpen(true);
+    backend.settings().then(setSettings).catch(reportFromSettings);
   };
   const saveSettings = async (next: Settings) => { setSettings(await backend.saveSettings(next)); };
 
@@ -497,6 +546,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const dock = <RecordingDock platform={os} elapsedMs={status.elapsedMs || 0} take={status.takeIndex ?? 1} audioLevel={status.audioLevel}
     sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable} muted={muted} onMuted={next => void changeMuted(next)}
     compact={compact} onToggleCompact={() => void toggleCompact()} stopDisabled={busy} onStop={() => void stop()}/>;
+  // `busy` is a moment, not a state of the control: those buttons stay focusable (aria-disabled), so focus never drops to the page.
   const controls = mode === 'recording' ? dock
     : mode === 'draft' ? <CaptureControls platform={os} sources={sourceOptions} source={source} microphones={microphones} microphoneId={microphoneId}
         microphoneUnavailable={microphoneUnavailable} systemAudio={systemAudio} muted={muted} menu={captureMenu} onMenu={setCaptureMenu}
@@ -504,12 +554,31 @@ export default function App({ platform: requested }: AppProps = {}) {
         onSystemAudio={setSystemAudio} onMuted={setMuted}
         onRefreshSources={() => void refreshDevices().then(() => setPreviewRevision(value => value + 1)).catch(report)}
         onRefreshMicrophones={() => void refreshDevices().catch(report)}
-        locked={locked} busy={busy} recordLabel={busy ? NAMES.pleaseWait : processing ? NAMES.transcribing : NAMES.record}
-        recordDisabled={busy || processing || loading || !source?.available || microphoneUnavailable} onRecord={() => void start()}/>
+        locked={locked} busy={busy} recordLabel={busy ? NAMES.pleaseWait : captureBlocked ? NAMES.transcribing : NAMES.record}
+        recordDisabled={captureBlocked || loading || !devicesReady || !source?.available || microphoneUnavailable} recordBusy={busy} onRecord={() => void start()}/>
       : <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
           playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onCycleSpeed={cycleSpeed}
           focused={focusVideo} onToggleFocus={() => setFocusVideo(value => !value)}
-          recordMoreDisabled={!canRecordMore || busy || loading || processing} onRecordMore={() => void recordMore()}/>;
+          recordMoreDisabled={!canRecordMore || loading || processing || captureBlocked} recordMoreBusy={busy} onRecordMore={() => void recordMore()}/>;
+
+  // Focus that loses its control goes to the control taking its place (decisions 6 and 9).
+  useFocusRescue(appRoot, lost => {
+    const find = (selector: string) => [...(appRoot.current?.querySelectorAll(selector) ?? [])].find(canTakeFocus);
+    const toggle = lost.classList.contains('chrome-sidebar-toggle');
+    if (toggle || lost.closest('.sidebar')) {
+      // A row disabled for a moment keeps its place; a hidden sidebar or toggle hands focus to its counterpart.
+      if (lost.isConnected) return null;
+      return sidebarVisible ? find('.sidebar .side-collapse') ?? find('.chrome-sidebar-toggle') : find('.chrome-sidebar-toggle');
+    }
+    // Compact and Expand swap with the layout: focus follows to the other one.
+    const label = lost.getAttribute('aria-label');
+    if (label === NAMES.compact || label === NAMES.expand) {
+      const other = find(`.cr-dock-button[aria-label="${label === NAMES.compact ? NAMES.expand : NAMES.compact}"]`);
+      if (other) return other;
+    }
+    if (mode === 'recording') return find('.cr-stop');
+    return find('.cr-stage-controls .cr-dark-pill') ?? sheet.current;
+  });
 
   const errorBanner = error && !dialog && !deletion && !settingsOpen && <div className="app-error" role="alert">
     <Icon name="warning" strokeWidth={1.8}/><p>{error}</p>
@@ -523,9 +592,9 @@ export default function App({ platform: requested }: AppProps = {}) {
   const workspace = <main ref={sheet} className="app-sheet" tabIndex={-1} data-dialog-focus-fallback>
     <div className="cr-center">
       <SessionHeader title={draft ? NAMES.newRecording : session?.name || 'Recording'} draft={draft}
-        renameDisabled={recording || processing || busy} onRename={() => session && setDialog({ kind: 'renameRecording', id: session.id, value: session.name })}
+        renameDisabled={recording || processing || busy} onRename={() => session && openDialog({ kind: 'renameRecording', id: session.id, value: session.name })}
         onOpenFolder={() => session && void backend.openFolder(session.id).catch(report)}
-        copyDisabled={recording || processing || busy} onCopyForAgent={() => void copyHandoff()}/>
+        copyDisabled={recording || processing} copyBusy={busy} onCopyForAgent={() => void copyHandoff()}/>
       {errorBanner}
       {setupBanner}
       <MediaStage mode={mode} previewUrl={preview || undefined} sourceName={source?.name} previewError={previewError || undefined}
@@ -538,22 +607,22 @@ export default function App({ platform: requested }: AppProps = {}) {
       <TranscriptPane mode={mode} transcript={shownTranscript} timeMs={recording ? (status.takeOffsetMs ?? 0) + (status.elapsedMs || 0) : time} onSeek={seek}
         status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
-        error={transcriptError} onRetry={() => void retry()} retryDisabled={busy}/>
+        error={transcriptError} onRetry={() => void retry()} retryBusy={busy}/>
     </div>}
   </main>;
 
   const sidebarElement = sidebarVisible && <Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
-    onRename={item => setDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
-    onRenameSection={item => setDialog({ kind: 'renameSection', id: item.id, value: item.name })}
-    onCreateSection={sessionId => setDialog({ kind: 'section', sessionId, value: '' })}
+    onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
+    onRenameSection={item => openDialog({ kind: 'renameSection', id: item.id, value: item.name })}
+    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })}
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
-    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setError(''); setDeletion({ id: item.id, name: item.name }); }}/>;
+    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/>;
   const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
     search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
 
-  return <div className="app" data-platform={os} data-sidebar={compact ? undefined : sidebarOverlay ? 'overlay' : sidebarVisible ? 'docked' : 'hidden'} data-compact={compact || undefined}>
+  return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : sidebarOverlay ? 'overlay' : sidebarVisible ? 'docked' : 'hidden'} data-compact={compact || undefined}>
     {compact ? <>
       <CompactDragStrip platform={os}/>
       <main ref={sheet} className="app-compact" tabIndex={-1} data-dialog-focus-fallback>{errorBanner}{dock}</main>
@@ -567,12 +636,13 @@ export default function App({ platform: requested }: AppProps = {}) {
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
-      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(report)}
-      settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? error : undefined}/>
-    <NameDialog state={dialog} busy={busy} error={dialog ? error : ''} fallbackFocusRef={sheet}
+      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
+      settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
+    <NameDialog state={dialog} busy={busy} error={dialog ? dialogError : ''} fallbackFocusRef={sheet}
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>
-    <DeleteRecordingDialog target={deletion} busy={busy} error={deletion ? error : ''} restoreFocusRef={deletionFocus} fallbackFocusRef={sheet}
+    <DeleteRecordingDialog target={deletion} busy={busy} error={deletion ? dialogError : ''} restoreFocusRef={deletionFocus} fallbackFocusRef={sheet}
       onClose={() => setDeletion(null)} onDelete={() => void deleteRecording()}/>
-    {notice && <div className="app-toast" role="status">{notice}</div>}
+    {/* Always mounted, so screen readers announce each notice as it appears. */}
+    <div className="app-toast-region" role="status">{notice && <div className="app-toast">{notice}</div>}</div>
   </div>;
 }

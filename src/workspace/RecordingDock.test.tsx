@@ -48,8 +48,21 @@ describe('RecordingDock', () => {
     await user.click(screen.getByRole('button', { name: 'Mute microphone' }));
     expect(handlers.onMuted).toHaveBeenLastCalledWith(false);
     expect(screen.getByRole('button', { name: 'Expand' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+    // Stop under way: still focusable and visible, but inert.
+    const busyStop = screen.getByRole('button', { name: 'Stop' });
+    expect(busyStop).toHaveAttribute('aria-disabled', 'true');
+    expect(busyStop).toBeEnabled();
+    busyStop.focus();
+    await user.click(busyStop);
+    expect(busyStop).toHaveFocus();
+    expect(handlers.onStop).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('meter')).not.toBeInTheDocument();
+  });
+  it('keeps every control named when its label is only drawn as an icon', () => {
+    render(<RecordingDock {...props({ sourceName: 'A very long window title that would not fit' })} platform="windows"/>);
+    // Narrow slots hide these labels visually (workspace.css); the text stays in the accessible name.
+    expect(screen.getByRole('button', { name: 'A very long window title that would not fit' }).querySelector('.cr-dock-label')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop' }).querySelector('.cr-dock-label')).toHaveTextContent('Stop');
   });
   it('hides the meter and mute without a live microphone', () => {
     render(<RecordingDock {...props({ hasMicrophone: false, audioLevel: undefined })}/>);
