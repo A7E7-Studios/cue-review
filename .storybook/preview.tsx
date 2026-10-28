@@ -1,4 +1,5 @@
 import type { Preview } from '@storybook/react-vite';
+import '@fontsource-variable/figtree';
 import '../src/styles.css';
 import '../src/Sidebar.css';
 import '../src/ui/polish.css';

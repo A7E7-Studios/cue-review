@@ -1,10 +1,12 @@
-import type { CaptureSource, Marker, Microphone, Project, RecordingStatus, Session, SetupStatus } from '../backend';
-import { date, previewImage, sections, sessions, transcript } from './fixtures';
+import type { backend as RealBackend, CaptureSource, Marker, Microphone, Project, RecordingStatus, Session, Settings, SetupStatus } from '../backend';
+import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript } from './fixtures';
 
-export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup';
+// 'takes' opens the library session with two takes; 'recording-take' records its take 2.
+export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take';
 let projects: Project[] = [];
 let recordings: Session[] = [];
 let markers: Marker[] = [];
+let settings: Settings = {};
 let status: RecordingStatus = { state: 'idle' };
 let scenario: Scenario = 'fresh';
 let sequence = 0;
@@ -14,16 +16,32 @@ const find = (id: string) => {
   if (!session) throw new Error('This sample recording no longer exists. Reset the story to restore it.');
   return session;
 };
+const recordTake = (session: Session, microphoneId: string | null, systemAudio: boolean) => {
+  const takes = session.takes?.length ? session.takes : [{ index: 1, offsetMs: 0, durationMs: session.durationMs, status: 'ready' as const, folder: '.', systemAudio: !!session.systemAudio, microphoneId: session.microphoneId }];
+  const index = takes.length + 1;
+  session.takes = [...takes, { index, offsetMs: session.durationMs, durationMs: 0, status: 'recording', folder: `takes/${index}`, systemAudio, microphoneId: microphoneId ?? undefined }];
+  session.status = 'recording';
+  status = { state: 'recording', sessionId: session.id, elapsedMs: 0, takeIndex: index, takeOffsetMs: session.durationMs };
+};
 export function configureScenario(next: Scenario) {
   scenario = next;
   projects = clone(sections);
   recordings = clone(sessions);
   markers = [];
+  settings = {};
   sequence = 0;
   status = { state: 'idle' };
   if (next === 'recording' || next === 'processing') {
     recordings[0] = { ...recordings[0], status: next, sourceId: 'display', microphoneId: 'microphone' };
     status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
+  }
+  if (next === 'takes' || next === 'recording-take') recordings[0] = clone(twoTakeSession);
+  if (next === 'recording-take') {
+    const session = recordings[0];
+    session.durationMs = takeTwoStartMs;
+    session.takes = session.takes!.slice(0, 1);
+    recordTake(session, 'microphone', false);
+    status = { ...status, elapsedMs: 8000, audioLevel: 0.46, liveTranscript: clone(takeTwoLiveTranscript) };
   }
 }
 configureScenario('fresh');
@@ -32,7 +50,12 @@ export const backend = {
   projects: async () => clone(projects),
   sessions: async () => clone(recordings),
   session: async (id: string) => clone(find(id)),
-  transcript: async () => clone(transcript),
+  transcript: async (id: string) => {
+    if (!recordings.find(item => item.id === id)?.takes?.length) return clone(transcript);
+    // While take 2 records, the saved transcript still ends with take 1.
+    const takeOne = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
+    return clone(scenario === 'recording-take' && status.state === 'recording' ? { ...twoTakeTranscript, segments: takeOne, takes: [{ index: 1, startMs: 0 }] } : twoTakeTranscript);
+  },
   markers: async () => clone(markers),
   status: async () => clone(status),
   sources: async (): Promise<CaptureSource[]> => [
@@ -50,9 +73,18 @@ export const backend = {
     status = { state: 'recording', sessionId: session.id };
     return clone(session);
   },
+  recordMore: async (id: string, microphoneId: string | null, systemAudio: boolean) => {
+    const session = find(id);
+    if (session.status !== 'ready' || status.state !== 'idle') throw new Error('Finish the current recording or processing job first.');
+    recordTake(session, microphoneId, systemAudio);
+    return clone(session);
+  },
   stop: async () => {
     const session = find(status.sessionId!);
-    session.status = 'ready'; session.durationMs = 23000; session.name = 'A clearer library toolbar';
+    const take = session.takes?.find(item => item.index === status.takeIndex);
+    if (take) { take.status = 'ready'; take.durationMs = 54000; session.durationMs = take.offsetMs + take.durationMs; }
+    else { session.durationMs = 23000; session.name = 'A clearer library toolbar'; }
+    session.status = 'ready';
     status = { state: 'idle' };
     return clone(session);
   },
@@ -69,5 +101,7 @@ export const backend = {
   openFolder: async () => { throw new Error('Sample recordings have no local folder.'); },
   retry: async () => {},
   installTranscription: async () => { scenario = 'fresh'; },
-};
+  settings: async () => clone(settings),
+  saveSettings: async (next: Settings) => { settings = clone(next); return clone(settings); },
+} satisfies typeof RealBackend;
 export const videoUrl = (path: string) => path;

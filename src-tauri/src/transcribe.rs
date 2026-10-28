@@ -1,6 +1,7 @@
 use crate::{
     deps,
     models::{Segment, Transcript, Word},
+    settings,
     store::{atomic_write, Store},
 };
 use serde_json::Value;
@@ -12,11 +13,10 @@ use std::{
     time::Duration,
 };
 
-// Avoid carrying mistaken text into later windows or retrying noise at higher temperatures.
-// This reduces silence hallucinations, but is not a replacement for speech activity detection.
-const DECODING_OPTIONS: &[&str] = &[
-    "-l", "auto", "-ojf", "-ng", "-mc", "0", "-nf", "-nth", "0.3",
-];
+// The options live in settings.rs so the saved vocabulary can shape them.
+fn decoding_options(root: &Path) -> Vec<String> {
+    settings::decoding_args(&settings::load(root))
+}
 fn dtw_preset(custom_model: bool, requested: Option<&str>) -> Result<Option<String>, String> {
     let preset = if custom_model {
         requested
@@ -111,6 +111,7 @@ pub fn parse_whisper(value: &Value) -> Result<Transcript, String> {
         language: value["result"]["language"].as_str().map(str::to_owned),
         status: Some("complete".into()),
         error: None,
+        takes: Vec::new(),
     })
 }
 fn run_logged(mut command: std::process::Command, log: &Path) -> Result<(), String> {
@@ -245,7 +246,9 @@ fn accept_whisper_output(prefix: &Path, folder: &Path) -> Result<Transcript, Str
     Ok(transcript)
 }
 /// Only scratch files are written here; final session transcript files are untouched.
+/// `root` is the data root whose settings choose the decoding options.
 pub fn transcribe_snapshot(
+    root: &Path,
     source: &Path,
     folder: &Path,
     cancel: &AtomicBool,
@@ -269,7 +272,7 @@ pub fn transcribe_snapshot(
         .arg(deps::model_path())
         .arg("-f")
         .arg(&speech)
-        .args(DECODING_OPTIONS)
+        .args(decoding_options(root))
         .args(["-t", "2", "-of"])
         .arg(&prefix);
     run_live(whisper, &folder.join("transcription.log"), cancel)?;
@@ -353,6 +356,7 @@ pub fn merge_live(
         language: update.language.or_else(|| previous.language.clone()),
         status: Some("provisional".into()),
         error: None,
+        takes: Vec::new(),
     }
 }
 pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
@@ -412,7 +416,7 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         .arg(deps::model_path())
         .arg("-f")
         .arg(speech)
-        .args(DECODING_OPTIONS)
+        .args(decoding_options(&store.root))
         .arg("-of")
         .arg(&prefix);
     run_logged(whisper, &folder.join("transcription.log"))?;
@@ -693,7 +697,8 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let wav = hound::WavReader::open(&source).unwrap();
         let duration_ms = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
-        let update = transcribe_snapshot(&source, &folder, &AtomicBool::new(false)).unwrap();
+        let update =
+            transcribe_snapshot(&folder, &source, &folder, &AtomicBool::new(false)).unwrap();
         let transcript = merge_live(&Transcript::default(), update, 30000, 30000 + duration_ms);
         let phrases = crate::agent::find(&transcript, "click here").unwrap();
         assert!(!phrases.is_empty());
@@ -718,7 +723,7 @@ mod tests {
             signal.store(true, Ordering::Release);
         });
         let began = std::time::Instant::now();
-        let result = transcribe_snapshot(&source, &cancel_dir, &cancelled);
+        let result = transcribe_snapshot(&cancel_dir, &source, &cancel_dir, &cancelled);
         trigger.join().unwrap();
         assert!(result.unwrap_err().contains("cancelled"));
         assert!(began.elapsed() < Duration::from_secs(5));
@@ -730,7 +735,7 @@ mod tests {
         let noise = root.join("test-results/silence-check/quiet-noise.wav");
         let output = root.join("test-results/silence-check/regression");
         fs::create_dir_all(&output).unwrap();
-        let quiet = transcribe_snapshot(&noise, &output, &AtomicBool::new(false)).unwrap();
+        let quiet = transcribe_snapshot(&output, &noise, &output, &AtomicBool::new(false)).unwrap();
         assert!(
             quiet.segments.is_empty(),
             "The known quiet microphone snapshot should not generate text"
@@ -753,7 +758,8 @@ mod tests {
             ])
             .arg(&attenuated);
         run_logged(ffmpeg, &output.join("attenuate.log")).unwrap();
-        let spoken = transcribe_snapshot(&attenuated, &output, &AtomicBool::new(false)).unwrap();
+        let spoken =
+            transcribe_snapshot(&output, &attenuated, &output, &AtomicBool::new(false)).unwrap();
         for phrase in ["open the library", "click here", "top toolbar"] {
             assert!(
                 !crate::agent::find(&spoken, phrase).unwrap().is_empty(),
@@ -790,9 +796,13 @@ mod tests {
         .contains("cancelled"));
 
         // The gate must not compress silence or rewrite raw ASR word timing.
-        let gated =
-            transcribe_snapshot(&fixture.join("delayed-speech.wav"), output.path(), &cancel)
-                .unwrap();
+        let gated = transcribe_snapshot(
+            output.path(),
+            &fixture.join("delayed-speech.wav"),
+            output.path(),
+            &cancel,
+        )
+        .unwrap();
         let mut baseline = deps::command("whisper-cli").unwrap();
         alignment_options(&mut baseline).unwrap();
         baseline
@@ -800,7 +810,7 @@ mod tests {
             .arg(deps::model_path())
             .arg("-f")
             .arg(output.path().join("speech.wav"))
-            .args(DECODING_OPTIONS)
+            .args(decoding_options(output.path()))
             .args(["-t", "2", "-of"])
             .arg(output.path().join("baseline"));
         run_logged(baseline, &output.path().join("baseline.log")).unwrap();
@@ -856,6 +866,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(false);
         let delayed = transcribe_snapshot(
+            output.path(),
             &root.join("test-results/vad-experiment/delayed-speech.wav"),
             output.path(),
             &cancel,
@@ -890,7 +901,8 @@ mod tests {
             let source = root.join(fixture);
             let wav = hound::WavReader::open(&source).unwrap();
             let duration = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
-            let transcript = transcribe_snapshot(&source, output.path(), &cancel).unwrap();
+            let transcript =
+                transcribe_snapshot(output.path(), &source, output.path(), &cancel).unwrap();
             let found = crate::agent::find(&transcript, phrase).unwrap();
             assert!(!found.is_empty(), "Lost {phrase}");
             assert!(found[0].seek_ms.unwrap() < duration);

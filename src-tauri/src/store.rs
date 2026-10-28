@@ -329,6 +329,7 @@ impl Store {
             source_id: config.source_id.clone(),
             microphone_id: config.microphone_id.clone(),
             system_audio: config.system_audio,
+            takes: Vec::new(),
         };
         self.save_session(&s)?;
         Ok(s)

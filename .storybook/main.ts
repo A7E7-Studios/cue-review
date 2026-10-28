@@ -12,7 +12,7 @@ const config: StorybookConfig = {
       // These aliases exist only in the workshop. The shipped app continues to
       // use its real backend; stories cannot invoke capture or change recordings.
       resolve: { alias: [
-        { find: './backend', replacement: fileURLToPath(new URL('../src/stories/backend.fixture.ts', import.meta.url)) },
+        { find: /^(\.\.?\/)+backend$/, replacement: fileURLToPath(new URL('../src/stories/backend.fixture.ts', import.meta.url)) },
         { find: '@tauri-apps/api/core', replacement: fileURLToPath(new URL('../src/stories/tauri.fixture.ts', import.meta.url)) },
       ] },
     });

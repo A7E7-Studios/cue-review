@@ -1,9 +1,13 @@
 pub mod agent;
 pub mod capture;
+pub mod cli;
+pub mod cursor;
 pub mod deps;
 pub mod models;
 pub mod preview;
+pub mod settings;
 pub mod store;
+pub mod takes;
 pub mod transcribe;
 
 use models::*;
@@ -167,7 +171,7 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>) {
             if cancel.load(Ordering::Acquire) {
                 return Err("Live transcription cancelled.".into());
             }
-            transcribe::transcribe_snapshot(&snapshot, &folder, &cancel)
+            transcribe::transcribe_snapshot(&s.store.root, &snapshot, &folder, &cancel)
                 .map(|update| (update, start, end))
         });
         publish_live(&s, &id, &cancel, result);
@@ -558,6 +562,30 @@ async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> 
     })
     .await
 }
+/// Continues a ready session as a new take, locked to the session's source.
+/// As in `start_recording`, `None` for `microphone_id` records without a
+/// microphone and `muted` defaults to false; `None` for `system_audio` keeps
+/// the session's choice. Returns the session with the new take recording.
+#[tauri::command]
+async fn record_more(
+    s: CmdState<'_>,
+    id: String,
+    microphone_id: Option<String>,
+    system_audio: Option<bool>,
+    muted: Option<bool>,
+) -> Result<Session, String> {
+    // WP C fills this
+    let _ = (s, id, microphone_id, system_audio, muted);
+    Err("Record more is not available yet".into())
+}
+#[tauri::command]
+fn get_settings(s: CmdState<'_>) -> Settings {
+    settings::load(&s.store.root)
+}
+#[tauri::command]
+fn save_settings(s: CmdState<'_>, settings: Settings) -> Result<Settings, String> {
+    settings::save(&s.store.root, &settings)
+}
 #[tauri::command]
 async fn set_microphone_muted(s: CmdState<'_>, muted: bool) -> Result<(), String> {
     let s = s.inner().clone();
@@ -583,6 +611,8 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
                 audio_level: active.audio_level(),
                 error: active.error(),
                 live_transcript: runtime.live_transcript.clone(),
+                take_index: None,
+                take_offset_ms: None,
             });
         }
         Ok(RecordingStatus {
@@ -597,6 +627,8 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
             audio_level: 0.,
             error: runtime.last_error.clone(),
             live_transcript: None,
+            take_index: None,
+            take_offset_ms: None,
         })
     })
     .await
@@ -660,9 +692,12 @@ pub fn run() {
             open_session_folder,
             start_recording,
             stop_recording,
+            record_more,
             retry_transcription,
             set_microphone_muted,
-            get_recording_status
+            get_recording_status,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("CueReview failed to start");
