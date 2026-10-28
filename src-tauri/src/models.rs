@@ -300,12 +300,20 @@ mod tests {
             LEGACY_TRANSCRIPT.as_bytes()
         );
 
-        // The same holds through the store's own read and atomic write path.
+        // The same holds through the store's own read and atomic write path,
+        // for the file in its own data folder. (A session read from a copied
+        // or moved data folder takes its paths from where it is now; see
+        // `store::tests::a_copied_data_folder_uses_its_own_session_files`.)
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path().into()).unwrap();
+        let escaped = serde_json::to_string(&root.path().to_string_lossy()).unwrap();
+        let in_place = LEGACY_SESSION.replace(
+            r"C:\\Users\\me\\AppData\\Local\\CueReview",
+            escaped.trim_matches('"'),
+        );
         let folder = store.session_dir(SESSION_ID).unwrap();
         std::fs::create_dir(&folder).unwrap();
-        std::fs::write(folder.join("session.json"), LEGACY_SESSION).unwrap();
+        std::fs::write(folder.join("session.json"), &in_place).unwrap();
         std::fs::write(folder.join("transcript.json"), LEGACY_TRANSCRIPT).unwrap();
         let session = store.session(SESSION_ID).unwrap();
         store.save_session(&session).unwrap();
@@ -313,7 +321,7 @@ mod tests {
         store.save_transcript(SESSION_ID, &transcript).unwrap();
         assert_eq!(
             std::fs::read(folder.join("session.json")).unwrap(),
-            LEGACY_SESSION.as_bytes()
+            in_place.as_bytes()
         );
         assert_eq!(
             std::fs::read(folder.join("transcript.json")).unwrap(),
