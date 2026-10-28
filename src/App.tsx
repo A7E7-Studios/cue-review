@@ -40,6 +40,11 @@ export default function App() {
   const [installing,setInstalling] = useState(false);
   const [menu,setMenu] = useState('');
   const [dialog,setDialog] = useState<Dialog|null>(null);
+  const [deletion,setDeletion] = useState<{id:string;name:string}|null>(null);
+  const [mediaRevision,setMediaRevision] = useState(0);
+  const deletingFiles = useRef(false);
+  const restorePlayback = useRef<{id:string;time:number;playing:boolean}|null>(null);
+  const deletionFocus = useRef<HTMLElement|null>(null);
   const [collapsed,setCollapsed] = useState(()=>window.innerWidth<700);
   const [compact,setCompact] = useState(false);
   const [time,setTime] = useState(0);
@@ -84,7 +89,7 @@ export default function App() {
   },[]);
   const openSession = useCallback(async (id:string) => {
     const request = ++selection.current;
-    setLoading(true); setMenu(''); setError('');
+    restorePlayback.current=null;setLoading(true); setMenu(''); setError('');
     try {
       const next = await backend.session(id);
       const [text,cues] = await Promise.all([backend.transcript(id),backend.markers(id)]);
@@ -158,7 +163,7 @@ export default function App() {
     document.addEventListener('pointerdown',close);return()=>document.removeEventListener('pointerdown',close);
   },[menu]);
 
-  const prepare = useCallback(()=>{if(locked)return;selection.current++;setLoading(false);setDraft(true);setSession(null);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setPlaying(false);setTime(0);setMenu('');},[locked]);
+  const prepare = useCallback(()=>{if(locked)return;selection.current++;restorePlayback.current=null;setLoading(false);setDraft(true);setSession(null);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setPlaying(false);setTime(0);setMenu('');},[locked]);
   const seek=useCallback((ms:number)=>{const next=seekTime(ms,duration);if(video.current)video.current.currentTime=next/1000;setTime(next);},[duration]);
   const play=useCallback(async()=>{if(!video.current||draft||recording)return;try{if(video.current.paused)await video.current.play();else video.current.pause();}catch(problem){report(problem);}},[draft,recording,report]);
   const toggleCompact=useCallback(async()=>{
@@ -188,11 +193,12 @@ export default function App() {
     const key=(event:KeyboardEvent)=>{
       if(event.defaultPrevented || (event.target instanceof Element && event.target.closest('[role=menu]')))return;
       if(event.key==='Escape'){
+        if(deletion){if(!busy){setDeletion(null);deletionFocus.current?.focus();}return;}
         if(menu==='source')sourceTrigger.current?.focus();
         if(menu==='microphone')microphoneTrigger.current?.focus();
         setMenu('');setDialog(null);return;
       }
-      if(dialog||menu==='setup')return;
+      if(dialog||deletion||menu==='setup')return;
       if(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)return;
       if(event.ctrlKey&&event.key.toLowerCase()==='r'){event.preventDefault();void record();}
       else if(event.ctrlKey&&event.key.toLowerCase()==='n'){event.preventDefault();prepare();}
@@ -204,7 +210,7 @@ export default function App() {
       else if(event.key==='ArrowRight'){event.preventDefault();seek(time+5000);}
       else if(event.key.toLowerCase()==='m'&&session){event.preventDefault();addMarker();}
     };window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);
-  },[record,prepare,play,seek,time,session,addMarker,dialog,menu]);
+  },[record,prepare,play,seek,time,session,addMarker,dialog,deletion,busy,menu]);
   const submitDialog=async(event:FormEvent)=>{
     event.preventDefault();if(!dialog)return;const name=dialog.value.trim();if(!name&&dialog.kind!=='marker')return;setBusy(true);setError('');
     try {
@@ -227,6 +233,45 @@ export default function App() {
     try{const moved=await backend.moveSession(id,sectionId);setSession(current=>current?.id===moved.id?{...current,projectId:moved.projectId}:current);await refreshProjects();return true;}
     catch(problem){report(problem);return false;}finally{setBusy(false);}
   };
+  const reorderSections=async(ids:string[]):Promise<boolean>=>{
+    if(locked)return false;setBusy(true);setError('');
+    try{await backend.reorderProjects(ids);await refreshProjects();return true;}
+    catch(problem){report(problem);return false;}finally{setBusy(false);}
+  };
+  const deleteSection=async(item:Project)=>{
+    if(locked||sessions.some(recording=>recording.projectId===item.id&&['recording','processing'].includes(recording.status)))return;
+    setBusy(true);setError('');
+    try{
+      await backend.deleteProject(item.id);
+      setProjects(items=>items.filter(section=>section.id!==item.id));
+      setSessions(items=>items.map(recording=>recording.projectId===item.id?{...recording,projectId:null}:recording));
+      setSession(current=>current?.projectId===item.id?{...current,projectId:null}:current);
+      await refreshProjects();setNotice('Section deleted. Recordings moved to Recents.');
+    }catch(problem){
+      report(problem);await refreshProjects().catch(()=>{});
+      if(session)await backend.session(session.id).then(fresh=>setSession(current=>current?.id===fresh.id?{...current,projectId:fresh.projectId}:current)).catch(()=>{});
+    }finally{setBusy(false);}
+  };
+  const deleteRecording=async()=>{
+    if(!deletion||locked)return;
+    const item=sessions.find(item=>item.id===deletion.id);
+    if(!item||['recording','processing'].includes(item.status))return;
+    setBusy(true);setError('');selection.current++;actionEpoch.current++;
+    const media=session?.id===item.id?video.current:null;
+    const playback=media?{id:item.id,time:media.currentTime,playing:!media.paused}:null;
+    let deleted=false;
+    try{
+      // Windows holds the playing file open. Release it before native deletion.
+      if(media){restorePlayback.current=null;deletingFiles.current=true;media.pause();media.removeAttribute('src');media.load();setPlaying(false);}
+      await backend.deleteSession(item.id);deleted=true;
+      setSessions(items=>items.filter(recording=>recording.id!==item.id));setDeletion(null);
+      if(session?.id===item.id){setSession(null);setDraft(true);setTranscript(EMPTY_TRANSCRIPT);setMarkers([]);setTime(0);setDuration(0);setPlaying(false);setLoading(false);setFocusVideo(false);}
+      await refreshProjects();setNotice('Recording deleted');
+    }catch(problem){
+      if(!deleted&&playback){restorePlayback.current=playback;setMediaRevision(value=>value+1);}
+      report(problem);
+    }finally{deletingFiles.current=false;setBusy(false);}
+  };
   const retry=async()=>{if(!session)return;setBusy(true);try{await backend.retry(session.id);setSession({...session,status:'processing',error:undefined});runtimeState.current='processing';setStatus({state:'processing',sessionId:session.id});setError('');}catch(problem){report(problem);}finally{setBusy(false);}};
   const install=async()=>{setInstalling(true);setError('');try{await backend.installTranscription();setSetup(await backend.setup());setNotice('Transcription tools installed');}catch(problem){report(problem);}finally{setInstalling(false);}};
   const selectTheme=()=>setTheme(current=>current==='dark'?'light':'dark');
@@ -240,7 +285,9 @@ export default function App() {
         utilities={!collapsed&&!compact?utilityControls:null} onCollapse={()=>setCollapsed(true)} onNew={prepare}
         onOpen={id=>void openSession(id)} onRename={item=>setDialog({kind:'renameSession',id:item.id,value:item.name})}
         onRenameSection={item=>setDialog({kind:'renameProject',id:item.id,value:item.name})}
-        onCreateSection={sessionId=>setDialog({kind:'project',sessionId,value:''})} onMove={moveSession}/>
+        onCreateSection={sessionId=>setDialog({kind:'project',sessionId,value:''})} onMove={moveSession}
+        onReorder={reorderSections} onDeleteSection={item=>void deleteSection(item)}
+        onDeleteSession={item=>{deletionFocus.current=document.activeElement instanceof HTMLElement?document.activeElement:null;setError('');setDeletion({id:item.id,name:item.name});}}/>
       <main className="content">
         <header className="session-header">
           <div className="session-heading">
@@ -250,7 +297,7 @@ export default function App() {
           <div className="header-actions">{(collapsed||compact)&&utilityControls}{recording?<button title={compact?'Restore workspace':'Compact recording mode'} onClick={()=>void toggleCompact()}><Icon name="compact"/>{compact?'Expand':'Compact'}</button>:session&&<><button className="folder-button" title="Open recording folder" aria-label="Open recording folder" onClick={()=>void backend.openFolder(session.id).catch(report)}><Icon name="folder"/></button><button disabled={busy||processing} onClick={()=>void copyHandoff()}>Copy for agent<Icon name="arrow"/></button></>}</div>
         </header>
 
-        {error&&!dialog&&menu!=='setup'&&<div className="error-banner" role="alert"><Icon name="warning"/><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}><Icon name="close"/></button></div>}
+        {error&&!dialog&&!deletion&&menu!=='setup'&&<div className="error-banner" role="alert"><Icon name="warning"/><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}><Icon name="close"/></button></div>}
         {setup&&!setup.ready&&!recording&&<div className="setup-banner"><span>Transcription needs setup.</span><button onClick={()=>setMenu('setup')}>Review setup<Icon name="arrow"/></button></div>}
         <div className={`review ${focusVideo?'focus-video':''}`}>
           <section className="player" aria-label={draft||recording?'Capture preview':'Recording video'}>
@@ -259,7 +306,7 @@ export default function App() {
                 {preview?<img className="preview-image" src={preview} alt={`Live preview of ${source?.name||'capture source'}`}/>:<div className="video-empty"><Icon name="monitor"/><h2>{loading?'Loading…':source&&!source.available?'Capture source unavailable':source?'Loading preview…':'Choose a source'}</h2>{source&&!source.available&&<p>{source.detail||'Reconnect the selected source and refresh, or choose another source.'}</p>}</div>}
                 {previewError&&<div className="preview-error">{previewError}</div>}
                 {recording&&<div className="record-badge"><i/>Recording <span>{formatTime(status.elapsedMs||0)}</span></div>}
-              </>:session?.videoPath?<video key={session.id} ref={video} src={videoUrl(session.videoPath)} playsInline preload="metadata" onTimeUpdate={event=>setTime(event.currentTarget.currentTime*1000)} onLoadedMetadata={event=>{setDuration(Number.isFinite(event.currentTarget.duration)?event.currentTarget.duration*1000:session.durationMs);event.currentTarget.playbackRate=speed;}} onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)} onClick={()=>void play()} onError={()=>setError('This recording could not be played. Open its folder to inspect the video file.')} />:<div className="video-empty"><Icon name="monitor"/><h2>{loading?'Opening recording…':processing?'Finishing your recording':'No video available'}</h2><p>{processing?'Finishing video and transcript…':'Open the session folder to inspect its files.'}</p></div>}
+              </>:session?.videoPath?<video key={`${session.id}:${mediaRevision}`} ref={video} src={videoUrl(session.videoPath)} playsInline preload="metadata" onTimeUpdate={event=>setTime(event.currentTarget.currentTime*1000)} onLoadedMetadata={event=>{setDuration(Number.isFinite(event.currentTarget.duration)?event.currentTarget.duration*1000:session.durationMs);event.currentTarget.playbackRate=speed;const restore=restorePlayback.current;if(restore?.id===session?.id){restorePlayback.current=null;event.currentTarget.currentTime=restore.time;setTime(restore.time*1000);if(restore.playing)void event.currentTarget.play().catch(report);}}} onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)} onClick={()=>void play()} onError={()=>{const restoring=restorePlayback.current?.id===session?.id;if(restoring)restorePlayback.current=null;if(!deletingFiles.current&&!restoring)setError('This recording could not be played. Open its folder to inspect the video file.');}} />:<div className="video-empty"><Icon name="monitor"/><h2>{loading?'Opening recording…':processing?'Finishing your recording':'No video available'}</h2><p>{processing?'Finishing video and transcript…':'Open the session folder to inspect its files.'}</p></div>}
             </div>
             {!draft&&!recording&&<div className="player-controls"><button disabled={!session?.videoPath} title={playing?'Pause (Space)':'Play (Space)'} aria-label={playing?'Pause':'Play'} onClick={()=>void play()}><Icon name={playing?'pause':'play'}/></button><span className="time">{formatTime(time)}<span> / {formatTime(duration)}</span></span><input aria-label="Playback position" type="range" min="0" max={duration||1} value={Math.min(time,duration)} step="10" onChange={event=>seek(Number(event.target.value))}/><button title="Playback speed" aria-label={`Playback speed ${speed}×`} onClick={()=>{const next=speed===1?1.5:speed===1.5?2:speed===2?.75:1;setSpeed(next);if(video.current)video.current.playbackRate=next;}}>{speed}×</button><button title="Focus video" aria-label={focusVideo?'Restore transcript':'Focus video'} onClick={()=>setFocusVideo(!focusVideo)}><Icon name="expand"/></button></div>}
           </section>
@@ -286,6 +333,7 @@ export default function App() {
     </div>
     {menu==='setup'&&<div className="modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)setMenu('');}}><section className="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title"><div className="dialog-title"><h2 id="setup-title">Settings</h2><button aria-label="Close settings" onClick={()=>setMenu('')}><Icon name="close"/></button></div><label className="appearance">Appearance<select value={theme} onChange={event=>setTheme(event.target.value)}><option value="light">Light</option><option value="dark">Dark</option></select></label><h3>Transcription</h3>{error&&<p className="dialog-error" role="alert">{error}</p>}{setup?<><p>{setup.ready?'Ready to transcribe on this computer.':'Complete setup to transcribe recordings on this computer.'}</p>{setup.dependencies?.map(item=><div className="dependency" key={item.name}><Icon name={item.available?'check':'warning'}/><div><strong>{item.name}</strong><small>{item.detail||item.path||(item.available?'Available':'Missing')}</small></div></div>)}{setup.issues.map((issue,index)=><p className="setup-issue" key={index}>{issue}</p>)}{(!setup.modelReady||setup.dependencies?.some(item=>(item.name==='whisper-cli'||item.name==='whisper-vad-speech-segments')&&!item.available))&&<button className="primary" disabled={installing} onClick={()=>void install()}>{installing?'Downloading speech tools…':'Install transcription'}</button>}{installing&&<p className="option-note" role="status">Downloading the speech model and tools. This may take a few minutes.</p>}<button className="check-setup" onClick={()=>void backend.setup().then(setSetup).catch(report)}><Icon name="refresh"/>Check again</button></>:<p>Start the desktop app to inspect installed recording tools.</p>}<p className="settings-shortcuts">Ctrl+N new recording · Ctrl+R record / stop<br/>Space play / pause · ← → seek 5 seconds · M add marker</p></section></div>}
     {dialog&&<div className="modal-backdrop"><form className="name-dialog" role="dialog" aria-modal="true" aria-labelledby="name-title" onSubmit={event=>void submitDialog(event)}><h2 id="name-title">{dialog.kind==='project'?'New section':dialog.kind==='renameProject'?'Rename section':dialog.kind==='marker'?'Add marker':'Recording name'}</h2>{error&&<p className="dialog-error" role="alert">{error}</p>}<label>{dialog.kind==='marker'?'Note':'Name'}<input autoFocus maxLength={160} value={dialog.value} onChange={event=>setDialog({...dialog,value:event.target.value})}/></label><div className="dialog-actions"><button type="button" onClick={()=>setDialog(null)}>Cancel</button><button className="primary" disabled={busy||(!dialog.value.trim()&&dialog.kind!=='marker')} type="submit">{busy?'Saving…':'Save'}</button></div></form></div>}
+    {deletion&&<div className="modal-backdrop"><section className="name-dialog delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description"><h2 id="delete-title">Delete recording?</h2><p id="delete-description">Permanently delete <strong>{deletion.name}</strong> and all its files, including video, audio, transcript, and markers? This cannot be undone.</p>{error&&<p className="dialog-error" role="alert">{error}</p>}<div className="dialog-actions"><button autoFocus disabled={busy} onClick={()=>{setDeletion(null);deletionFocus.current?.focus();}}>Cancel</button><button className="danger-button" disabled={busy} onClick={()=>void deleteRecording()}>{busy?'Deleting…':'Delete recording'}</button></div></section></div>}
     {notice&&<div className="toast" role="status">{notice}</div>}
   </div>;
 }

@@ -35,7 +35,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 1. Open CueReview. A fresh unnamed recording is ready; source and microphone options open directly from the compact bottom controls.
 2. Press Record (`Ctrl+R`). Mute/unmute and add timestamped markers during capture. Compact mode keeps the recording controls available in a smaller window.
 3. Stop. The video is finalized and transcribed locally. Original media remains available if transcription fails; use Retry after fixing setup.
-4. Find the recording in Recents. Its title is derived from the transcript. Drag it into a sidebar section, or right-click and choose **Move to section**. Sections are optional categories in the same list; drag back to Recents to ungroup. Grouping never moves the media files.
+4. Find the recording in Recents. Its title is derived from the transcript. Drag it into a sidebar section, or right-click and choose **Move to section**. Sections are optional categories in the same list; drag back to Recents to ungroup. Grouping never moves the media files. Drag section headings to reorder them. Deleting a section returns its recordings to Recents; deleting a recording from its menu requires confirmation and removes its files.
 5. Play the recording and click transcript words to seek. The transcript follows playback automatically. The standard model uses DTW alignment points for visual lookup, while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
 6. Copy for agent, or open the session folder.
 
@@ -45,7 +45,7 @@ During recording, local transcription updates in short batches from the latest 3
 
 ## Storage and agent CLI
 
-Default storage is `%LOCALAPPDATA%\CueReview`. Projects and sessions are plain JSON files; each session directory contains `video.mp4`, audio tracks, `session.json`, `transcript.txt`, `transcript.json`, raw `whisper.json` when recognition ran, and markers when present. Speech detector output is retained in `vad.txt` and `vad.log`. Original native/device capture tracks are retained for recovery. `CUEREVIEW_DATA_DIR` changes this root; `CUEREVIEW_MODEL` and `CUEREVIEW_VAD_MODEL` can select compatible local speech and detection models.
+Default storage is `%LOCALAPPDATA%\CueReview`. Projects and sessions are plain JSON files; each session directory contains `video.mp4`, audio tracks, `session.json`, `transcript.txt`, `transcript.json`, raw `whisper.json` when recognition ran, and markers when present. Speech detector output is retained in `vad.txt` and `vad.log`. New recordings use H.264 CRF23 at their original resolution and frame rate. After successful finalization and stream/duration verification, the duplicate native video is removed. Failed captures retain original tracks for recovery, and lossless audio is retained for transcription retries. Existing recordings are not recompressed or cleaned up automatically. `CUEREVIEW_DATA_DIR` changes this root; `CUEREVIEW_MODEL` and `CUEREVIEW_VAD_MODEL` can select compatible local speech and detection models.
 
 Each word retains its original `startMs`/`endMs` and may include `seekMs`, an estimated alignment point used by word clicks and phrase-based frame retrieval. Existing transcripts without this field still work. Custom speech models use their original intervals unless `CUEREVIEW_DTW_MODEL` explicitly names a compatible alignment preset, such as `base` or `base.en`; the preset is never inferred from a custom filename. The standard installed base model enables alignment automatically.
 

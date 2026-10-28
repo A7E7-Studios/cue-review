@@ -71,10 +71,11 @@ const invoke = (command, args) => page.evaluate(({ command, args }) => window.__
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Design feedback');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByRole('region', { name: 'Section: Design feedback', exact: true }).getByRole('button', { name: 'Workspace issues', exact: true }).waitFor();
-    await page.getByRole('button', { name: 'Rename section Design feedback', exact: true }).click();
+    await page.getByRole('button', { name: 'Section options for Design feedback', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Design');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await page.getByRole('button', { name: 'Rename section Design', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Section options for Design', exact: true }).waitFor();
     await page.getByRole('button', { name: 'PlayalongXR', exact: true }).click();
     await page.screenshot({ path: path.join(output, 'light-sidebar.png') });
     await page.getByRole('button', { name: 'Use dark theme', exact: true }).click();
@@ -86,6 +87,52 @@ const invoke = (command, args) => page.evaluate(({ command, args }) => window.__
     result.checks.persistence = true;
     result.checks.mediaUnchanged = sessions.every((item, index) => hash(item.videoPath) === hashes[index]);
     assert(result.checks.mediaUnchanged, 'Moving a recording changed media.');
+    // Drag a whole section below the others, then prove its order survives reload.
+    const initialOrder = await invoke('list_projects');
+    const first = initialOrder[0];
+    await page.getByRole('region', { name: `Section: ${first.name}`, exact: true }).locator('.section-toggle').dragTo(recents.locator('.recents-heading'));
+    const reorderedIds = [...initialOrder.slice(1).map(item => item.id), first.id];
+    await page.waitForFunction(ids => [...document.querySelectorAll('[data-section-id]')].map(item => item.dataset.sectionId).join() === ids.join(), reorderedIds);
+    assert((await invoke('list_projects')).map(item => item.id).join() === reorderedIds.join(), 'Section drag did not persist.');
+    await page.reload();
+    await page.waitForFunction(ids => [...document.querySelectorAll('[data-section-id]')].map(item => item.dataset.sectionId).join() === ids.join(), reorderedIds);
+    result.checks.sectionOrder = reorderedIds;
+    // Delete a populated section without changing its recordings or current playback.
+    const gameSection = page.getByRole('region', { name: 'Section: PlayalongXR', exact: true });
+    if (await gameSection.locator('.section-toggle').getAttribute('aria-expanded') === 'false') await gameSection.locator('.section-toggle').click();
+    await gameSection.getByRole('button', { name: 'Boxing gameplay', exact: true }).click();
+    await page.getByRole('button', { name: 'Seek to Review at 0:02', exact: true }).click();
+    await page.evaluate(() => { window.__sectionDeleteVideo = document.querySelector('video'); });
+    await page.getByRole('button', { name: 'Section options for PlayalongXR', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Delete section/ }).click();
+    await recents.getByRole('button', { name: 'Boxing gameplay', exact: true }).waitFor();
+    await recents.getByRole('button', { name: 'Main menu review', exact: true }).waitFor();
+    assert(!await gameSection.count(), 'Deleted section still appears.');
+    assert((await invoke('get_session', { id: sessions[3].id })).projectId === null && (await invoke('get_session', { id: sessions[4].id })).projectId === null, 'Section deletion did not clear every assignment.');
+    assert(sessions.every((item, index) => hash(item.videoPath) === hashes[index]), 'Section deletion changed media.');
+    assert(await page.evaluate(() => window.__sectionDeleteVideo === document.querySelector('video') && Math.abs(document.querySelector('video').currentTime - 2) < .1), 'Section deletion reset playback.');
+    result.checks.deleteSectionPreservesRecordings = true;
+    // Cancel does nothing; confirmation deletes the selected recording's actual folder.
+    const deleteTarget = page.locator(`[data-session-id="${sessions[3].id}"]`);
+    await deleteTarget.getByRole('button', { name: 'Recording options', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Delete recording/ }).click();
+    const confirmation = page.getByRole('alertdialog', { name: 'Delete recording?' });
+    assert((await confirmation.innerText()).includes('Boxing gameplay'), 'Delete confirmation does not identify its recording.');
+    await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert(fs.existsSync(sessions[3].folderPath), 'Cancel deleted recording files.');
+    await deleteTarget.getByRole('button', { name: 'Recording options', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Delete recording/ }).click();
+    await page.screenshot({ path: path.join(output, 'delete-confirmation.png') });
+    await confirmation.getByRole('button', { name: 'Delete recording', exact: true }).click();
+    await page.getByRole('heading', { name: 'New recording', exact: true }).waitFor();
+    await deleteTarget.waitFor({ state: 'detached' });
+    assert(!fs.existsSync(sessions[3].folderPath), 'Confirmed deletion left recording files on disk.');
+    assert(sessions.every((item, index) => index === 3 || hash(item.videoPath) === hashes[index]), 'Deletion changed another recording.');
+    await page.reload();
+    await page.getByRole('button', { name: 'Section options for Design', exact: true }).waitFor();
+    assert((await invoke('list_sessions', { projectId: null })).length === 4, 'Deleted recording returned after reload.');
+    assert(!(await invoke('list_projects')).some(item => item.id === sections[1].id), 'Deleted section returned after reload.');
+    result.checks.deleteRecordingFiles = true;
     assert(result.pageErrors.length === 0, 'WebView errors occurred.');
     result.passed = true;
   } catch (error) { result.error = error.stack || String(error); result.passed = false; process.exitCode = 1; if (page) { await page.screenshot({ path: path.join(output, 'failure.png') }).catch(() => {}); result.alerts = await page.getByRole('alert').allTextContents().catch(() => []); } }

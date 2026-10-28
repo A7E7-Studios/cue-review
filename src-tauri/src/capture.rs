@@ -1,4 +1,4 @@
-//! Windows Graphics Capture + WASAPI. Original tracks are retained for recovery.
+//! Windows Graphics Capture + WASAPI. Failed captures retain their original tracks for recovery.
 use crate::{
     deps,
     models::{CaptureConfig, CaptureSource, Microphone},
@@ -1223,6 +1223,12 @@ impl ActiveCapture {
             failures.push(e);
         }
         if failures.is_empty() {
+            // Finalization has verified the output streams and timeline. The native video
+            // is now redundant; keep the lossless audio tracks for transcription/retry.
+            // Cleanup failure must not turn a usable recording into a failed recording.
+            if let Err(error) = remove_native_intermediate(&self.folder, &input) {
+                let _ = fs::write(self.folder.join("cleanup.log"), error);
+            }
             Ok(())
         } else {
             let message = failures.join("; ");
@@ -1680,7 +1686,7 @@ fn finalize(
             "-preset",
             "veryfast",
             "-crf",
-            "20",
+            "23",
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -1693,12 +1699,281 @@ fn finalize(
             "+faststart",
         ])
         .arg(folder.join("video.mp4"));
-    ffmpeg(mux)
+    ffmpeg(mux)?;
+    validate_final_video(&folder.join("video.mp4"), output_end, fps)
+}
+
+fn validate_final_video(path: &Path, expected_seconds: f64, fps: u32) -> Result<(), String> {
+    let mut probe = deps::command("ffprobe")?;
+    probe
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,width,height,duration:format=duration",
+            "-of",
+            "json",
+        ])
+        .arg(path);
+    let output = output_with_timeout(probe, Duration::from_secs(10))?;
+    if !output.status.success() {
+        return Err(
+            "The finished recording could not be verified; original tracks were retained.".into(),
+        );
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let streams = info["streams"]
+        .as_array()
+        .ok_or("The finished recording has no streams; original tracks were retained.")?;
+    let video = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "video")
+        .ok_or("The finished recording has no video; original tracks were retained.")?;
+    let audio = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "audio")
+        .ok_or("The finished recording has no audio; original tracks were retained.")?;
+    let seconds = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+    };
+    let tolerance = 1.0 / fps as f64 + 0.05;
+    if video["width"].as_u64().unwrap_or(0) == 0
+        || video["height"].as_u64().unwrap_or(0) == 0
+        || [video, audio, &info["format"]].iter().any(|stream| {
+            seconds(&stream["duration"]).is_none_or(|duration| {
+                duration <= 0.0 || (duration - expected_seconds).abs() > tolerance
+            })
+        })
+    {
+        return Err("The finished recording is incomplete; original tracks were retained.".into());
+    }
+    Ok(())
+}
+
+fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String> {
+    // Never use metadata-provided media paths for cleanup, or traverse a directory.
+    if input.parent() != Some(folder)
+        || !matches!(
+            input.file_name().and_then(|name| name.to_str()),
+            Some("native-video.mp4" | "native-video.mkv")
+        )
+    {
+        return Err("Skipped cleanup of an unexpected native video path.".into());
+    }
+    fs::remove_file(input).map_err(|e| {
+        format!("The recording is saved, but its temporary native video could not be removed: {e}")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_cleanup_is_limited_to_the_owned_intermediate() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("session");
+        fs::create_dir(&folder).unwrap();
+        let outside = root.path().join("native-video.mp4");
+        fs::write(&outside, "outside").unwrap();
+        let final_video = folder.join("video.mp4");
+        fs::write(&final_video, "final").unwrap();
+        assert!(remove_native_intermediate(&folder, &outside).is_err());
+        assert!(remove_native_intermediate(&folder, &final_video).is_err());
+        assert!(outside.exists() && final_video.exists());
+        let native = folder.join("native-video.mkv");
+        fs::write(&native, "temporary").unwrap();
+        remove_native_intermediate(&folder, &native).unwrap();
+        assert!(!native.exists());
+        assert!(outside.exists() && final_video.exists());
+    }
+
+    #[test]
+    #[ignore = "Requires FFmpeg; validates successful output, missing audio, truncated timeline, and corrupt media"]
+    fn actual_final_video_validation_rejects_incomplete_output() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("video.mp4");
+        let mut command = deps::command("ffmpeg").unwrap();
+        command
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=mono",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&path);
+        ffmpeg(command).unwrap();
+        validate_final_video(&path, 1.0, 30).unwrap();
+        assert!(validate_final_video(&path, 2.0, 30).is_err());
+        let silent = folder.path().join("no-audio.mp4");
+        let mut command = deps::command("ffmpeg").unwrap();
+        command
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&path)
+            .args(["-an", "-c:v", "copy"])
+            .arg(&silent);
+        ffmpeg(command).unwrap();
+        assert!(validate_final_video(&silent, 1.0, 30).is_err());
+        fs::write(&path, "corrupt").unwrap();
+        assert!(validate_final_video(&path, 1.0, 30).is_err());
+    }
+
+    #[test]
+    #[ignore = "Requires CUEREVIEW_SIZE_FIXTURE pointing to an existing recording; reads it only, finalizes isolated copies and measures storage/timing"]
+    fn actual_size_optimized_finalization_preserves_timeline() {
+        let source = PathBuf::from(
+            std::env::var_os("CUEREVIEW_SIZE_FIXTURE").expect("Set a read-only size fixture"),
+        );
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        let folder = workspace
+            .join("test-results/recording-size")
+            .join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(&folder).unwrap();
+        let input = folder.join("native-video.mkv");
+        let original = source.join("native-video.mkv");
+        let original_bytes = fs::read(&original).unwrap();
+        fs::write(&input, &original_bytes).unwrap();
+        // Copy ancillary files so the measured total includes the same transcript,
+        // speech input, diagnostics and lossless audio as the source session.
+        fn copy_ancillary(source: &Path, target: &Path, top: bool) {
+            for entry in fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                let destination = target.join(entry.file_name());
+                if kind.is_dir() {
+                    fs::create_dir_all(&destination).unwrap();
+                    copy_ancillary(&entry.path(), &destination, false);
+                } else if kind.is_file()
+                    && !(top
+                        && matches!(
+                            entry.file_name().to_str(),
+                            Some("native-video.mkv" | "video.mp4")
+                        ))
+                {
+                    fs::copy(entry.path(), destination).unwrap();
+                }
+            }
+        }
+        copy_ancillary(&source, &folder, true);
+        let timing: serde_json::Value =
+            serde_json::from_slice(&fs::read(source.join("capture-timing.json")).unwrap()).unwrap();
+        let duration =
+            Duration::from_secs_f64(timing["recordingStopMs"].as_f64().unwrap() / 1000.0);
+        let delay = timing["videoHostStartMs"].as_f64().unwrap() / 1000.0;
+        let started = Instant::now();
+        finalize(&folder, &input, duration, delay, 30, false, true).unwrap();
+        let encode_seconds = started.elapsed().as_secs_f64();
+        let final_video = folder.join("video.mp4");
+        let mut decode = deps::command("ffmpeg").unwrap();
+        decode
+            .args(["-hide_banner", "-loglevel", "error", "-xerror", "-i"])
+            .arg(&final_video)
+            .args(["-f", "null", "-"]);
+        ffmpeg(decode).unwrap();
+        let new_timing: serde_json::Value =
+            serde_json::from_slice(&fs::read(folder.join("capture-timing.json")).unwrap()).unwrap();
+        assert_eq!(new_timing["outputEndMs"], timing["outputEndMs"]);
+        assert_eq!(new_timing["videoHostStartMs"], timing["videoHostStartMs"]);
+        let source_mix = hound::WavReader::open(source.join("audio.wav")).unwrap();
+        let new_mix = hound::WavReader::open(folder.join("audio.wav")).unwrap();
+        assert_eq!(source_mix.duration(), new_mix.duration());
+        assert_eq!(
+            fs::read(source.join("audio.wav")).unwrap(),
+            fs::read(folder.join("audio.wav")).unwrap()
+        );
+        // Compare reconstructed output against the old output on the same presentation timeline.
+        let mut compare = deps::command("ffmpeg").unwrap();
+        compare
+            .arg("-i")
+            .arg(source.join("video.mp4"))
+            .arg("-i")
+            .arg(&final_video)
+            .args([
+                "-lavfi",
+                "[0:v]fps=1[ref];[1:v]fps=1[enc];[ref][enc]ssim",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ]);
+        let comparison = output_with_timeout(compare, Duration::from_secs(120)).unwrap();
+        assert!(comparison.status.success());
+        let quality_log = String::from_utf8_lossy(&comparison.stderr);
+        let ssim = quality_log
+            .rsplit("All:")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(ssim > 0.98, "Unexpected quality regression: {ssim}");
+        remove_native_intermediate(&folder, &input).unwrap();
+        assert!(!input.exists());
+        assert_eq!(
+            fs::read(&original).unwrap(),
+            original_bytes,
+            "Source recording changed"
+        );
+        fn sum_files(path: &Path) -> u64 {
+            fs::read_dir(path)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let kind = entry.file_type().unwrap();
+                    if kind.is_dir() {
+                        sum_files(&entry.path())
+                    } else if kind.is_file() {
+                        entry.metadata().unwrap().len()
+                    } else {
+                        0
+                    }
+                })
+                .sum()
+        }
+        let source_total = sum_files(&source);
+        let old_video = source.join("video.mp4").metadata().unwrap().len();
+        let new_video = final_video.metadata().unwrap().len();
+        let actual_total = sum_files(&folder);
+        assert_eq!(
+            actual_total,
+            source_total - old_video - original_bytes.len() as u64 + new_video
+        );
+        let report = serde_json::json!({"output":folder,"sourceTotalBytes":source_total,"oldVideoBytes":old_video,"nativeVideoBytes":original_bytes.len(),"newVideoBytes":new_video,"actualTotalBytesAfterCleanup":actual_total,"videoReductionPercent":100.0 * (1.0 - new_video as f64 / old_video as f64),"folderReductionPercent":100.0 * (1.0 - actual_total as f64 / source_total as f64),"finalizeSeconds":encode_seconds,"sampledSsimAgainstPreviousOutput":ssim,"timelineUnchanged":true,"fullDecodePassed":true,"audioBytesUnchanged":true,"originalUntouched":true});
+        fs::write(
+            folder.join("verification.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("test-results/recording-size-verification.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        println!("{report}");
+    }
+
     #[test]
     fn quest_virtual_filters_are_not_offered_as_cameras() {
         let text = "[dshow] \"Meta Quest 3\" (video)\n[dshow] \"Meta Quest Pro\" (video)\n[dshow] \"Oculus Quest 2\" (video)\n[dshow] \"HD Pro Webcam C920\" (video)";
@@ -2225,6 +2500,10 @@ mod tests {
         assert!(
             folder.join("video.mp4").metadata().unwrap().len() > 1024,
             "Partial recording must be finalized"
+        );
+        assert!(
+            folder.join("native-video.mp4").exists(),
+            "Failed captures must retain their original video"
         );
         let probe = deps::command("ffprobe")
             .unwrap()
@@ -2959,6 +3238,10 @@ mod tests {
         let began = Instant::now();
         active.stop().unwrap();
         let stop_ms = began.elapsed().as_millis();
+        assert!(
+            !next.join("native-video.mp4").exists(),
+            "Successful video-only capture retained its duplicate native video"
+        );
         let usable = usable_video(&next.join("video.mp4"));
         phases.push(serde_json::json!({"phase":"subsequent-capture","stopMs":stop_ms,"usableVideo":usable,"error":serde_json::Value::Null}));
         fs::write(

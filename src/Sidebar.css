@@ -33,3 +33,14 @@
 .sidebar-menu .menu-separated { border-top: 1px solid var(--line); border-radius: 0; margin-top: 4px; padding-top: 9px; }
 .sidebar-menu-title { font-size: 11px; color: var(--faint); padding: 5px 8px 7px; }
 .section-destinations { max-height: 192px; overflow: auto; scrollbar-width: thin; }
+.section-options[aria-expanded=true] { opacity: 1; }
+.recording-section { position: relative; }
+.dragging-section { opacity: .45; }
+.insert-before::before, .insert-after::after { content: ''; position: absolute; left: 1px; right: 1px; height: 2px; background: var(--accent); border-radius: 2px; pointer-events: none; }
+.insert-before::before { top: -7px; }
+.insert-after::after { bottom: -9px; }
+.destructive { color: var(--red); }
+.delete-dialog p { color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
+.delete-dialog strong { color: var(--text); font-weight: 500; }
+.danger-button { background: var(--red); color: white; padding: 6px 12px; }
+.danger-button:hover { background: var(--red); color: white; filter: brightness(1.1); }

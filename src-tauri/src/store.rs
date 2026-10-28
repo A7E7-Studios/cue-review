@@ -1,6 +1,7 @@
 use crate::models::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -53,6 +54,57 @@ fn valid_id(id: &str) -> Result<(), String> {
         .map(|_| ())
         .map_err(|_| "Invalid project or session ID.".into())
 }
+
+fn is_link(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Junctions and other reparse points are not necessarily reported as symlinks.
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn check_deletion_tree(path: &Path) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("Inspect {}: {e}", path.display()))?;
+    if is_link(&metadata) {
+        return Err(format!(
+            "The recording contains a linked path ({}). Remove the link before deleting the recording.",
+            path.display()
+        ));
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+            check_deletion_tree(&entry.map_err(|e| e.to_string())?.path())?;
+        }
+    }
+    Ok(())
+}
+
+// Keep session.json until every payload has been deleted. A locked media file can
+// make deletion partial on Windows; the remaining recording must stay reachable.
+fn delete_session_payloads(folder: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(folder).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_name() == "session.json" {
+            continue;
+        }
+        let path = entry.path();
+        check_deletion_tree(&path)?;
+        let result = if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        result.map_err(|e| format!("Could not delete {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(root: PathBuf) -> Result<Self, String> {
         for dir in ["projects", "sessions", "tools", "models"] {
@@ -76,8 +128,31 @@ impl Store {
                 entries.push(read_json::<Project>(&path)?);
             }
         }
-        entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        let order_path = self.root.join("section-order.json");
+        let order: Vec<String> = if order_path.exists() {
+            read_json(&order_path)?
+        } else {
+            Vec::new()
+        };
+        let positions: HashMap<_, _> = order.iter().enumerate().map(|(i, id)| (id, i)).collect();
+        entries.sort_by(|a, b| {
+            positions
+                .get(&a.id)
+                .unwrap_or(&usize::MAX)
+                .cmp(positions.get(&b.id).unwrap_or(&usize::MAX))
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(entries)
+    }
+    pub fn reorder_projects(&self, ids: &[String]) -> Result<(), String> {
+        let projects = self.projects()?;
+        let supplied: HashSet<_> = ids.iter().collect();
+        let current: HashSet<_> = projects.iter().map(|project| &project.id).collect();
+        if ids.len() != supplied.len() || supplied != current {
+            return Err("The sections changed. Refresh and try reordering them again.".into());
+        }
+        write_json(&self.root.join("section-order.json"), &ids)
     }
     pub fn create_project(&self, name: &str) -> Result<Project, String> {
         let p = Project {
@@ -96,6 +171,92 @@ impl Store {
         p.name = valid_name(name)?;
         write_json(&self.root.join("projects").join(format!("{id}.json")), &p)?;
         Ok(p)
+    }
+    pub fn delete_project(&self, id: &str) -> Result<(), String> {
+        let project = self.project(id)?;
+        if project.id != id {
+            return Err("The section metadata does not match its file.".into());
+        }
+        let project_file = self.root.join("projects").join(format!("{id}.json"));
+        let root = dunce::canonicalize(&self.root).map_err(|e| e.to_string())?;
+        if dunce::canonicalize(&project_file).map_err(|e| e.to_string())?
+            != root.join("projects").join(format!("{id}.json"))
+        {
+            return Err("The section file points outside its expected storage location.".into());
+        }
+        let mut sessions = self.sessions(Some(id))?;
+        // Check every member before changing any assignment.
+        if sessions
+            .iter()
+            .any(|session| matches!(session.status.as_str(), "recording" | "processing"))
+        {
+            return Err("Finish recording and processing before deleting this section.".into());
+        }
+        for session in &sessions {
+            self.checked_session_dir(&session.id)?;
+        }
+        for session in &mut sessions {
+            session.project_id = None;
+            self.save_session(session).map_err(|e| format!(
+                "The section was not deleted. Some recordings may already be in Recents; try again. {e}"
+            ))?;
+        }
+        // Stale IDs in section-order.json are harmless and ignored when listing.
+        // Remove the section only after all of its recordings are in Recents.
+        fs::remove_file(project_file).map_err(|e| {
+            format!("Recordings are in Recents, but the section could not be removed: {e}")
+        })
+    }
+    fn checked_session_dir(&self, id: &str) -> Result<PathBuf, String> {
+        let folder = self.session_dir(id)?;
+        let root = dunce::canonicalize(&self.root).map_err(|e| e.to_string())?;
+        let sessions =
+            dunce::canonicalize(self.root.join("sessions")).map_err(|e| e.to_string())?;
+        let physical = dunce::canonicalize(&folder).map_err(|e| e.to_string())?;
+        if sessions != root.join("sessions") || physical != sessions.join(id) {
+            return Err(
+                "The recording directory points outside its expected storage location.".into(),
+            );
+        }
+        if is_link(&fs::symlink_metadata(&folder).map_err(|e| e.to_string())?) {
+            return Err("Linked recording directories cannot be deleted or reassigned.".into());
+        }
+        Ok(physical)
+    }
+    pub fn delete_session(&self, id: &str) -> Result<(), String> {
+        let folder = self.checked_session_dir(id)?;
+        let session = self.session(id)?;
+        if session.id != id {
+            return Err("The recording metadata does not match its directory.".into());
+        }
+        if matches!(session.status.as_str(), "recording" | "processing") {
+            return Err("Finish recording and processing before deleting this recording.".into());
+        }
+        // Never use folderPath or videoPath from JSON as deletion targets.
+        check_deletion_tree(&folder)?;
+        delete_session_payloads(&folder).map_err(|e| format!(
+            "The recording could not be fully deleted. Close programs using its files and try again. {e}"
+        ))?;
+        fs::remove_file(folder.join("session.json")).map_err(|e| e.to_string())?;
+        if let Err(error) = fs::remove_dir(&folder) {
+            // Restore the record if the directory became nonempty or locked at
+            // the last step, so retry does not leave an invisible orphan folder.
+            let mut remaining = session;
+            remaining.video_path = None;
+            remaining.status = "error".into();
+            remaining.error =
+                Some("Deletion was interrupted. Retry deleting this recording.".into());
+            let restore = write_json(&folder.join("session.json"), &remaining);
+            return Err(format!(
+                "The recording files were deleted, but its folder could not be removed: {error}.{}",
+                if restore.is_err() {
+                    " Its metadata could not be restored; inspect the recording folder."
+                } else {
+                    " Try deleting it again."
+                }
+            ));
+        }
+        Ok(())
     }
     pub fn session(&self, id: &str) -> Result<Session, String> {
         read_json(&self.session_dir(id)?.join("session.json"))
@@ -283,6 +444,201 @@ mod tests {
             system_audio: false,
             fps: 30,
         }
+    }
+    fn ready_session(store: &Store, project: Option<&str>) -> Session {
+        let mut session = store
+            .create_session(project, Some("Review"), &video_only())
+            .unwrap();
+        session.status = "ready".into();
+        store.save_session(&session).unwrap();
+        session
+    }
+    #[test]
+    fn section_order_persists_and_rejects_incomplete_duplicate_or_unknown_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let a = store.create_project("A").unwrap();
+        let b = store.create_project("B").unwrap();
+        let order = vec![b.id.clone(), a.id.clone()];
+        store.reorder_projects(&order).unwrap();
+        let reopened = Store::open(dir.path().into()).unwrap();
+        assert_eq!(
+            reopened
+                .projects()
+                .unwrap()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>(),
+            order
+        );
+        for invalid in [
+            vec![a.id.clone()],
+            vec![a.id.clone(), a.id.clone()],
+            vec![a.id.clone(), Uuid::new_v4().to_string()],
+        ] {
+            assert!(store.reorder_projects(&invalid).is_err());
+        }
+        let c = store.create_project("C").unwrap();
+        assert_eq!(
+            store
+                .projects()
+                .unwrap()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>(),
+            vec![b.id.clone(), a.id.clone(), c.id]
+        );
+        store.delete_project(&b.id).unwrap();
+        assert_eq!(store.projects().unwrap()[0].id, a.id);
+    }
+    #[test]
+    fn deleting_a_section_unassigns_all_members_and_preserves_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let project = store.create_project("Category").unwrap();
+        let other = store.create_project("Other").unwrap();
+        let first = ready_session(&store, Some(&project.id));
+        let second = ready_session(&store, Some(&project.id));
+        let untouched = ready_session(&store, Some(&other.id));
+        for session in [&first, &second] {
+            let folder = store.session_dir(&session.id).unwrap();
+            fs::write(folder.join("video.mp4"), b"original video bytes").unwrap();
+            fs::write(folder.join("transcript.json"), b"original transcript bytes").unwrap();
+        }
+        store.delete_project(&project.id).unwrap();
+        assert!(store.project(&project.id).is_err());
+        for original in [&first, &second] {
+            let updated = store.session(&original.id).unwrap();
+            assert!(updated.project_id.is_none());
+            assert_eq!(updated.folder_path, original.folder_path);
+            assert_eq!(
+                fs::read(store.session_dir(&original.id).unwrap().join("video.mp4")).unwrap(),
+                b"original video bytes"
+            );
+            assert_eq!(
+                fs::read(
+                    store
+                        .session_dir(&original.id)
+                        .unwrap()
+                        .join("transcript.json")
+                )
+                .unwrap(),
+                b"original transcript bytes"
+            );
+        }
+        assert_eq!(
+            store.session(&untouched.id).unwrap().project_id.as_deref(),
+            Some(other.id.as_str())
+        );
+        assert_eq!(store.sessions(None).unwrap().len(), 3);
+    }
+    #[test]
+    fn active_members_block_section_and_session_deletion_before_any_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let project = store.create_project("Category").unwrap();
+        let ready = ready_session(&store, Some(&project.id));
+        let mut active = store
+            .create_session(Some(&project.id), None, &video_only())
+            .unwrap();
+        for status in ["recording", "processing"] {
+            active.status = status.into();
+            store.save_session(&active).unwrap();
+            assert!(store.delete_project(&project.id).is_err());
+            assert!(store.delete_session(&active.id).is_err());
+            assert_eq!(
+                store.session(&ready.id).unwrap().project_id.as_deref(),
+                Some(project.id.as_str())
+            );
+            assert!(store.project(&project.id).is_ok());
+            assert!(store.session_dir(&active.id).unwrap().exists());
+        }
+    }
+    #[test]
+    fn deleting_a_session_removes_all_owned_files_and_ignores_metadata_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let mut session = ready_session(&store, None);
+        let other = ready_session(&store, None);
+        let outside = dir.path().join("outside.mp4");
+        fs::write(&outside, b"do not delete").unwrap();
+        session.folder_path = dir.path().to_string_lossy().into();
+        session.video_path = Some(outside.to_string_lossy().into());
+        store.save_session(&session).unwrap();
+        let folder = store.session_dir(&session.id).unwrap();
+        fs::create_dir(folder.join("exports")).unwrap();
+        fs::write(folder.join("video.mp4"), b"recording").unwrap();
+        fs::write(folder.join("exports").join("clip.mp4"), b"clip").unwrap();
+        assert!(store.delete_session("../outside").is_err());
+        assert!(store.delete_session(&Uuid::new_v4().to_string()).is_err());
+        store.delete_session(&session.id).unwrap();
+        assert!(!folder.exists());
+        assert_eq!(store.sessions(None).unwrap().len(), 1);
+        assert!(store.session(&other.id).is_ok());
+        assert_eq!(fs::read(outside).unwrap(), b"do not delete");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn locked_media_keeps_session_metadata_for_retrying_deletion() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = ready_session(&store, None);
+        let folder = store.session_dir(&session.id).unwrap();
+        let media = folder.join("video.mp4");
+        fs::write(&media, b"locked recording").unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&media)
+            .unwrap();
+        assert!(store.delete_session(&session.id).is_err());
+        assert!(store.session(&session.id).is_ok());
+        drop(handle);
+        assert_eq!(fs::read(&media).unwrap(), b"locked recording");
+        store.delete_session(&session.id).unwrap();
+        assert!(!folder.exists());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn deletion_rejects_session_and_nested_junctions_without_touching_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let session = ready_session(&store, None);
+        let folder = store.session_dir(&session.id).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"external content").unwrap();
+        let link = folder.join("linked");
+        let create_junction = |link: &Path, target: &Path| {
+            use std::os::windows::process::CommandExt;
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        create_junction(&link, &outside);
+        assert!(store.delete_session(&session.id).is_err());
+        assert!(store.session(&session.id).is_ok());
+        assert_eq!(
+            fs::read(outside.join("keep.txt")).unwrap(),
+            b"external content"
+        );
+        fs::remove_dir(&link).unwrap(); // Remove the junction itself, never its target.
+        let displaced = dir.path().join("displaced-session");
+        fs::rename(&folder, &displaced).unwrap();
+        create_junction(&folder, &displaced);
+        assert!(store.delete_session(&session.id).is_err());
+        assert!(displaced.join("session.json").is_file());
+        fs::remove_dir(&folder).unwrap();
     }
     #[test]
     fn unassigned_recordings_can_be_grouped_without_moving_media() {

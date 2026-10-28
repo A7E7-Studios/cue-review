@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import type { Marker, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
 
-const mocks=vi.hoisted(()=>({backend:{projects:vi.fn(),sessions:vi.fn(),session:vi.fn(),transcript:vi.fn(),markers:vi.fn(),setup:vi.fn(),status:vi.fn(),sources:vi.fn(),microphones:vi.fn(),preview:vi.fn(),stopPreview:vi.fn(),createProject:vi.fn(),renameProject:vi.fn(),renameSession:vi.fn(),moveSession:vi.fn(),start:vi.fn(),stop:vi.fn(),addMarker:vi.fn(),handoff:vi.fn(),openFolder:vi.fn(),mute:vi.fn(),retry:vi.fn(),installTranscription:vi.fn()},setTheme:vi.fn().mockResolvedValue(undefined),setAlwaysOnTop:vi.fn().mockResolvedValue(undefined),setSize:vi.fn().mockResolvedValue(undefined),setMinSize:vi.fn().mockResolvedValue(undefined)}));
+const mocks=vi.hoisted(()=>({backend:{projects:vi.fn(),sessions:vi.fn(),session:vi.fn(),transcript:vi.fn(),markers:vi.fn(),setup:vi.fn(),status:vi.fn(),sources:vi.fn(),microphones:vi.fn(),preview:vi.fn(),stopPreview:vi.fn(),createProject:vi.fn(),renameProject:vi.fn(),renameSession:vi.fn(),moveSession:vi.fn(),reorderProjects:vi.fn(),deleteProject:vi.fn(),deleteSession:vi.fn(),start:vi.fn(),stop:vi.fn(),addMarker:vi.fn(),handoff:vi.fn(),openFolder:vi.fn(),mute:vi.fn(),retry:vi.fn(),installTranscription:vi.fn()},setTheme:vi.fn().mockResolvedValue(undefined),setAlwaysOnTop:vi.fn().mockResolvedValue(undefined),setSize:vi.fn().mockResolvedValue(undefined),setMinSize:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('./backend',()=>({backend:mocks.backend,videoUrl:(path:string)=>`asset://${path}`}));
 vi.mock('@tauri-apps/api/core',()=>({isTauri:()=>true}));
 vi.mock('@tauri-apps/api/window',()=>({getCurrentWindow:()=>({setTheme:mocks.setTheme,setAlwaysOnTop:mocks.setAlwaysOnTop,setSize:mocks.setSize,setMinSize:mocks.setMinSize,innerSize:async()=>({width:1280,height:820}),scaleFactor:async()=>1})}));
@@ -40,6 +40,9 @@ beforeEach(()=>{
   backend.renameProject.mockImplementation(async(id:string,name:string)=>{projects=projects.map(item=>item.id===id?{...item,name}:item);});
   backend.renameSession.mockImplementation(async(id:string,name:string)=>{sessions=sessions.map(item=>item.id===id?{...item,name}:item);});
   backend.moveSession.mockImplementation(async(id:string,projectId:string|null)=>{sessions=sessions.map(item=>item.id===id?{...item,projectId}:item);return sessions.find(item=>item.id===id)!;});
+  backend.reorderProjects.mockImplementation(async(ids:string[])=>{projects=ids.map(id=>projects.find(item=>item.id===id)!);});
+  backend.deleteProject.mockImplementation(async(id:string)=>{projects=projects.filter(item=>item.id!==id);sessions=sessions.map(item=>item.projectId===id?{...item,projectId:null}:item);});
+  backend.deleteSession.mockImplementation(async(id:string)=>{sessions=sessions.filter(item=>item.id!==id);});
   backend.start.mockImplementation(async(projectId:string|null)=>{const session={...newSession('s2'),projectId,name:'New recording',autoTitle:true,status:'recording' as const};sessions.push(session);status={state:'recording',sessionId:'s2',elapsedMs:3000,audioLevel:.4};return session;});
   backend.stop.mockImplementation(async()=>{const next={...sessions.find(item=>item.id==='s2')!,status:'processing' as const};sessions=sessions.map(item=>item.id===next.id?next:item);status={state:'processing',sessionId:next.id};return next;});
   backend.addMarker.mockImplementation(async(_id:string,timeMs:number,label:string)=>{const marker={id:'m1',timeMs,label};markers.push(marker);return marker;});
@@ -257,9 +260,9 @@ describe('project and session workflows',()=>{
     await user.type(screen.getByLabelText('Name'),'Beta product');await user.click(screen.getByRole('button',{name:'Save'}));
     await screen.findByRole('button',{name:'Beta product'});
     expect(backend.createProject).toHaveBeenCalledWith('Beta product');
-    await user.click(screen.getByRole('button',{name:'Rename section Beta product'}));
+    await user.click(screen.getByRole('button',{name:'Section options for Beta product'}));await user.click(screen.getByRole('menuitem',{name:'Rename'}));
     await user.clear(screen.getByLabelText('Name'));await user.type(screen.getByLabelText('Name'),'Beta review');await user.click(screen.getByRole('button',{name:'Save'}));
-    await screen.findByRole('button',{name:'Rename section Beta review'});
+    await screen.findByRole('button',{name:'Section options for Beta review'});
     expect(backend.renameProject).toHaveBeenCalledWith('p2','Beta review');
     await user.click(screen.getByRole('button',{name:'Record'}));await screen.findByRole('button',{name:'Stop'});
     expect(backend.start).toHaveBeenCalledWith(null,null,'display1','mic1',false,false);
@@ -271,6 +274,118 @@ describe('project and session workflows',()=>{
     await waitFor(()=>expect(screen.getByRole('heading',{level:1})).toHaveTextContent('Playback regression'));
     expect(backend.renameSession).toHaveBeenCalledWith('s1','Playback regression');
     expect(screen.getByRole('button',{name:'Seek to here at 0:02'})).toBeVisible();
+  });
+});
+
+describe('section ordering and deletion',()=>{
+  it('persists section dragging separately from recording moves and preserves playback',async()=>{
+    projects.push({id:'p2',name:'Second section',createdAt:timestamp});
+    const user=await review();await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));
+    const media=document.querySelector('video');
+    const dataTransfer={setData:vi.fn(),effectAllowed:'',dropEffect:''};
+    fireEvent.dragStart(screen.getByRole('button',{name:'Second section'}),{dataTransfer});
+    const target=screen.getByRole('region',{name:'Section: Project Alpha'});
+    fireEvent.dragOver(target,{dataTransfer,clientY:-1});expect(target).toHaveClass('insert-before');
+    fireEvent.drop(target,{dataTransfer,clientY:-1});
+    await waitFor(()=>expect(backend.reorderProjects).toHaveBeenCalledWith(['p2','p1']));
+    await waitFor(()=>expect(screen.getByRole('button',{name:'Second section'})).toBeEnabled());
+    expect([...document.querySelectorAll('[data-section-id]')].map(item=>item.getAttribute('data-section-id'))).toEqual(['p2','p1']);
+    expect(backend.moveSession).not.toHaveBeenCalled();
+    expect(document.querySelector('video')).toBe(media);expect(media?.currentTime).toBe(2.5);
+    fireEvent.dragStart(screen.getByRole('button',{name:'Second section'}),{dataTransfer});
+    fireEvent.drop(screen.getByRole('region',{name:'Recents'}),{dataTransfer});
+    await waitFor(()=>expect(backend.reorderProjects).toHaveBeenLastCalledWith(['p1','p2']));
+  });
+  it('offers keyboard section ordering and keeps the current order if saving fails',async()=>{
+    projects.push({id:'p2',name:'Second section',createdAt:timestamp});
+    const user=await ready();
+    await user.click(screen.getByRole('button',{name:'Section options for Project Alpha'}));
+    expect(screen.getByRole('menuitem',{name:'Move up'})).toBeDisabled();
+    backend.reorderProjects.mockRejectedValueOnce('Cannot save section order.');
+    await user.click(screen.getByRole('menuitem',{name:'Move down'}));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Cannot save section order');
+    expect([...document.querySelectorAll('[data-section-id]')].map(item=>item.getAttribute('data-section-id'))).toEqual(['p1','p2']);
+    await user.click(screen.getByRole('button',{name:'Section options for Project Alpha'}));
+    await user.click(screen.getByRole('menuitem',{name:'Move down'}));
+    await waitFor(()=>expect([...document.querySelectorAll('[data-section-id]')].map(item=>item.getAttribute('data-section-id'))).toEqual(['p2','p1']));
+  });
+  it('deletes a section directly, returning every recording to Recents without deleting or resetting playback',async()=>{
+    sessions.push({...newSession('s2'),name:'Another recording'});
+    const user=await review();await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));
+    const media=document.querySelector('video');
+    await user.click(screen.getByRole('button',{name:'Section options for Project Alpha'}));
+    await user.click(screen.getByRole('menuitem',{name:'Delete section…'}));
+    await waitFor(()=>expect(screen.queryByRole('region',{name:'Section: Project Alpha'})).not.toBeInTheDocument());
+    const recents=within(screen.getByRole('region',{name:'Recents'}));
+    expect(recents.getByRole('button',{name:'Review Alpha'})).toBeVisible();expect(recents.getByRole('button',{name:'Another recording'})).toBeVisible();
+    expect(backend.deleteProject).toHaveBeenCalledWith('p1');expect(backend.deleteSession).not.toHaveBeenCalled();
+    expect(document.querySelector('video')).toBe(media);expect(media?.currentTime).toBe(2.5);
+    expect(document.querySelector('.meta')).not.toHaveTextContent('Project Alpha');
+  });
+  it('refreshes membership after a partial section-delete failure without losing selected playback',async()=>{
+    sessions.push({...newSession('s2'),name:'Another recording'});
+    const user=await review();const media=document.querySelector('video');
+    backend.deleteProject.mockImplementationOnce(async()=>{sessions=sessions.map(item=>item.id==='s1'?{...item,projectId:null}:item);throw Error('Could not finish moving all recordings.');});
+    await user.click(screen.getByRole('button',{name:'Section options for Project Alpha'}));
+    await user.click(screen.getByRole('menuitem',{name:'Delete section…'}));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not finish moving all recordings');
+    await waitFor(()=>expect(document.querySelector('.meta')).not.toHaveTextContent('Project Alpha'));
+    expect(within(screen.getByRole('region',{name:'Recents'})).getByRole('button',{name:'Review Alpha'})).toBeVisible();
+    expect(within(screen.getByRole('region',{name:'Section: Project Alpha'})).getByRole('button',{name:'Another recording'})).toBeVisible();
+    expect(document.querySelector('video')).toBe(media);
+  });
+  it('blocks deleting a section with an in-progress recording while allowing an unrelated section',async()=>{
+    projects.push({id:'p2',name:'Empty section',createdAt:timestamp});sessions=[{...newSession(),status:'processing'}];
+    const user=await ready();await user.click(screen.getByRole('button',{name:'Section options for Project Alpha'}));
+    expect(screen.getByRole('menuitem',{name:'Delete section…'})).toBeDisabled();
+    await user.keyboard('{Escape}');await user.click(screen.getByRole('button',{name:'Section options for Empty section'}));
+    expect(screen.getByRole('menuitem',{name:'Delete section…'})).toBeEnabled();
+  });
+  it('names the recording in a permanent-delete confirmation and supports cancelling without touching files',async()=>{
+    const user=await review();const media=document.querySelector('video');
+    await user.click(screen.getByRole('button',{name:'Recording options'}));await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));
+    const confirmation=screen.getByRole('alertdialog',{name:'Delete recording?'});
+    expect(confirmation).toHaveTextContent('Review Alpha');expect(confirmation).toHaveTextContent('all its files');expect(confirmation).toHaveTextContent('cannot be undone');
+    expect(screen.getByRole('button',{name:'Cancel'})).toHaveFocus();
+    await user.keyboard('{Control>}r{/Control}');expect(backend.start).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button',{name:'Cancel'}));
+    expect(backend.deleteSession).not.toHaveBeenCalled();expect(document.querySelector('video')).toBe(media);
+  });
+  it('releases the selected media file before deleting and returns to a fresh recording',async()=>{
+    const load=vi.spyOn(HTMLMediaElement.prototype,'load').mockImplementation(()=>{});
+    const user=await review();const media=document.querySelector('video')!;
+    backend.deleteSession.mockImplementationOnce(async(id:string)=>{expect(media.hasAttribute('src')).toBe(false);expect(load).toHaveBeenCalled();sessions=sessions.filter(item=>item.id!==id);});
+    await user.click(screen.getByRole('button',{name:'Recording options'}));await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));await user.click(screen.getByRole('button',{name:'Delete recording'}));
+    await waitFor(()=>expect(screen.getByRole('heading',{level:1})).toHaveTextContent('New recording'));
+    expect(backend.deleteSession).toHaveBeenCalledWith('s1');expect(document.querySelector('[data-session-id="s1"]')).toBeNull();expect(document.querySelector('video')).toBeNull();
+    load.mockRestore();
+  });
+  it('restores the selected video and playback position if deletion fails',async()=>{
+    const load=vi.spyOn(HTMLMediaElement.prototype,'load').mockImplementation(()=>{});
+    const user=await review();await user.click(screen.getByRole('button',{name:'Seek to here at 0:02'}));const media=document.querySelector('video');
+    backend.deleteSession.mockRejectedValueOnce('Recording files are still in use.');
+    await user.click(screen.getByRole('button',{name:'Recording options'}));await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));await user.click(screen.getByRole('button',{name:'Delete recording'}));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Recording files are still in use');
+    await waitFor(()=>expect(document.querySelector('video')).not.toBe(media));
+    const restored=document.querySelector('video')!;expect(restored).toHaveAttribute('src','asset://C:/recordings/video.mp4');fireEvent.loadedMetadata(restored);expect(restored.currentTime).toBe(2.5);
+    await user.click(screen.getByRole('button',{name:'Cancel'}));expect(screen.getByRole('heading',{level:1})).toHaveTextContent('Review Alpha');load.mockRestore();
+  });
+  it('deletes an inactive recording without unloading the selected recording',async()=>{
+    sessions.push({...newSession('s2'),name:'Another recording'});
+    const user=await review();const media=document.querySelector('video');
+    await user.click(within(document.querySelector('[data-session-id="s2"]') as HTMLElement).getByRole('button',{name:'Recording options'}));
+    await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));await user.click(screen.getByRole('button',{name:'Delete recording'}));
+    await waitFor(()=>expect(document.querySelector('[data-session-id="s2"]')).toBeNull());
+    expect(backend.deleteSession).toHaveBeenCalledWith('s2');expect(document.querySelector('video')).toBe(media);expect(screen.getByRole('heading',{level:1})).toHaveTextContent('Review Alpha');
+  });
+  it('preserves the deletion failure detail if a partially removed video cannot reload',async()=>{
+    const load=vi.spyOn(HTMLMediaElement.prototype,'load').mockImplementation(()=>{});
+    const user=await review();const media=document.querySelector('video');
+    backend.deleteSession.mockRejectedValueOnce('Some files were removed. Delete this recording again to finish.');
+    await user.click(screen.getByRole('button',{name:'Recording options'}));await user.click(screen.getByRole('menuitem',{name:'Delete recording…'}));await user.click(screen.getByRole('button',{name:'Delete recording'}));
+    await waitFor(()=>expect(document.querySelector('video')).not.toBe(media));fireEvent.error(document.querySelector('video')!);
+    expect(screen.getByRole('alert')).toHaveTextContent('Some files were removed');
+    expect(screen.getByRole('button',{name:'Delete recording'})).toBeEnabled();load.mockRestore();
   });
 });
 

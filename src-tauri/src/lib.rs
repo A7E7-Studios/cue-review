@@ -178,22 +178,67 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>) {
 }
 #[tauri::command]
 fn list_projects(s: CmdState<'_>) -> Result<Vec<Project>, String> {
+    let _runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     s.store.projects()
 }
 #[tauri::command]
 fn create_project(s: CmdState<'_>, name: String) -> Result<Project, String> {
+    let _runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     s.store.create_project(&name)
 }
 #[tauri::command]
 fn rename_project(s: CmdState<'_>, id: String, name: String) -> Result<Project, String> {
+    let _runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     s.store.rename_project(&id, &name)
 }
 #[tauri::command]
+fn reorder_projects(s: CmdState<'_>, ids: Vec<String>) -> Result<(), String> {
+    let _runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    s.store.reorder_projects(&ids)
+}
+fn ensure_session_not_in_use(runtime: &Runtime, id: &str) -> Result<(), String> {
+    if runtime.processing.as_deref() == Some(id)
+        || runtime
+            .active
+            .as_ref()
+            .is_some_and(|(session, _)| session.id == id)
+    {
+        return Err("Finish recording and processing before changing this recording.".into());
+    }
+    Ok(())
+}
+fn delete_section_from_store(s: &Shared, id: &str) -> Result<(), String> {
+    // Keep start/retry and other library mutations from racing the metadata updates.
+    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    for session in s.store.sessions(Some(id))? {
+        ensure_session_not_in_use(&runtime, &session.id)?;
+    }
+    s.store.delete_project(id)
+}
+fn delete_session_from_store(s: &Shared, id: &str) -> Result<(), String> {
+    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    ensure_session_not_in_use(&runtime, id)?;
+    s.store.delete_session(id)
+}
+#[tauri::command]
+async fn delete_project(s: CmdState<'_>, id: String) -> Result<(), String> {
+    let s = s.inner().clone();
+    blocking(move || delete_section_from_store(&s, &id)).await
+}
+#[tauri::command]
+async fn delete_session(s: CmdState<'_>, id: String) -> Result<(), String> {
+    let s = s.inner().clone();
+    blocking(move || delete_session_from_store(&s, &id)).await
+}
+#[tauri::command]
 fn list_sessions(s: CmdState<'_>, project_id: Option<String>) -> Result<Vec<Session>, String> {
+    let _runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     s.store.sessions(project_id.as_deref())
 }
 #[tauri::command]
 fn rename_session(s: CmdState<'_>, id: String, name: String) -> Result<Session, String> {
+    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    ensure_session_not_in_use(&runtime, &id)?;
     s.store.rename_session(&id, &name)
 }
 #[tauri::command]
@@ -202,6 +247,8 @@ fn move_session(
     id: String,
     project_id: Option<String>,
 ) -> Result<Session, String> {
+    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    ensure_session_not_in_use(&runtime, &id)?;
     s.store.move_session(&id, project_id.as_deref())
 }
 #[tauri::command]
@@ -440,15 +487,16 @@ async fn stop_recording(s: CmdState<'_>) -> Result<Session, String> {
 async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> {
     let s = s.inner().clone();
     blocking(move || {
-        let mut session = s.store.session(&id)?;
-        {
+        let mut session = {
             let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
             if runtime.active.is_some() || runtime.processing.is_some() {
                 return Err("Finish the current job first.".into());
             }
+            let session = s.store.session(&id)?;
             runtime.processing = Some(id.clone());
             runtime.last_error = None;
-        }
+            session
+        };
         let job = ProcessingJob {
             state: s.clone(),
             id,
@@ -550,9 +598,12 @@ pub fn run() {
             list_projects,
             create_project,
             rename_project,
+            reorder_projects,
+            delete_project,
             list_sessions,
             rename_session,
             move_session,
+            delete_session,
             get_session,
             get_transcript,
             get_markers,
@@ -612,6 +663,42 @@ mod orchestration_tests {
             inference: Mutex::new(()),
             preview: Mutex::new(preview::Preview::default()),
         })
+    }
+    #[test]
+    fn deletion_waits_for_runtime_ownership_even_after_metadata_is_ready() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path().into());
+        let section = state.store.create_project("Keep recordings").unwrap();
+        let mut session = state
+            .store
+            .create_session(
+                Some(&section.id),
+                None,
+                &CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: None,
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        session.status = "ready".into();
+        state.store.save_session(&session).unwrap();
+        state.runtime.lock().unwrap().processing = Some(session.id.clone());
+        assert!(delete_session_from_store(&state, &session.id).is_err());
+        assert!(delete_section_from_store(&state, &section.id).is_err());
+        assert!(state.store.session(&session.id).is_ok());
+        assert!(state.store.project(&section.id).is_ok());
+        state.runtime.lock().unwrap().processing = None;
+        delete_section_from_store(&state, &section.id).unwrap();
+        assert!(state
+            .store
+            .session(&session.id)
+            .unwrap()
+            .project_id
+            .is_none());
+        delete_session_from_store(&state, &session.id).unwrap();
+        assert!(!state.store.session_dir(&session.id).unwrap().exists());
     }
     #[test]
     fn unreadable_session_releases_processing_job() {
