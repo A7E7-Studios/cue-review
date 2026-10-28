@@ -447,6 +447,7 @@ impl Store {
             microphone_id: config.microphone_id.clone(),
             system_audio: config.system_audio,
             takes: Vec::new(),
+            source_identity: None,
         };
         self.save_session(&s)?;
         Ok(s)
@@ -563,23 +564,48 @@ impl Store {
     /// Startup repair after a crash or forced close. Sessions recorded before
     /// takes existed keep the v0.1 behavior; sessions with takes go through
     /// [`crate::takes::recover`], which repairs each take on its own.
-    pub fn recover_interrupted(&self) -> Result<(), String> {
-        for listed in self.sessions(None)? {
-            if !listed.takes.is_empty() {
-                crate::takes::recover(self, &listed.id)?;
+    ///
+    /// A session that cannot be read or repaired is skipped, so one damaged
+    /// recording never keeps the app from starting. Returns one message per
+    /// skipped session; only an unreadable sessions folder is an error.
+    pub fn recover_interrupted(&self) -> Result<Vec<String>, String> {
+        let mut skipped = Vec::new();
+        for entry in fs::read_dir(self.root.join("sessions")).map_err(|e| e.to_string())? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    skipped.push(format!("A recording folder could not be listed: {error}"));
+                    continue;
+                }
+            };
+            let file = entry.path().join("session.json");
+            if !file.is_file() {
                 continue;
             }
-            if matches!(listed.status.as_str(), "recording" | "processing") {
-                let video = self.session_dir(&listed.id)?.join("video.mp4");
-                self.update_session(&listed.id, |s| {
-                    s.status = "error".into();
-                    s.error = Some("The app closed before this session finished. Original media is retained in the session folder; retry transcription if video is available.".into());
-                    if video.is_file() {
-                        s.video_path = Some(video.to_string_lossy().into());
-                    }
-                    Ok(())
-                })?;
+            if let Err(error) = self.recover_one(&file) {
+                skipped.push(format!(
+                    "Recording {} was not recovered: {error}",
+                    entry.file_name().to_string_lossy()
+                ));
             }
+        }
+        Ok(skipped)
+    }
+    fn recover_one(&self, file: &Path) -> Result<(), String> {
+        let listed: Session = read_json(file)?;
+        if !listed.takes.is_empty() {
+            return crate::takes::recover(self, &listed.id);
+        }
+        if matches!(listed.status.as_str(), "recording" | "processing") {
+            let video = self.session_dir(&listed.id)?.join("video.mp4");
+            self.update_session(&listed.id, |s| {
+                s.status = "error".into();
+                s.error = Some("The app closed before this session finished. Original media is retained in the session folder; retry transcription if video is available.".into());
+                if video.is_file() {
+                    s.video_path = Some(video.to_string_lossy().into());
+                }
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -924,6 +950,26 @@ mod tests {
         assert!(reopened.create_project("\n").is_err());
     }
     #[test]
+    fn recovery_skips_a_damaged_session_and_repairs_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let interrupted = store.create_session(None, None, &video_only()).unwrap();
+        let damaged = Uuid::new_v4().to_string();
+        let folder = store.session_dir(&damaged).unwrap();
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("session.json"), b"{\"id\": \"torn").unwrap();
+        // A folder without metadata is not a session at all.
+        fs::create_dir(store.root.join("sessions").join("not-a-session")).unwrap();
+        let skipped = store.recover_interrupted().unwrap();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].contains(&damaged), "{}", skipped[0]);
+        assert_eq!(store.session(&interrupted.id).unwrap().status, "error");
+        assert_eq!(
+            fs::read(folder.join("session.json")).unwrap(),
+            b"{\"id\": \"torn"
+        );
+    }
+    #[test]
     fn markers_reject_out_of_range() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
@@ -987,11 +1033,13 @@ mod tests {
         // Nested writes on the same thread do not deadlock.
         store.rename_session(&session.id, "Nested").unwrap();
         let other = ready_session(&store, None);
+        // Timed from before the spawn: however late the thread starts, its
+        // rename can only finish after `outer` is dropped, 150 ms from now.
+        let started = Instant::now();
         let waiter = {
             let store = store.clone();
             let id = session.id.clone();
             std::thread::spawn(move || {
-                let started = Instant::now();
                 store.rename_session(&id, "After release").unwrap();
                 started.elapsed()
             })
@@ -1001,7 +1049,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(store.session(&session.id).unwrap().name, "Nested");
         drop(outer);
-        assert!(waiter.join().unwrap() >= Duration::from_millis(100));
+        assert!(waiter.join().unwrap() >= Duration::from_millis(150));
         assert_eq!(store.session(&session.id).unwrap().name, "After release");
         assert!(store.lock_session("../outside").is_err());
         // A failed change writes nothing and releases the lock.

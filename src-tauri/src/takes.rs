@@ -3,9 +3,9 @@
 //! Take N is recorded into `sessions/<id>/takes/<N>/`, and the legacy root
 //! files are take 1. Each take starts at the validated duration of the
 //! combined `video.mp4` before it. When a take stops, its own `video.mp4` is
-//! appended to the combined file with the ffconcat demuxer (video copied, audio
-//! re-encoded), and only that take is transcribed, shifted by its offset, with
-//! `t{N}-` segment ids. The shared types live in [`crate::models`]:
+//! appended to the combined file with the ffconcat demuxer (video copied,
+//! audio encoded once from every take's lossless `audio.wav`), and only that
+//! take is transcribed, shifted by its offset, with `t{N}-` segment ids. The shared types live in [`crate::models`]:
 //! [`Take`], [`TakeStatus`] and [`TakeMark`].
 //!
 //! Status of a take:
@@ -21,12 +21,14 @@
 
 use crate::{
     deps,
-    models::{Segment, Session, Take, TakeMark, TakeStatus, Transcript},
+    models::{Segment, Session, SourceIdentity, Take, TakeMark, TakeStatus, Transcript},
     store::{read_json, write_json, Store},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    ffi::OsString,
+    fmt::Write as _,
     fs, io,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -36,6 +38,11 @@ use std::{
 /// The combined recording every take is appended to.
 pub const ROOT_VIDEO: &str = "video.mp4";
 const TAKE_VIDEO: &str = "video.mp4";
+/// A take's lossless mixed audio, which every rebuild of the combined audio
+/// reads, so no take's audio is encoded more than once.
+const LOSSLESS_AUDIO: &str = "audio.wav";
+/// Sample rate of the combined audio track.
+const AUDIO_RATE: u64 = 48_000;
 /// A take re-encoded to the combined video's size, only when they differ.
 const NORMALIZED_VIDEO: &str = "normalized.mp4";
 /// Names a validated combined file that is waiting to replace `video.mp4`.
@@ -45,8 +52,6 @@ const SWAP_LOG: &str = "swap.log";
 const SWAP_BACKOFF_MS: [u64; 6] = [100, 200, 400, 800, 1500, 3000];
 const STARTUP_BACKOFF_MS: [u64; 3] = [100, 200, 400];
 const MAX_TOLERANCE_MS: u64 = 150;
-
-type Probe<'a> = &'a dyn Fn(&Path) -> Result<Media, String>;
 
 /// Folder of take `index`: the session folder for take 1, `takes/<N>` after.
 pub fn take_dir(session_dir: &Path, index: u32) -> PathBuf {
@@ -258,6 +263,33 @@ pub fn check_can_record_more(session: &Session) -> Result<(), String> {
     }
     Ok(())
 }
+/// What Record more says when the session's window or display is gone, or
+/// its id now names something else.
+pub const SOURCE_GONE: &str = "The original window/display for this recording is no longer available. Start a new recording to capture another source.";
+/// Record more captures the session's source again only while it is what
+/// was first recorded. `current` is what `session.source_id` names now (see
+/// [`crate::capture::source_identity`]): a window's title, process and class,
+/// or a display's device name and bounds, must equal the stored identity.
+/// A session recorded before identities were stored may continue a display
+/// that still exists, but never a window, whose handle can belong to any
+/// window after a restart. Other sources (devices, cameras) are not checked.
+pub fn check_source(session: &Session, current: Option<&SourceIdentity>) -> Result<(), String> {
+    let id = session.source_id.as_str();
+    let display = id.starts_with("monitor:");
+    if !display && !id.starts_with("window:") {
+        return Ok(());
+    }
+    let same = match (&session.source_identity, current) {
+        (Some(stored), Some(current)) => stored == current,
+        (None, Some(SourceIdentity::Display { .. })) => display,
+        _ => false,
+    };
+    if same {
+        Ok(())
+    } else {
+        Err(SOURCE_GONE.into())
+    }
+}
 /// Takes a Retry works on: the unfinished ones, or every take on the
 /// timeline when none is unfinished.
 pub fn retry_plan(session: &Session) -> Vec<u32> {
@@ -394,17 +426,17 @@ pub fn finish_capture(
     index: u32,
     stopped: Result<(), String>,
 ) -> Result<Session, String> {
-    finish_capture_with(store, id, index, stopped, &probe)
+    finish_capture_with(store, id, index, stopped, &Ffmpeg)
 }
 fn finish_capture_with(
     store: &Store,
     id: &str,
     index: u32,
     stopped: Result<(), String>,
-    probe: Probe<'_>,
+    tools: &dyn Tools,
 ) -> Result<Session, String> {
     let video = take_dir(&store.session_dir(id)?, index).join(TAKE_VIDEO);
-    match (stopped, probe(&video)) {
+    match (stopped, tools.probe(&video)) {
         (stopped, Err(unreadable)) => {
             let cause = stopped.err().unwrap_or(unreadable);
             store.update_session(id, |session| {
@@ -452,16 +484,27 @@ pub fn set_status(
 /// transcribing. On failure the take stays swapping for Retry or the next
 /// start.
 pub fn complete_swap(store: &Store, id: &str, index: u32) -> Result<Session, String> {
+    complete_swap_with(store, id, index, &Ffmpeg, &SWAP_BACKOFF_MS)
+}
+fn complete_swap_with(
+    store: &Store,
+    id: &str,
+    index: u32,
+    tools: &dyn Tools,
+    backoff: &[u64],
+) -> Result<Session, String> {
     let session = store.session(id)?;
-    let take = list(&session)
-        .into_iter()
+    let takes = list(&session);
+    let take = takes
+        .iter()
         .find(|take| take.index == index && index >= 2)
+        .cloned()
         .ok_or_else(|| format!("Take {index} is not part of this recording."))?;
     if take.status != TakeStatus::Swapping {
         return Err(format!("Take {index} is not waiting to be added."));
     }
     let dir = store.session_dir(id)?;
-    let combined = swap_media(&dir, &take, &SWAP_BACKOFF_MS, true, &probe)?
+    let combined = swap_media(&dir, &takes, &take, backoff, true, tools)?
         .ok_or_else(|| format!("Take {index} could not be added to the recording."))?;
     store.update_session(id, |session| {
         session.duration_ms = combined;
@@ -475,16 +518,18 @@ pub fn complete_swap(store: &Store, id: &str, index: u32) -> Result<Session, Str
 }
 
 /// Startup repair for a session with takes:
-/// - recording or finalizing → interrupted, raw tracks kept, earlier takes intact;
+/// - recording → interrupted, raw tracks kept, earlier takes intact;
+/// - finalizing → swapping when the take's own `video.mp4` was finished and
+///   probes as valid, so Retry adds it; otherwise interrupted, as recording;
 /// - swapping → `video.mp4`'s duration says whether the swap happened; a
 ///   validated combined file still waiting is moved into place, otherwise the
 ///   take stays swapping for Retry;
 /// - transcribing → error, so Retry transcribes only that take;
 /// - stray `video.*.tmp.mp4` files are deleted.
 pub fn recover(store: &Store, id: &str) -> Result<(), String> {
-    recover_with(store, id, &probe, &STARTUP_BACKOFF_MS)
+    recover_with(store, id, &Ffmpeg, &STARTUP_BACKOFF_MS)
 }
-fn recover_with(store: &Store, id: &str, probe: Probe<'_>, backoff: &[u64]) -> Result<(), String> {
+fn recover_with(store: &Store, id: &str, tools: &dyn Tools, backoff: &[u64]) -> Result<(), String> {
     let dir = store.session_dir(id)?;
     let _lock = store.lock_session(id)?;
     let mut session = store.session(id)?;
@@ -499,14 +544,25 @@ fn recover_with(store: &Store, id: &str, probe: Probe<'_>, backoff: &[u64]) -> R
         .filter_map(|take| read_pending(&dir, take.index).map(|pending| pending.temp))
         .collect();
     remove_stray_files(&dir, &keep);
+    let all = list(&session);
     let mut combined = None;
     let mut changed = false;
     for take in &mut session.takes {
         let next = match take.status {
+            TakeStatus::Finalizing if take.index >= 2 => {
+                match tools.probe(&take_dir(&dir, take.index).join(TAKE_VIDEO)) {
+                    // Finalized before the app closed: only the swap is left.
+                    Ok(media) => {
+                        take.duration_ms = media.duration_ms;
+                        Some(TakeStatus::Swapping)
+                    }
+                    Err(_) => Some(TakeStatus::Interrupted),
+                }
+            }
             TakeStatus::Recording | TakeStatus::Finalizing => Some(TakeStatus::Interrupted),
             TakeStatus::Transcribing => Some(TakeStatus::Error),
             TakeStatus::Swapping if take.index >= 2 => {
-                match swap_media(&dir, take, backoff, false, probe) {
+                match swap_media(&dir, &all, take, backoff, false, tools) {
                     // In the combined video now; transcription waits for Retry.
                     Ok(Some(duration_ms)) => {
                         combined = Some(duration_ms);
@@ -584,6 +640,12 @@ impl VideoFormat {
             && self.height == other.height
             && self.pix_fmt == other.pix_fmt
             && self.frame_rate == other.frame_rate
+    }
+    /// Whether this stream's packets can follow `base`'s in one stream copy.
+    /// The MP4 track keeps only the first file's codec setup (SPS/PPS), so a
+    /// take normalized by another encoder build must not be copied after it.
+    fn copies_after(&self, base: &Self) -> bool {
+        self.compatible(base) && self.profile == base.profile && self.extradata == base.extradata
     }
 }
 fn parse_probe(value: &Value) -> Result<Media, String> {
@@ -772,14 +834,14 @@ fn clear_pending(dir: &Path, index: u32) {
 }
 /// A combined video left by an attempt whose replace was refused, if it is
 /// still intact. Anything else it names is removed.
-fn pending_temp(dir: &Path, take: &Take, probe: Probe<'_>) -> Option<PathBuf> {
+fn pending_temp(dir: &Path, take: &Take, tools: &dyn Tools) -> Option<PathBuf> {
     let pending = read_pending(dir, take.index)?;
     let path = dir.join(&pending.temp);
     let intact = path
         .metadata()
         .is_ok_and(|meta| meta.len() == pending.bytes)
         && pending.expected_ms == take.offset_ms + take.duration_ms
-        && probe(&path).is_ok_and(|media| {
+        && tools.probe(&path).is_ok_and(|media| {
             swap_state(media.duration_ms, take.offset_ms, take.duration_ms) == SwapState::Applied
         });
     if intact {
@@ -789,7 +851,10 @@ fn pending_temp(dir: &Path, take: &Take, probe: Probe<'_>) -> Option<PathBuf> {
     clear_pending(dir, take.index);
     None
 }
-/// After a verified swap only the take's lossless audio tracks remain.
+/// After a verified swap the take's own video copies go: its `video.mp4`, a
+/// leftover `normalized.mp4`, the capture's `native-video.*` intermediate and
+/// the live transcription scratch in `live/`. Its lossless audio tracks,
+/// timing and cursor track stay.
 fn remove_take_video(dir: &Path, index: u32) {
     if index < 2 {
         return;
@@ -798,19 +863,88 @@ fn remove_take_video(dir: &Path, index: u32) {
     for name in [TAKE_VIDEO, NORMALIZED_VIDEO] {
         let _ = fs::remove_file(folder.join(name));
     }
+    if let Ok(entries) = fs::read_dir(&folder) {
+        for entry in entries.flatten() {
+            let native = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("native-video."));
+            if native && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    let live = folder.join("live");
+    if fs::symlink_metadata(&live).is_ok_and(|meta| meta.is_dir()) {
+        let _ = fs::remove_dir_all(live);
+    }
     clear_pending(dir, index);
 }
-/// Makes the combined video contain `take`. Returns its new duration, or
-/// `None` when `rebuild` is false and no validated combined file is waiting.
+/// Drops take `index` (2 or later), which never joined the combined video,
+/// usually because adding it keeps failing. The take becomes interrupted and
+/// its folder keeps everything it recorded; a combined file still waiting for
+/// it is deleted. The session settles, to ready unless another take needs
+/// work, so Record more and transcription work again, and the transcript
+/// gets the take dividers of the takes left on the timeline.
+pub fn discard(store: &Store, id: &str, index: u32) -> Result<Session, String> {
+    if index < 2 {
+        return Err("Take 1 is the original recording and cannot be discarded.".into());
+    }
+    let dir = store.session_dir(id)?;
+    // One lock for the session and its transcript.
+    let _lock = store.lock_session(id)?;
+    let session = store.update_session(id, |session| {
+        if matches!(session.status.as_str(), "recording" | "processing") {
+            return Err("Finish recording and processing before discarding a take.".into());
+        }
+        let take = take_mut(session, index)?;
+        match take.status {
+            TakeStatus::Swapping => (),
+            TakeStatus::Interrupted => {
+                return Err(format!("Take {index} is already discarded."));
+            }
+            status if on_timeline(status) => {
+                return Err(format!(
+                    "Take {index} is already part of the recording and cannot be discarded."
+                ));
+            }
+            _ => return Err(format!("Take {index} is still being recorded.")),
+        }
+        take.status = TakeStatus::Interrupted;
+        settle(session, None);
+        Ok(())
+    })?;
+    if let Some(pending) = read_pending(&dir, index) {
+        let _ = fs::remove_file(dir.join(pending.temp));
+    }
+    clear_pending(&dir, index);
+    let _ = fs::remove_file(take_dir(&dir, index).join(NORMALIZED_VIDEO));
+    let _ = fs::remove_file(dir.join(format!("concat-t{index}.ffconcat")));
+    let mut transcript = store.transcript(id)?;
+    let marks = marks(&list(&session));
+    let segments = transcript.segments.len();
+    transcript
+        .segments
+        .retain(|segment| segment_take(&segment.id) != index);
+    if transcript.takes != marks || transcript.segments.len() != segments {
+        transcript.takes = marks;
+        store.save_transcript(id, &transcript)?;
+    }
+    Ok(session)
+}
+/// Makes the combined video contain `take`, one of `takes`. Returns its new
+/// duration, or `None` when `rebuild` is false and no validated combined
+/// file is waiting.
 fn swap_media(
     dir: &Path,
+    takes: &[Take],
     take: &Take,
     backoff_ms: &[u64],
     rebuild: bool,
-    probe: Probe<'_>,
+    tools: &dyn Tools,
 ) -> Result<Option<u64>, String> {
     let root = dir.join(ROOT_VIDEO);
-    let current = probe(&root)?;
+    let current = tools.probe(&root)?;
     let expected = take.offset_ms + take.duration_ms;
     match swap_state(current.duration_ms, take.offset_ms, take.duration_ms) {
         SwapState::Applied => {
@@ -820,15 +954,15 @@ fn swap_media(
         }
         SwapState::Unknown => {
             return Err(format!(
-                "video.mp4 lasts {} ms, which matches neither the recording before take {} ({} ms) nor the recording with it ({expected} ms). The take's files are kept in takes/{}.",
+                "video.mp4 lasts {} ms, which matches neither the recording before take {} ({} ms) nor the recording with it ({expected} ms). The take's files are kept in takes/{}; discard the take to keep using the recording.",
                 current.duration_ms, take.index, take.offset_ms, take.index
             ))
         }
         SwapState::Pending => (),
     }
-    let temp = match pending_temp(dir, take, probe) {
+    let temp = match pending_temp(dir, take, tools) {
         Some(temp) => temp,
-        None if rebuild => build(dir, take, &current, probe)?,
+        None if rebuild => build(dir, takes, take, &current, tools)?,
         None => return Ok(None),
     };
     match replace_with_retry(
@@ -867,7 +1001,7 @@ fn swap_media(
             ));
         }
     }
-    let combined = probe(&root)?;
+    let combined = tools.probe(&root)?;
     if swap_state(combined.duration_ms, take.offset_ms, take.duration_ms) != SwapState::Applied {
         return Err(format!(
             "After adding take {}, video.mp4 lasts {} ms instead of {expected} ms.",
@@ -876,6 +1010,174 @@ fn swap_media(
     }
     remove_take_video(dir, take.index);
     Ok(Some(combined.duration_ms))
+}
+
+/// The FFmpeg work behind a swap. [`Ffmpeg`] runs the installed tools; tests
+/// substitute fakes, so the swap logic runs without them.
+trait Tools {
+    /// Duration, video format and audio presence of a recording.
+    fn probe(&self, path: &Path) -> Result<Media, String>;
+    /// Re-encodes `source` to `base`'s size (placed as `fit`), frame rate
+    /// and pixel format, writing `target`.
+    fn normalize(
+        &self,
+        source: &Path,
+        target: &Path,
+        base: &VideoFormat,
+        fit: &Fit,
+        log: &Path,
+    ) -> Result<(), String>;
+    /// Writes `job.output`.
+    fn combine(&self, job: &Combine, log: &Path) -> Result<(), String>;
+    /// Decodes about a second on each side of the boundary at `boundary_ms`.
+    fn verify_boundary(&self, path: &Path, boundary_ms: u64, take_ms: u64) -> Result<(), String>;
+}
+/// The installed FFmpeg and ffprobe.
+struct Ffmpeg;
+impl Tools for Ffmpeg {
+    fn probe(&self, path: &Path) -> Result<Media, String> {
+        probe(path)
+    }
+    fn normalize(
+        &self,
+        source: &Path,
+        target: &Path,
+        base: &VideoFormat,
+        fit: &Fit,
+        log: &Path,
+    ) -> Result<(), String> {
+        normalize(source, target, base, fit, log)
+    }
+    fn combine(&self, job: &Combine, log: &Path) -> Result<(), String> {
+        let mut ffmpeg = deps::command("ffmpeg")?;
+        ffmpeg.args(combine_args(job));
+        run_ffmpeg(ffmpeg, log, "Adding the take to the recording")
+    }
+    fn verify_boundary(&self, path: &Path, boundary_ms: u64, take_ms: u64) -> Result<(), String> {
+        verify_boundary(path, boundary_ms, take_ms)
+    }
+}
+
+/// How a new combined video is written from an ffconcat list of the current
+/// combined video and the take.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Combine {
+    /// The ffconcat script, in the session folder.
+    list: PathBuf,
+    /// `None` stream-copies the video. When the take's codec setup differs
+    /// even after normalization, the whole video is re-encoded instead, in
+    /// this pixel format.
+    encode_video: Option<String>,
+    /// Every take's lossless audio with its exact length on the timeline, in
+    /// timeline order, encoded to AAC once. Empty when an earlier take has
+    /// none: the listed videos' AAC audio is re-encoded instead.
+    audio: Vec<(PathBuf, u64)>,
+    output: PathBuf,
+}
+/// FFmpeg's arguments for `job`.
+fn combine_args(job: &Combine) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::new();
+    let mut push = |items: &[&str]| args.extend(items.iter().map(OsString::from));
+    // -copyts keeps the first file's timestamps. Without it the AAC priming
+    // packet's negative start shifts the whole video by about 21 ms.
+    push(&[
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-copyts",
+        "-f",
+        "concat",
+        "-i",
+    ]);
+    args.push(job.list.clone().into());
+    let audio = if job.audio.is_empty() {
+        "0:a:0".to_owned()
+    } else {
+        let mut graph = String::new();
+        for (input, (path, duration_ms)) in job.audio.iter().enumerate() {
+            args.extend(["-i".into(), path.clone().into()]);
+            // Exactly the take's length: trimmed or padded with silence.
+            let samples = duration_ms * AUDIO_RATE / 1000;
+            let _ = write!(
+                graph,
+                "[{}:a:0]aresample={AUDIO_RATE},aformat=channel_layouts=mono,atrim=end_sample={samples},apad=whole_len={samples}[t{input}];",
+                input + 1
+            );
+        }
+        for input in 0..job.audio.len() {
+            let _ = write!(graph, "[t{input}]");
+        }
+        let _ = write!(graph, "concat=n={}:v=0:a=1[audio]", job.audio.len());
+        args.extend(["-filter_complex".into(), graph.into()]);
+        "[audio]".to_owned()
+    };
+    let mut push = |items: &[&str]| args.extend(items.iter().map(OsString::from));
+    push(&["-map", "0:v:0", "-map", audio.as_str()]);
+    match &job.encode_video {
+        None => push(&["-c:v", "copy"]),
+        Some(pix_fmt) => push(&[
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            pix_fmt.as_str(),
+        ]),
+    }
+    push(&[
+        "-c:a",
+        "aac",
+        "-ac",
+        "1",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
+    ]);
+    args.push(job.output.clone().into());
+    args
+}
+/// Each take's lossless `audio.wav` with its length on the timeline: every
+/// take on the timeline up to `take`'s offset, then `take` itself. Empty
+/// when any is missing, as for takes recorded before lossless audio was kept.
+fn lossless_audio(dir: &Path, takes: &[Take], take: &Take) -> Vec<(PathBuf, u64)> {
+    let mut earlier: Vec<&Take> = takes
+        .iter()
+        .filter(|other| {
+            other.index != take.index
+                && on_timeline(other.status)
+                && other.offset_ms < take.offset_ms
+        })
+        .collect();
+    earlier.sort_by_key(|other| other.offset_ms);
+    if earlier.first().is_none_or(|first| first.offset_ms != 0) {
+        return Vec::new();
+    }
+    let mut audio: Vec<(PathBuf, u64)> = earlier
+        .iter()
+        .enumerate()
+        .map(|(i, other)| {
+            let end = earlier
+                .get(i + 1)
+                .map_or(take.offset_ms, |next| next.offset_ms);
+            (
+                take_dir(dir, other.index).join(LOSSLESS_AUDIO),
+                end - other.offset_ms,
+            )
+        })
+        .collect();
+    audio.push((
+        take_dir(dir, take.index).join(LOSSLESS_AUDIO),
+        take.duration_ms,
+    ));
+    if audio.iter().all(|(path, ms)| *ms > 0 && path.is_file()) {
+        audio
+    } else {
+        Vec::new()
+    }
 }
 fn run_ffmpeg(mut command: Command, log: &Path, what: &str) -> Result<(), String> {
     let file = fs::File::create(log).map_err(|e| e.to_string())?;
@@ -1064,91 +1366,75 @@ fn verify_boundary(path: &Path, boundary_ms: u64, take_ms: u64) -> Result<(), St
     Ok(())
 }
 /// Writes and validates `video.<uuid>.tmp.mp4`: the combined video followed
-/// by the take, with the take starting at exactly its offset.
-fn build(dir: &Path, take: &Take, base: &Media, probe: Probe<'_>) -> Result<PathBuf, String> {
+/// by the take, with the take starting at exactly its offset. `takes` lists
+/// the session's takes, whose lossless audio becomes the new audio track.
+fn build(
+    dir: &Path,
+    takes: &[Take],
+    take: &Take,
+    base: &Media,
+    tools: &dyn Tools,
+) -> Result<PathBuf, String> {
     let index = take.index;
     let folder = take_dir(dir, index);
     let log = folder.join(SWAP_LOG);
-    let own = probe(&folder.join(TAKE_VIDEO))
-        .map_err(|e| format!("Take {index}'s own video is unavailable: {e}"))?;
-    if !base.audio || !own.audio {
-        return Err(format!(
-            "Take {index} or the recording before it has no audio track."
-        ));
-    }
-    let source = if own.video == base.video {
-        TAKE_VIDEO
-    } else {
-        // A copied stream must keep the first file's size and codec setup.
-        let placed = fit(
-            own.video.width,
-            own.video.height,
-            base.video.width,
-            base.video.height,
-        );
-        normalize(
-            &folder.join(TAKE_VIDEO),
-            &folder.join(NORMALIZED_VIDEO),
-            &base.video,
-            &placed,
-            &log,
-        )?;
-        record_normalization(
-            &folder.join("capture-timing.json"),
-            &placed,
-            base.video.width,
-            base.video.height,
-        )?;
-        let normalized = probe(&folder.join(NORMALIZED_VIDEO))?;
-        if !normalized.video.compatible(&base.video) || !normalized.audio {
+    let normalized = folder.join(NORMALIZED_VIDEO);
+    let list = dir.join(format!("concat-t{index}.ffconcat"));
+    let temp = dir.join(format!("video.{}.tmp.mp4", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let own = tools
+            .probe(&folder.join(TAKE_VIDEO))
+            .map_err(|e| format!("Take {index}'s own video is unavailable: {e}"))?;
+        if !base.audio || !own.audio {
             return Err(format!(
-                "Take {index} could not be matched to the recording's video format."
+                "Take {index} or the recording before it has no audio track."
             ));
         }
-        NORMALIZED_VIDEO
-    };
-    let take_source = Path::new("takes").join(index.to_string()).join(source);
-    let list = ffconcat_list(&[
-        (Path::new(ROOT_VIDEO), take.offset_ms),
-        (&take_source, take.duration_ms),
-    ])?;
-    let list_path = dir.join(format!("concat-t{index}.ffconcat"));
-    fs::write(&list_path, list).map_err(|e| e.to_string())?;
-    let temp = dir.join(format!("video.{}.tmp.mp4", uuid::Uuid::new_v4()));
-    let mut ffmpeg = deps::command("ffmpeg")?;
-    // -copyts keeps the first file's timestamps. Without it the AAC priming
-    // packet's negative start shifts the whole timeline by about 21 ms.
-    ffmpeg
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-copyts",
-            "-f",
-            "concat",
-            "-i",
-        ])
-        .arg(&list_path)
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-ac",
-            "1",
-            "-b:a",
-            "160k",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(&temp);
-    let result = run_ffmpeg(ffmpeg, &log, "Adding the take to the recording").and_then(|()| {
-        let combined = probe(&temp)?;
+        let (source, appended) = if own.video == base.video {
+            (TAKE_VIDEO, own.video)
+        } else {
+            // A copied stream must keep the first file's size and codec setup.
+            let placed = fit(
+                own.video.width,
+                own.video.height,
+                base.video.width,
+                base.video.height,
+            );
+            tools.normalize(
+                &folder.join(TAKE_VIDEO),
+                &normalized,
+                &base.video,
+                &placed,
+                &log,
+            )?;
+            record_normalization(
+                &folder.join("capture-timing.json"),
+                &placed,
+                base.video.width,
+                base.video.height,
+            )?;
+            let resized = tools.probe(&normalized)?;
+            if !resized.video.compatible(&base.video) || !resized.audio {
+                return Err(format!(
+                    "Take {index} could not be matched to the recording's video format."
+                ));
+            }
+            (NORMALIZED_VIDEO, resized.video)
+        };
+        let take_source = Path::new("takes").join(index.to_string()).join(source);
+        let script = ffconcat_list(&[
+            (Path::new(ROOT_VIDEO), take.offset_ms),
+            (&take_source, take.duration_ms),
+        ])?;
+        fs::write(&list, script).map_err(|e| e.to_string())?;
+        let job = Combine {
+            list: list.clone(),
+            encode_video: (!appended.copies_after(&base.video)).then(|| base.video.pix_fmt.clone()),
+            audio: lossless_audio(dir, takes, take),
+            output: temp.clone(),
+        };
+        tools.combine(&job, &log)?;
+        let combined = tools.probe(&temp)?;
         if !combined.audio
             || swap_state(combined.duration_ms, take.offset_ms, take.duration_ms)
                 != SwapState::Applied
@@ -1159,9 +1445,11 @@ fn build(dir: &Path, take: &Take, base: &Media, probe: Probe<'_>) -> Result<Path
                 take.offset_ms + take.duration_ms
             ));
         }
-        verify_boundary(&temp, take.offset_ms, take.duration_ms)
-    });
-    let _ = fs::remove_file(&list_path);
+        tools.verify_boundary(&temp, take.offset_ms, take.duration_ms)
+    })();
+    // The validated combined file already holds the take; nothing else is kept.
+    let _ = fs::remove_file(&list);
+    let _ = fs::remove_file(&normalized);
     match result {
         Ok(()) => Ok(temp),
         Err(error) => {
@@ -1201,14 +1489,74 @@ mod tests {
         fs::write(dir.join(ROOT_VIDEO), duration_ms.to_string()).unwrap();
         session
     }
-    /// Stands in for ffprobe: a fake media file holds its duration in ms.
+    /// Stands in for ffprobe: a fake media file holds its duration in ms,
+    /// optionally followed by its frame size and its codec setup, as in
+    /// `"1500 320x240 setup-a"`.
     fn fake_probe(path: &Path) -> Result<Media, String> {
         let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let mut fields = text.split_whitespace();
+        let duration_ms = fields
+            .next()
+            .and_then(|ms| ms.parse().ok())
+            .ok_or("not media")?;
+        let mut video = VideoFormat::default();
+        if let Some((width, height)) = fields.next().and_then(|size| size.split_once('x')) {
+            video.width = width.parse().map_err(|_| "bad width")?;
+            video.height = height.parse().map_err(|_| "bad height")?;
+        }
+        video.extradata = fields.next().unwrap_or_default().into();
         Ok(Media {
-            duration_ms: text.trim().parse().map_err(|_| "not media".to_string())?,
-            video: VideoFormat::default(),
+            duration_ms,
+            video,
             audio: true,
         })
+    }
+    /// Stands in for FFmpeg on fake media files: normalizing keeps the
+    /// duration and takes the base size, combining writes the total duration
+    /// of the ffconcat list. Every combine job is kept.
+    #[derive(Default)]
+    struct Fake {
+        jobs: std::sync::Mutex<Vec<Combine>>,
+        /// The codec setup a normalized take comes out with.
+        normalized_setup: String,
+        fail_combine: bool,
+    }
+    impl Tools for Fake {
+        fn probe(&self, path: &Path) -> Result<Media, String> {
+            fake_probe(path)
+        }
+        fn normalize(
+            &self,
+            source: &Path,
+            target: &Path,
+            base: &VideoFormat,
+            _fit: &Fit,
+            _log: &Path,
+        ) -> Result<(), String> {
+            let own = fake_probe(source)?;
+            let resized = format!(
+                "{} {}x{} {}",
+                own.duration_ms, base.width, base.height, self.normalized_setup
+            );
+            fs::write(target, resized).map_err(|e| e.to_string())
+        }
+        fn combine(&self, job: &Combine, _log: &Path) -> Result<(), String> {
+            self.jobs.lock().unwrap().push(job.clone());
+            if self.fail_combine {
+                return Err("Adding the take to the recording failed.".into());
+            }
+            let script = fs::read_to_string(&job.list).map_err(|e| e.to_string())?;
+            let total: f64 = script
+                .lines()
+                .filter_map(|line| line.strip_prefix("duration "))
+                .map(|seconds| seconds.parse::<f64>().unwrap())
+                .sum();
+            fs::write(&job.output, ((total * 1000.0).round() as u64).to_string())
+                .map_err(|e| e.to_string())
+        }
+        fn verify_boundary(&self, _: &Path, _: u64, _: u64) -> Result<(), String> {
+            Ok(())
+        }
     }
     fn take(index: u32, offset_ms: u64, duration_ms: u64, status: TakeStatus) -> Take {
         Take {
@@ -1513,14 +1861,15 @@ mod tests {
 
         // Clean stop: the probed take duration wins over the wall clock.
         fs::write(take_dir(&dir, 2).join(TAKE_VIDEO), "1500").unwrap();
-        let stopped = finish_capture_with(&store, id, 2, Ok(()), &fake_probe).unwrap();
+        let stopped = finish_capture_with(&store, id, 2, Ok(()), &Fake::default()).unwrap();
         assert_eq!(stopped.status, "processing");
         assert_eq!(stopped.takes[1].status, TakeStatus::Swapping);
         assert_eq!(stopped.takes[1].duration_ms, 1500);
 
         // A capture error with a usable take video waits for Retry.
-        let error = finish_capture_with(&store, id, 2, Err("Source closed".into()), &fake_probe)
-            .unwrap_err();
+        let error =
+            finish_capture_with(&store, id, 2, Err("Source closed".into()), &Fake::default())
+                .unwrap_err();
         assert_eq!(error, "Source closed");
         let saved = store.session(id).unwrap();
         assert_eq!(saved.status, "error");
@@ -1531,7 +1880,7 @@ mod tests {
         // No usable take video: interrupted, earlier takes intact, raw tracks kept.
         fs::remove_file(take_dir(&dir, 2).join(TAKE_VIDEO)).unwrap();
         fs::write(take_dir(&dir, 2).join("mic.wav"), b"raw").unwrap();
-        let error = finish_capture_with(&store, id, 2, Ok(()), &fake_probe).unwrap_err();
+        let error = finish_capture_with(&store, id, 2, Ok(()), &Fake::default()).unwrap_err();
         assert!(error.contains("Take 2 could not be saved"), "{error}");
         let saved = store.session(id).unwrap();
         assert_eq!(saved.status, "ready");
@@ -1868,7 +2217,7 @@ mod tests {
 
         // recording → interrupted; the session is ready again with take 1 intact.
         let (recording, dir) = crashed(&store, "recording", second(TakeStatus::Recording), 2000);
-        recover_with(&store, &recording, &fake_probe, &[]).unwrap();
+        recover_with(&store, &recording, &Fake::default(), &[]).unwrap();
         let session = store.session(&recording).unwrap();
         assert_eq!(
             (session.status.as_str(), session.error.as_deref()),
@@ -1879,10 +2228,27 @@ mod tests {
         assert_eq!(session.duration_ms, 2000);
         assert!(take_dir(&dir, 2).join("mic.wav").is_file());
 
-        // finalizing → interrupted, raw tracks kept.
+        // finalizing with a finished take video → swapping, for Retry to add it.
+        let (finalized, dir) = crashed(&store, "processing", second(TakeStatus::Finalizing), 2000);
+        fs::write(take_dir(&dir, 2).join(TAKE_VIDEO), "1520").unwrap();
+        recover_with(&store, &finalized, &Fake::default(), &[]).unwrap();
+        let session = store.session(&finalized).unwrap();
+        assert_eq!(session.takes[1].status, TakeStatus::Swapping);
+        assert_eq!(session.takes[1].duration_ms, 1520);
+        assert_eq!(session.status, "error");
+        assert!(session
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Retry to finish adding it"));
+        assert_eq!(retry_plan(&session), [2]);
+        assert_eq!(session.duration_ms, 2000);
+
+        // finalizing without a usable take video → interrupted, raw tracks kept.
         let (finalizing, dir) = crashed(&store, "processing", second(TakeStatus::Finalizing), 2000);
         fs::write(take_dir(&dir, 2).join("native-video.mp4"), b"raw").unwrap();
-        recover_with(&store, &finalizing, &fake_probe, &[]).unwrap();
+        fs::write(take_dir(&dir, 2).join(TAKE_VIDEO), b"truncated").unwrap();
+        recover_with(&store, &finalizing, &Fake::default(), &[]).unwrap();
         let session = store.session(&finalizing).unwrap();
         assert_eq!(session.status, "ready");
         assert_eq!(session.takes[1].status, TakeStatus::Interrupted);
@@ -1893,7 +2259,7 @@ mod tests {
         // transcribing → error, and Retry covers only that take.
         let (transcribing, _) =
             crashed(&store, "processing", second(TakeStatus::Transcribing), 3500);
-        recover_with(&store, &transcribing, &fake_probe, &[]).unwrap();
+        recover_with(&store, &transcribing, &Fake::default(), &[]).unwrap();
         let session = store.session(&transcribing).unwrap();
         assert_eq!(session.status, "error");
         assert_eq!(session.takes[1].status, TakeStatus::Error);
@@ -1902,7 +2268,7 @@ mod tests {
 
         // swapping, and video.mp4 already includes the take: bookkeeping only.
         let (swapped, dir) = crashed(&store, "processing", second(TakeStatus::Swapping), 3500);
-        recover_with(&store, &swapped, &fake_probe, &[]).unwrap();
+        recover_with(&store, &swapped, &Fake::default(), &[]).unwrap();
         let session = store.session(&swapped).unwrap();
         assert_eq!(session.duration_ms, 3500);
         assert_eq!(session.takes[1].status, TakeStatus::Error);
@@ -1918,7 +2284,7 @@ mod tests {
         let stray = "video.0e1f-stray.tmp.mp4";
         fs::write(dir.join(stray), "9").unwrap();
         fs::write(dir.join("concat-t2.ffconcat"), "ffconcat version 1.0").unwrap();
-        recover_with(&store, &waiting, &fake_probe, &[]).unwrap();
+        recover_with(&store, &waiting, &Fake::default(), &[]).unwrap();
         let session = store.session(&waiting).unwrap();
         assert_eq!(fs::read_to_string(dir.join(ROOT_VIDEO)).unwrap(), "3500");
         assert_eq!(session.duration_ms, 3500);
@@ -1932,7 +2298,7 @@ mod tests {
         // swapping without a waiting file: stays swapping for Retry; strays go.
         let (pending, dir) = crashed(&store, "processing", second(TakeStatus::Swapping), 2000);
         fs::write(dir.join(stray), "9").unwrap();
-        recover_with(&store, &pending, &fake_probe, &[]).unwrap();
+        recover_with(&store, &pending, &Fake::default(), &[]).unwrap();
         let session = store.session(&pending).unwrap();
         assert_eq!(session.takes[1].status, TakeStatus::Swapping);
         assert_eq!(session.status, "error");
@@ -1948,7 +2314,7 @@ mod tests {
         // A waiting file that no longer matches is discarded, not swapped in.
         let (damaged, dir) = crashed(&store, "error", second(TakeStatus::Swapping), 2000);
         waiting_file(&dir, temp, "35");
-        recover_with(&store, &damaged, &fake_probe, &[]).unwrap();
+        recover_with(&store, &damaged, &Fake::default(), &[]).unwrap();
         assert_eq!(fs::read_to_string(dir.join(ROOT_VIDEO)).unwrap(), "2000");
         assert!(!dir.join(temp).exists());
         assert!(!take_dir(&dir, 2).join(PENDING_SWAP).exists());
@@ -1957,7 +2323,7 @@ mod tests {
 
         // swapping, but video.mp4 matches neither duration: nothing is touched.
         let (unknown, dir) = crashed(&store, "processing", second(TakeStatus::Swapping), 2700);
-        recover_with(&store, &unknown, &fake_probe, &[]).unwrap();
+        recover_with(&store, &unknown, &Fake::default(), &[]).unwrap();
         let session = store.session(&unknown).unwrap();
         assert_eq!(session.takes[1].status, TakeStatus::Swapping);
         assert!(take_dir(&dir, 2).join(TAKE_VIDEO).is_file());
@@ -1979,7 +2345,7 @@ mod tests {
             })
             .unwrap();
         let before = fs::read(dir.join("session.json")).unwrap();
-        recover_with(&store, &settled, &fake_probe, &[]).unwrap();
+        recover_with(&store, &settled, &Fake::default(), &[]).unwrap();
         assert_eq!(fs::read(dir.join("session.json")).unwrap(), before);
     }
 
@@ -2027,23 +2393,409 @@ mod tests {
         let swapping = store.session(&id).unwrap().takes[1].clone();
         // Without rebuilding, nothing is waiting yet.
         assert_eq!(
-            swap_media(&dir, &swapping, &[], false, &fake_probe).unwrap(),
+            swap_media(&dir, &[], &swapping, &[], false, &Fake::default()).unwrap(),
             None
         );
         assert!(take_dir(&dir, 2).join(TAKE_VIDEO).is_file());
         fs::write(dir.join(ROOT_VIDEO), "3500").unwrap();
         assert_eq!(
-            swap_media(&dir, &swapping, &[], false, &fake_probe).unwrap(),
+            swap_media(&dir, &[], &swapping, &[], false, &Fake::default()).unwrap(),
             Some(3500)
         );
         assert!(!take_dir(&dir, 2).join(TAKE_VIDEO).exists());
         assert!(take_dir(&dir, 2).join("mic.wav").is_file());
         fs::write(dir.join(ROOT_VIDEO), "9000").unwrap();
-        assert!(swap_media(&dir, &swapping, &[], true, &fake_probe)
-            .unwrap_err()
-            .contains("matches neither"));
+        assert!(
+            swap_media(&dir, &[], &swapping, &[], true, &Fake::default())
+                .unwrap_err()
+                .contains("matches neither")
+        );
         fs::remove_file(dir.join(ROOT_VIDEO)).unwrap();
-        assert!(swap_media(&dir, &swapping, &[], true, &fake_probe).is_err());
+        assert!(swap_media(&dir, &[], &swapping, &[], true, &Fake::default()).is_err());
+    }
+
+    /// A ready session: take 1 (2 s) and take 2 (1.5 s) on the timeline, and
+    /// take 3 (1 s) waiting to be added, all with lossless audio.
+    fn three_takes(store: &Store) -> (String, PathBuf) {
+        let (id, dir) = crashed(
+            store,
+            "processing",
+            vec![
+                take(1, 0, 2000, TakeStatus::Ready),
+                take(2, 2000, 1500, TakeStatus::Ready),
+                take(3, 3500, 1000, TakeStatus::Swapping),
+            ],
+            3500,
+        );
+        fs::write(dir.join(LOSSLESS_AUDIO), b"lossless").unwrap();
+        (id, dir)
+    }
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn completing_a_swap_encodes_every_take_audio_once_and_cleans_up() {
+        let (_dir, store) = store();
+        let (id, dir) = three_takes(&store);
+        let three = take_dir(&dir, 3);
+        fs::write(three.join("native-video.mkv"), b"raw").unwrap();
+        fs::create_dir(three.join("live")).unwrap();
+        fs::write(three.join("live").join("snapshot.wav"), b"scratch").unwrap();
+        fs::write(three.join("cursor.jsonl"), b"{}").unwrap();
+        fs::write(three.join("capture-timing.json"), b"{}").unwrap();
+        let fake = Fake::default();
+        let session = complete_swap_with(&store, &id, 3, &fake, &[]).unwrap();
+        assert_eq!(session.duration_ms, 4500);
+        assert_eq!(session.takes[2].status, TakeStatus::Transcribing);
+        assert_eq!(fs::read_to_string(dir.join(ROOT_VIDEO)).unwrap(), "4500");
+        let jobs = fake.jobs.lock().unwrap();
+        assert_eq!(jobs.len(), 1);
+        // The audio track is rebuilt from every take's lossless audio, each
+        // exactly as long as its place on the timeline; the video is copied.
+        assert_eq!(
+            jobs[0].audio,
+            [
+                (dir.join(LOSSLESS_AUDIO), 2000),
+                (take_dir(&dir, 2).join(LOSSLESS_AUDIO), 1500),
+                (three.join(LOSSLESS_AUDIO), 1000),
+            ]
+        );
+        assert_eq!(jobs[0].encode_video, None);
+        assert_eq!(jobs[0].list, dir.join("concat-t3.ffconcat"));
+        // Only the take's audio, timing and cursor track remain.
+        assert_eq!(
+            files_in(&three),
+            [
+                "audio.wav",
+                "capture-timing.json",
+                "cursor.jsonl",
+                "mic.wav"
+            ]
+        );
+        assert!(!files_in(&dir)
+            .iter()
+            .any(|name| name.ends_with(".tmp.mp4") || name.ends_with(".ffconcat")));
+        // Nothing waits any more.
+        assert!(complete_swap_with(&store, &id, 3, &fake, &[])
+            .unwrap_err()
+            .contains("not waiting"));
+    }
+
+    #[test]
+    fn a_take_without_lossless_audio_falls_back_to_the_video_audio() {
+        let (_dir, store) = store();
+        let (id, dir) = three_takes(&store);
+        fs::remove_file(take_dir(&dir, 2).join(LOSSLESS_AUDIO)).unwrap();
+        let fake = Fake::default();
+        complete_swap_with(&store, &id, 3, &fake, &[]).unwrap();
+        assert!(fake.jobs.lock().unwrap()[0].audio.is_empty());
+
+        // Interrupted takes are not on the timeline and get no slot; take 1's
+        // slot runs up to the next take on the timeline.
+        let takes = [
+            take(1, 0, 2000, TakeStatus::Ready),
+            take(2, 2000, 300, TakeStatus::Interrupted),
+            take(3, 2000, 1500, TakeStatus::Error),
+            take(4, 3500, 800, TakeStatus::Swapping),
+        ];
+        let root = tempfile::tempdir().unwrap();
+        for index in [1, 2, 3, 4] {
+            let folder = take_dir(root.path(), index);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join(LOSSLESS_AUDIO), b"lossless").unwrap();
+        }
+        assert_eq!(
+            lossless_audio(root.path(), &takes, &takes[3]),
+            [
+                (root.path().join(LOSSLESS_AUDIO), 2000),
+                (take_dir(root.path(), 3).join(LOSSLESS_AUDIO), 1500),
+                (take_dir(root.path(), 4).join(LOSSLESS_AUDIO), 800),
+            ]
+        );
+        // Without take 1 at 0 the slots would not cover the timeline.
+        assert!(lossless_audio(root.path(), &takes[2..], &takes[3]).is_empty());
+    }
+
+    #[test]
+    fn a_normalized_take_with_another_codec_setup_re_encodes_the_video() {
+        for (normalized_setup, copied) in [("setup-a", true), ("setup-b", false)] {
+            let (_dir, store) = store();
+            let (id, dir) = three_takes(&store);
+            fs::write(dir.join(ROOT_VIDEO), "3500 320x240 setup-a").unwrap();
+            fs::write(take_dir(&dir, 3).join(TAKE_VIDEO), "1000 256x256 setup-a").unwrap();
+            let fake = Fake {
+                normalized_setup: normalized_setup.into(),
+                ..Fake::default()
+            };
+            complete_swap_with(&store, &id, 3, &fake, &[]).unwrap();
+            let job = fake.jobs.lock().unwrap()[0].clone();
+            assert_eq!(job.encode_video.is_none(), copied, "{normalized_setup}");
+            let script = fs::read_to_string(dir.join(ROOT_VIDEO)).unwrap();
+            assert_eq!(script, "4500");
+            assert!(!take_dir(&dir, 3).join(NORMALIZED_VIDEO).exists());
+        }
+        let base = VideoFormat {
+            codec: "h264".into(),
+            profile: "High".into(),
+            width: 320,
+            height: 240,
+            pix_fmt: "yuv420p".into(),
+            frame_rate: "30/1".into(),
+            extradata: "0164000d".into(),
+        };
+        assert!(base.copies_after(&base));
+        for other in [
+            VideoFormat {
+                extradata: "0164001f".into(),
+                ..base.clone()
+            },
+            VideoFormat {
+                profile: "Main".into(),
+                ..base.clone()
+            },
+            VideoFormat {
+                width: 256,
+                ..base.clone()
+            },
+        ] {
+            assert!(!other.copies_after(&base), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_swap_leaves_no_normalized_or_temporary_files() {
+        let (_dir, store) = store();
+        let (id, dir) = three_takes(&store);
+        fs::write(dir.join(ROOT_VIDEO), "3500 320x240").unwrap();
+        fs::write(take_dir(&dir, 3).join(TAKE_VIDEO), "1000 256x256").unwrap();
+        let fake = Fake {
+            fail_combine: true,
+            ..Fake::default()
+        };
+        let error = complete_swap_with(&store, &id, 3, &fake, &[]).unwrap_err();
+        assert!(error.contains("failed"), "{error}");
+        let three = take_dir(&dir, 3);
+        assert!(!three.join(NORMALIZED_VIDEO).exists());
+        assert!(three.join(TAKE_VIDEO).is_file());
+        assert!(!files_in(&dir)
+            .iter()
+            .any(|name| name.ends_with(".tmp.mp4") || name.ends_with(".ffconcat")));
+        let session = store.session(&id).unwrap();
+        assert_eq!(session.takes[2].status, TakeStatus::Swapping);
+        assert_eq!(
+            fs::read_to_string(dir.join(ROOT_VIDEO)).unwrap(),
+            "3500 320x240"
+        );
+    }
+
+    #[test]
+    fn combining_maps_copied_video_and_one_encode_of_the_lossless_audio() {
+        let job = Combine {
+            list: PathBuf::from("s/concat-t3.ffconcat"),
+            encode_video: None,
+            audio: vec![
+                (PathBuf::from("s/audio.wav"), 2000),
+                (PathBuf::from("s/takes/3/audio.wav"), 1001),
+            ],
+            output: PathBuf::from("s/video.new.tmp.mp4"),
+        };
+        let args: Vec<String> = combine_args(&job)
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let joined = args.join(" ");
+        assert!(joined.starts_with(
+            "-hide_banner -loglevel error -y -copyts -f concat -i s/concat-t3.ffconcat -i s/audio.wav -i s/takes/3/audio.wav -filter_complex "
+        ), "{joined}");
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert_eq!(
+            graph,
+            "[1:a:0]aresample=48000,aformat=channel_layouts=mono,atrim=end_sample=96000,apad=whole_len=96000[t0];\
+             [2:a:0]aresample=48000,aformat=channel_layouts=mono,atrim=end_sample=48048,apad=whole_len=48048[t1];\
+             [t0][t1]concat=n=2:v=0:a=1[audio]"
+        );
+        assert!(joined.ends_with(
+            "-map 0:v:0 -map [audio] -c:v copy -c:a aac -ac 1 -b:a 160k -movflags +faststart s/video.new.tmp.mp4"
+        ), "{joined}");
+
+        // Older takes without lossless audio: the videos' audio, re-encoded.
+        let fallback = Combine {
+            audio: Vec::new(),
+            encode_video: Some("yuv420p".into()),
+            ..job
+        };
+        let joined = combine_args(&fallback)
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!joined.contains("-filter_complex"));
+        assert!(joined.contains(
+            "-map 0:v:0 -map 0:a:0 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a aac"
+        ), "{joined}");
+    }
+
+    #[test]
+    fn discarding_a_stuck_take_drops_it_and_settles_the_session() {
+        let (_dir, store) = store();
+        let (id, dir) = three_takes(&store);
+        store
+            .update_session(&id, |s| {
+                s.status = "error".into();
+                s.error = Some("video.mp4 lasts 2700 ms, which matches neither…".into());
+                Ok(())
+            })
+            .unwrap();
+        // A combined file is waiting, and the transcript has stale marks.
+        let temp = "video.0a1b-waiting.tmp.mp4";
+        fs::write(dir.join(temp), "4500").unwrap();
+        write_json(
+            &take_dir(&dir, 3).join(PENDING_SWAP),
+            &PendingSwap {
+                temp: temp.into(),
+                expected_ms: 4500,
+                bytes: 4,
+            },
+        )
+        .unwrap();
+        fs::write(take_dir(&dir, 3).join(NORMALIZED_VIDEO), "1000").unwrap();
+        let stale = Transcript {
+            segments: vec![
+                segment("segment-0", 100, 900),
+                segment("t2-segment-0", 2100, 2500),
+                segment("t3-segment-0", 3600, 3900),
+            ],
+            takes: vec![TakeMark {
+                index: 1,
+                start_ms: 0,
+            }],
+            ..Default::default()
+        };
+        store.save_transcript(&id, &stale).unwrap();
+        assert!(check_can_record_more(&store.session(&id).unwrap()).is_err());
+
+        let session = discard(&store, &id, 3).unwrap();
+        assert_eq!(session.takes[2].status, TakeStatus::Interrupted);
+        assert_eq!(
+            (session.status.as_str(), session.error.as_deref()),
+            ("ready", None)
+        );
+        assert_eq!(store.session(&id).unwrap().takes, session.takes);
+        assert!(check_can_record_more(&session).is_ok());
+        assert_eq!(retry_plan(&session), [1, 2]);
+        // The take's own files stay; what it was waiting for goes.
+        let three = take_dir(&dir, 3);
+        for kept in [TAKE_VIDEO, LOSSLESS_AUDIO, "mic.wav"] {
+            assert!(three.join(kept).is_file(), "{kept}");
+        }
+        for gone in [PENDING_SWAP, NORMALIZED_VIDEO] {
+            assert!(!three.join(gone).exists(), "{gone}");
+        }
+        assert!(!dir.join(temp).exists());
+        assert_eq!(fs::read_to_string(dir.join(ROOT_VIDEO)).unwrap(), "3500");
+        let transcript = store.transcript(&id).unwrap();
+        assert_eq!(ids(&transcript), ["segment-0", "t2-segment-0"]);
+        assert_eq!(
+            transcript.takes,
+            [
+                TakeMark {
+                    index: 1,
+                    start_ms: 0
+                },
+                TakeMark {
+                    index: 2,
+                    start_ms: 2000
+                }
+            ]
+        );
+
+        // Only a take that waits to be added can be discarded.
+        for (index, error) in [
+            (3, "already discarded"),
+            (2, "already part of the recording"),
+            (1, "Take 1 is the original recording"),
+            (9, "Take 9 is not part of this recording"),
+        ] {
+            let refused = discard(&store, &id, index).unwrap_err();
+            assert!(refused.contains(error), "{index}: {refused}");
+        }
+        store
+            .update_session(&id, |s| {
+                s.status = "processing".into();
+                Ok(())
+            })
+            .unwrap();
+        assert!(discard(&store, &id, 2)
+            .unwrap_err()
+            .contains("Finish recording and processing"));
+    }
+
+    #[test]
+    fn record_more_continues_only_the_source_first_recorded() {
+        let (_dir, store) = store();
+        let mut session = ready(&store, 2000);
+        let window = SourceIdentity::Window {
+            title: "Review — Notes".into(),
+            process: "notes.exe".into(),
+            class: "NotesWindow".into(),
+        };
+        let display = SourceIdentity::Display {
+            device: r"\\.\DISPLAY1".into(),
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let renamed = SourceIdentity::Window {
+            title: "Another document".into(),
+            process: "notes.exe".into(),
+            class: "NotesWindow".into(),
+        };
+        let resized = SourceIdentity::Display {
+            device: r"\\.\DISPLAY1".into(),
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        for (source, stored, current, allowed) in [
+            // Still the same window or display.
+            ("window:4242", Some(&window), Some(&window), true),
+            ("monitor:1", Some(&display), Some(&display), true),
+            // Gone, or the id now names something else.
+            ("window:4242", Some(&window), None, false),
+            ("window:4242", Some(&window), Some(&renamed), false),
+            ("monitor:1", Some(&display), None, false),
+            ("monitor:1", Some(&display), Some(&resized), false),
+            ("monitor:1", Some(&window), Some(&display), false),
+            // Recorded before identities were stored: a display that still
+            // exists is fine, a window never is.
+            ("monitor:1", None, Some(&display), true),
+            ("monitor:1", None, None, false),
+            ("window:4242", None, Some(&window), false),
+            ("window:4242", None, None, false),
+            // Devices and cameras have no identity to check.
+            ("android:R3CN90", None, None, true),
+            ("dshow:Studio camera", None, None, true),
+        ] {
+            session.source_id = source.into();
+            session.source_identity = stored.cloned();
+            let checked = check_source(&session, current);
+            assert_eq!(checked.is_ok(), allowed, "{source} {stored:?} {current:?}");
+            if let Err(error) = checked {
+                assert_eq!(error, SOURCE_GONE);
+            }
+        }
+        assert_eq!(
+            SOURCE_GONE,
+            "The original window/display for this recording is no longer available. Start a new recording to capture another source."
+        );
     }
 
     // ---- Real media (ignored: requires FFmpeg and ffprobe) ----
@@ -2090,6 +2842,21 @@ mod tests {
                 "+faststart",
             ])
             .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The lossless mix every capture keeps beside its video.
+        let output = deps::command("ffmpeg")
+            .unwrap()
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            .arg("-i")
+            .arg(format!("aevalsrc={tone}:s=48000:d={seconds}"))
+            .args(["-t", seconds, "-ac", "1", "-c:a", "pcm_f32le"])
+            .arg(target.with_file_name(LOSSLESS_AUDIO))
             .output()
             .unwrap();
         assert!(
@@ -2185,7 +2952,6 @@ mod tests {
             "1.5",
             "0.5*sin(2*PI*880*t)",
         );
-        fs::write(two.join("audio.wav"), b"lossless").unwrap();
         finish_capture(&store, id, 2, Ok(())).unwrap();
         let session = complete_swap(&store, id, 2).unwrap();
         assert_eq!(session.duration_ms, 3500);
@@ -2310,6 +3076,104 @@ mod tests {
             assert_eq!(retry_plan(&session), [4]);
             assert!(!dir.join(&waiting.temp).exists());
             assert!(is_color(pixel(&root, "4.6", 159, 119), [255, 255, 255]));
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires FFmpeg/ffprobe; appends two lavfi takes and checks that earlier audio is encoded only once"]
+    fn actual_ffmpeg_three_takes_encode_each_take_audio_once() {
+        let (_dir, store) = store();
+        let session = ready(&store, 2000);
+        let id = session.id.as_str();
+        let dir = store.session_dir(id).unwrap();
+        let root = dir.join(ROOT_VIDEO);
+        let ready_again = |index| {
+            set_status(&store, id, index, TakeStatus::Ready).unwrap();
+            store
+                .update_session(id, |s| {
+                    settle(s, None);
+                    Ok(())
+                })
+                .unwrap();
+        };
+        let append = |index: u32, color: &str, seconds: &str, tone: &str| {
+            let base = probe(&root).unwrap().duration_ms;
+            begin(&store, id, base, Some("mic:Studio".into()), false).unwrap();
+            lavfi(
+                &take_dir(&dir, index).join(TAKE_VIDEO),
+                color,
+                "320x240",
+                seconds,
+                tone,
+            );
+            finish_capture(&store, id, index, Ok(())).unwrap();
+            let session = complete_swap(&store, id, index).unwrap();
+            ready_again(index);
+            session.duration_ms
+        };
+        // Each take: a tone for its first second, then silence.
+        lavfi(
+            &root,
+            "red",
+            "320x240",
+            "2",
+            r"if(lt(t\,1)\,0.5*sin(2*PI*440*t)\,0)",
+        );
+        assert_eq!(
+            append(2, "blue", "1.5", r"if(lt(t\,1)\,0.5*sin(2*PI*880*t)\,0)"),
+            3500
+        );
+        let after_two = samples(&root);
+        assert_eq!(append(3, "lime", "1", "0.5*sin(2*PI*660*t)"), 4500);
+        let after_three = samples(&root);
+        assert_eq!(probe(&root).unwrap().duration_ms, 4500);
+        assert!(
+            (after_three.len() as f64 / 48000.0 - 4.5).abs() < 0.03,
+            "{}",
+            after_three.len()
+        );
+
+        // Take 1 and take 2 were not encoded again for take 3: their audio
+        // decodes to the same samples as after take 2.
+        let prefix = (3.3 * 48000.0) as usize;
+        let drift = after_two[..prefix]
+            .iter()
+            .zip(&after_three[..prefix])
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(drift <= 1, "earlier takes changed by up to {drift}");
+
+        // Every take starts at its offset, with its own tone.
+        for (from, offset_ms) in [(1.5, 2000.0), (3.1, 3500.0)] {
+            let onset = after_three
+                .iter()
+                .enumerate()
+                .skip((from * 48000.0) as usize)
+                .find(|(_, s)| s.unsigned_abs() > 3000)
+                .map(|(i, _)| i as f64 / 48.0)
+                .unwrap();
+            assert!(
+                (onset - offset_ms).abs() < 5.0,
+                "take at {offset_ms} ms starts at {onset} ms"
+            );
+        }
+        for (from, to, hz) in [(0.2, 0.8, 440.0), (2.2, 2.8, 880.0), (3.6, 4.4, 660.0)] {
+            let found = frequency(&after_three, from, to);
+            assert!((found - hz).abs() < 15.0, "{from}-{to}s: {found} Hz");
+        }
+        for (at, color) in [
+            ("1.95", [255, 0, 0]),
+            ("2.0", [0, 0, 255]),
+            ("3.45", [0, 0, 255]),
+            ("3.5", [0, 255, 0]),
+        ] {
+            let found = pixel(&root, at, 159, 119);
+            assert!(is_color(found, color), "at {at}s: {found:?}");
+        }
+        // Each take keeps its lossless audio for the next rebuild.
+        for index in [1, 2, 3] {
+            assert!(take_dir(&dir, index).join(LOSSLESS_AUDIO).is_file());
         }
     }
 }

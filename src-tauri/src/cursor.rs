@@ -113,13 +113,14 @@
 use crate::{
     models::{Session, TakeStatus},
     store::Store,
+    takes,
 };
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, BufWriter, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 /// The file name of a take's cursor track.
@@ -564,22 +565,6 @@ impl CursorTrack {
     }
 }
 
-/// `folder` joined with a take's relative folder, refusing anything that
-/// could leave the session folder.
-fn take_dir(folder: &Path, relative: &str) -> Option<PathBuf> {
-    let relative = Path::new(relative);
-    relative
-        .components()
-        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
-        .then(|| folder.join(relative))
-}
-
-fn is_root(relative: &str) -> bool {
-    Path::new(relative)
-        .components()
-        .all(|part| part == Component::CurDir)
-}
-
 /// A take's `capture-timing.json`, when it is readable JSON.
 fn read_timing(dir: &Path) -> Option<serde_json::Value> {
     let bytes = fs::read(dir.join("capture-timing.json")).ok()?;
@@ -611,36 +596,36 @@ fn take_canvas(
 /// Builds the track from a session folder and its `session.json`.
 fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
     // (offset, duration, folder). Interrupted takes are not part of the video.
-    let mut takes: Vec<(u64, u64, &str)> = session
-        .takes
+    // Legacy sessions, or a takes list without take 1, get take 1 from the
+    // root. Folders come from the take index only, never from `Take.folder`,
+    // so a damaged session.json cannot point a reader outside the session.
+    let mut takes: Vec<(u64, u64, PathBuf)> = takes::list(session)
         .iter()
         .filter(|take| take.status != TakeStatus::Interrupted)
-        .map(|take| (take.offset_ms, take.duration_ms, take.folder.as_str()))
+        .map(|take| {
+            (
+                take.offset_ms,
+                take.duration_ms,
+                takes::take_dir(folder, take.index),
+            )
+        })
         .collect();
-    if !session.takes.iter().any(|take| is_root(&take.folder)) {
-        // Legacy sessions, or a takes list without take 1: the root is take 1.
-        let end = session.takes.iter().map(|take| take.offset_ms).min();
-        takes.push((0, end.unwrap_or(session.duration_ms), "."));
-    }
     takes.sort_by_key(|take| take.0);
-    let base = takes.first().and_then(|take| {
-        let dir = take_dir(folder, take.2)?;
-        take_canvas(&dir, read_timing(&dir).as_ref(), None)
-    });
+    let base = takes
+        .first()
+        .and_then(|take| take_canvas(&take.2, read_timing(&take.2).as_ref(), None));
     let mut found = false;
     let mut placed = Vec::new();
-    for (index, &(offset_ms, duration_ms, relative)) in takes.iter().enumerate() {
-        let Some(dir) = take_dir(folder, relative) else {
-            continue;
-        };
+    for (index, (offset_ms, duration_ms, dir)) in takes.iter().enumerate() {
+        let (offset_ms, duration_ms) = (*offset_ms, *duration_ms);
         let Some((header, samples)) = fs::read_to_string(dir.join(FILE_NAME))
             .ok()
             .and_then(|text| decode(&text))
         else {
             continue;
         };
-        let timing = read_timing(&dir);
-        let Some(canvas) = take_canvas(&dir, timing.as_ref(), Some(&header)) else {
+        let timing = read_timing(dir);
+        let Some(canvas) = take_canvas(dir, timing.as_ref(), Some(&header)) else {
             continue;
         };
         found = true;
@@ -1160,9 +1145,6 @@ mod tests {
         let track = load(&store, &id).unwrap();
         assert_eq!(track.at(3_995).unwrap().px, 1);
         assert_eq!(track.at(4_010).unwrap().px, 2);
-        assert_eq!(take_dir(Path::new("/s"), "../escape"), None);
-        assert_eq!(take_dir(Path::new("/s"), "/abs"), None);
-        assert!(is_root(".") && is_root("") && !is_root("takes/1"));
         // An unknown canvas cannot be mapped.
         let files = [(
             ".",
@@ -1171,6 +1153,43 @@ mod tests {
         )];
         let (_root, store, id) = session_with(Vec::new(), 0, &files);
         assert!(load(&store, &id).is_none());
+    }
+
+    #[test]
+    fn take_folders_come_from_the_index_not_from_session_json() {
+        let header = Header::new("display", Some((100, 100)));
+        // A damaged session.json points take 2 at take 3's folder, at the
+        // root and outside the session; only takes/2 is ever read for it.
+        let files = [
+            (".", header.clone(), vec![sample(10, position(1, 1, 0))]),
+            (
+                "takes/2",
+                header.clone(),
+                vec![sample(10, position(2, 2, 0))],
+            ),
+            (
+                "takes/3",
+                header.clone(),
+                vec![sample(10, position(3, 3, 0))],
+            ),
+        ];
+        for folder in ["takes/3", ".", "../escape", "/abs"] {
+            let takes = vec![
+                take(1, 0, 1_000, ".", TakeStatus::Ready),
+                take(2, 1_000, 1_000, folder, TakeStatus::Ready),
+            ];
+            let (_root, store, id) = session_with(takes, 2_000, &files);
+            let track = load(&store, &id).unwrap();
+            assert_eq!(track.at(15).unwrap().px, 1, "{folder}");
+            assert_eq!(track.at(1_015).unwrap().px, 2, "{folder}");
+        }
+        // Take 1 is always the session folder, whatever its entry says.
+        let takes = vec![
+            take(1, 0, 1_000, "takes/3", TakeStatus::Ready),
+            take(2, 1_000, 1_000, "takes/2", TakeStatus::Ready),
+        ];
+        let (_root, store, id) = session_with(takes, 2_000, &files);
+        assert_eq!(load(&store, &id).unwrap().at(15).unwrap().px, 1);
     }
 
     /// Take 1 on a `base` canvas, then take 2 from 1 s on a `canvas`, with

@@ -84,24 +84,43 @@ Session folder: {folder}
 The CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous. Frames and clips are written to new files and never overwrite existing ones. cursor is null or absent when no pointer track was recorded."
     )
 }
+/// `cue transcribe`: transcribes a finished session again.
 pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String> {
-    let mut session = store.session(id)?;
-    if matches!(session.status.as_str(), "recording" | "processing") {
-        return Err("This session is recording or processing. Finish its active job first; reopen CueReview to recover an interrupted session.".into());
-    }
-    // Verify real video before a silent/no-audio session can complete successfully.
-    crate::attach_finished_video(store, &mut session)?;
-    session.status = "processing".into();
-    session.error = None;
-    store.save_session(&session)?;
-    let result = crate::transcribe::transcribe(store, id);
-    session = store.session(id)?;
-    if let Ok(transcript) = &result {
-        Store::apply_auto_title(&mut session, transcript);
-    }
-    session.status = if result.is_ok() { "ready" } else { "error" }.into();
-    session.error = result.as_ref().err().cloned();
-    store.save_session(&session)?;
+    transcribe_existing_with(
+        store,
+        id,
+        crate::attach_finished_video,
+        crate::transcribe::transcribe,
+    )
+}
+/// [`transcribe_existing`] with the video check and the transcription passed
+/// in. Both session writes re-read `session.json` under its lock, so a
+/// concurrent `cue rename` or take update is never overwritten.
+pub(crate) fn transcribe_existing_with(
+    store: &Store,
+    id: &str,
+    attach: impl FnOnce(&Store, &mut Session) -> Result<(), String>,
+    transcribe: impl FnOnce(&Store, &str) -> Result<Transcript, String>,
+) -> Result<Transcript, String> {
+    store.update_session(id, |session| {
+        if matches!(session.status.as_str(), "recording" | "processing") {
+            return Err("This session is recording or processing. Finish its active job first; reopen CueReview to recover an interrupted session.".into());
+        }
+        // Verify real video before a silent/no-audio session can complete successfully.
+        attach(store, session)?;
+        session.status = "processing".into();
+        session.error = None;
+        Ok(())
+    })?;
+    let result = transcribe(store, id);
+    store.update_session(id, |session| {
+        if let Ok(transcript) = &result {
+            Store::apply_auto_title(session, transcript);
+        }
+        session.status = if result.is_ok() { "ready" } else { "error" }.into();
+        session.error = result.as_ref().err().cloned();
+        Ok(())
+    })?;
     result
 }
 
@@ -231,11 +250,38 @@ fn validate_range(duration: u64, start: u64, end: Option<u64>) -> Result<(), Str
     }
     Ok(())
 }
+/// A path given with `--output` or `--output-dir`, made absolute. URLs and
+/// FFmpeg protocol names (`pipe:1`, `tcp://…`, `file:…`) are refused, so an
+/// export only ever goes to a local file. A drive letter is a path.
+fn local_path(path: &Path) -> Result<PathBuf, String> {
+    let text = path.to_string_lossy();
+    let protocol = text.split_once(':').is_some_and(|(name, _)| {
+        name.len() > 1
+            && name.starts_with(|c: char| c.is_ascii_alphabetic())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if protocol || text.contains("://") {
+        return Err(format!(
+            "Use a local file path, not a URL or FFmpeg protocol: {text}. Put ./ before a file name that contains a colon."
+        ));
+    }
+    std::path::absolute(path).map_err(|e| e.to_string())
+}
+/// FFmpeg's argument for a local output file. The `file:` prefix keeps FFmpeg
+/// from reading the path as an option or another protocol.
+fn ffmpeg_file(path: &Path) -> std::ffi::OsString {
+    let mut argument = std::ffi::OsString::from("file:");
+    argument.push(path);
+    argument
+}
 /// The folder exports go to: `requested`, or the session's `exports` folder.
 fn exports_dir(store: &Store, id: &str, requested: Option<&Path>) -> Result<PathBuf, String> {
     let dir = match requested {
-        Some(dir) => std::path::absolute(dir).map_err(|e| e.to_string())?,
-        None => store.session_dir(id)?.join("exports"),
+        Some(dir) => local_path(dir)?,
+        None => std::path::absolute(store.session_dir(id)?.join("exports"))
+            .map_err(|e| e.to_string())?,
     };
     fs::create_dir_all(&dir).map_err(|e| format!("Create {}: {e}", dir.display()))?;
     Ok(dir)
@@ -252,7 +298,7 @@ fn output_path(
     requested: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let path = match requested {
-        Some(path) => path.to_path_buf(),
+        Some(path) => local_path(path)?,
         None => unique_name(&exports_dir(store, id, None)?, at, extension),
     };
     refuse_existing(&path)?;
@@ -334,7 +380,7 @@ fn extract_frame(
     }
     let mut out = cmd
         .args(["-frames:v", "1", "-update", "1"])
-        .arg(path)
+        .arg(ffmpeg_file(path))
         .output()
         .map_err(|e| e.to_string())?;
     // Accurate seeking can land after the last frame's PTS while still inside its
@@ -357,7 +403,7 @@ fn extract_frame(
             ])
             .arg(video)
             .args(["-an", "-vf", &filter, "-frames:v", "1", "-update", "1"])
-            .arg(path)
+            .arg(ffmpeg_file(path))
             .output()
             .map_err(|e| e.to_string())?;
     }
@@ -381,11 +427,16 @@ fn export_frame(
     refuse_existing(&path)?;
     extract_frame(video, session.duration_ms, at, &path, style.max_width)?;
     let cursor = track.and_then(|track| track.at(at));
-    if let (true, Some(point)) = (style.mark_cursor, &cursor) {
-        cursor::mark_png(&path, point, style.max_width)?;
-    }
-    let (width, height) = image::image_dimensions(&path)
-        .map_err(|e| format!("Exported frame could not be read: {e}"))?;
+    let finished = (|| {
+        if let (true, Some(point)) = (style.mark_cursor, &cursor) {
+            cursor::mark_png(&path, point, style.max_width)?;
+        }
+        image::image_dimensions(&path).map_err(|e| format!("Exported frame could not be read: {e}"))
+    })();
+    // A frame that could not be finished is not left behind.
+    let (width, height) = finished.inspect_err(|_| {
+        let _ = fs::remove_file(&path);
+    })?;
     Ok(FrameExport {
         path,
         time_ms: at,
@@ -477,7 +528,7 @@ fn export_batch(
 ) -> Result<Vec<FrameExport>, String> {
     let video = store.session_dir(&session.id)?.join("video.mp4");
     let track = cursor::load(store, &session.id);
-    parallel_map(requests, |(at, segment_id)| {
+    export_all(requests, |(at, segment_id)| {
         export_frame(
             &video,
             session,
@@ -492,8 +543,22 @@ fn export_batch(
         })
         .map_err(|e| format!("Frame at {at} ms: {e}"))
     })
-    .into_iter()
-    .collect()
+}
+/// Runs `export` on every request, keeping their order. When one fails, the
+/// frames the others wrote are deleted too, so a failed batch writes nothing.
+fn export_all<T: Sync>(
+    requests: &[T],
+    export: impl Fn(&T) -> Result<FrameExport, String> + Sync,
+) -> Result<Vec<FrameExport>, String> {
+    let results = parallel_map(requests, export);
+    if let Some(error) = results.iter().find_map(|result| result.as_ref().err()) {
+        let error = error.clone();
+        for written in results.iter().flatten() {
+            let _ = fs::remove_file(&written.path);
+        }
+        return Err(error);
+    }
+    results.into_iter().collect()
 }
 /// `cue frames`: several frames in one call. Every time is validated before
 /// the first export, and every frame gets a new file.
@@ -660,7 +725,7 @@ pub fn clip(
             "-movflags",
             "+faststart",
         ])
-        .arg(&path)
+        .arg(ffmpeg_file(&path))
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -680,7 +745,7 @@ pub fn clip(
             "-of",
             "json",
         ])
-        .arg(&path)
+        .arg(ffmpeg_file(&path))
         .output()
         .map_err(|e| e.to_string())?;
     if !probe.status.success() {
@@ -935,6 +1000,239 @@ mod tests {
             .contains("active job"));
         assert_eq!(store.session(&session.id).unwrap().status, "recording");
     }
+    fn session_in(store: &Store, takes: Vec<crate::models::Take>) -> String {
+        let mut session = store
+            .create_session(
+                None,
+                Some("Before"),
+                &crate::models::CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: Some("mic:Studio".into()),
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        session.status = "error".into();
+        session.takes = takes;
+        store.save_session(&session).unwrap();
+        session.id
+    }
+    /// What `attach_finished_video` records for a 3.5 s video.
+    fn attached(store: &Store, session: &mut Session) -> Result<(), String> {
+        session.video_path = Some(
+            store
+                .session_dir(&session.id)?
+                .join("video.mp4")
+                .to_string_lossy()
+                .into(),
+        );
+        session.duration_ms = 3500;
+        Ok(())
+    }
+
+    #[test]
+    fn transcribing_again_never_loses_a_concurrent_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let id = session_in(&store, Vec::new());
+        let (done, renamed) = std::sync::mpsc::channel();
+        let mut rename = None;
+        let result = transcribe_existing_with(
+            &store,
+            &id,
+            |store, session| {
+                // `cue rename` runs while the video is being checked.
+                let (cli, id, done) = (store.clone(), id.clone(), done.clone());
+                rename = Some(std::thread::spawn(move || {
+                    let result = cli.rename_session(&id, "Renamed from the CLI");
+                    let _ = done.send(());
+                    result
+                }));
+                let _ = renamed.recv_timeout(std::time::Duration::from_millis(300));
+                attached(store, session)
+            },
+            |_, _| {
+                Ok(Transcript {
+                    status: Some("complete".into()),
+                    ..Default::default()
+                })
+            },
+        );
+        assert!(result.is_ok());
+        let rename = rename.unwrap().join().unwrap();
+        let saved = store.session(&id).unwrap();
+        assert_eq!(saved.status, "ready");
+        assert_eq!(saved.duration_ms, 3500);
+        // The rename is either kept or refused, never silently overwritten.
+        match rename {
+            Ok(_) => assert_eq!(saved.name, "Renamed from the CLI"),
+            Err(error) => {
+                assert!(error.contains("Finish recording and processing"), "{error}");
+                assert_eq!(saved.name, "Before");
+            }
+        }
+    }
+
+    #[test]
+    fn transcribing_a_session_with_takes_again_settles_every_take() {
+        use crate::models::{Take, TakeStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: crate::takes::folder_label(index),
+            source_id: None,
+            microphone_id: Some("mic:Studio".into()),
+            system_audio: false,
+        };
+        let id = session_in(
+            &store,
+            vec![
+                take(1, 0, 2000, TakeStatus::Error),
+                take(2, 2000, 1500, TakeStatus::Error),
+                take(3, 3500, 700, TakeStatus::Interrupted),
+            ],
+        );
+        let folder = store.session_dir(&id).unwrap();
+        let words = |text: &str| Transcript {
+            segments: vec![Segment {
+                id: "segment-0".into(),
+                start_ms: 200,
+                end_ms: 600,
+                text: text.into(),
+                words: vec![Word {
+                    text: text.into(),
+                    start_ms: 200,
+                    end_ms: 600,
+                    seek_ms: Some(250),
+                }],
+            }],
+            status: Some("complete".into()),
+            ..Default::default()
+        };
+        let media = |path: &Path, _: u64, _: bool| {
+            Ok::<_, String>(words(if path == folder { "First" } else { "Second" }))
+        };
+        let transcript = transcribe_existing_with(&store, &id, attached, |store, id| {
+            crate::transcribe::transcribe_with(store, id, &media)
+        })
+        .unwrap();
+        let placed: Vec<_> = transcript
+            .segments
+            .iter()
+            .map(|s| (s.id.as_str(), s.words[0].seek_ms))
+            .collect();
+        assert_eq!(
+            placed,
+            [("segment-0", Some(250)), ("t2-segment-0", Some(2250))]
+        );
+        let saved = store.session(&id).unwrap();
+        assert_eq!(
+            (saved.status.as_str(), saved.error.as_deref()),
+            ("ready", None)
+        );
+        let statuses: Vec<_> = saved.takes.iter().map(|t| t.status).collect();
+        assert_eq!(
+            statuses,
+            [
+                TakeStatus::Ready,
+                TakeStatus::Ready,
+                TakeStatus::Interrupted
+            ]
+        );
+        assert_eq!(saved.name, "Before", "a named session keeps its name");
+        assert_eq!(store.transcript(&id).unwrap().takes.len(), 2);
+
+        // A failure leaves the session in error with the take to retry.
+        let failed = transcribe_existing_with(&store, &id, attached, |store, id| {
+            crate::transcribe::transcribe_with(store, id, &|path: &Path, _, _| {
+                if path == folder {
+                    Ok(words("First"))
+                } else {
+                    Err("Install the local speech model.".to_string())
+                }
+            })
+        });
+        assert_eq!(failed.unwrap_err(), "Install the local speech model.");
+        let saved = store.session(&id).unwrap();
+        assert_eq!(saved.status, "error");
+        assert_eq!(saved.takes[1].status, TakeStatus::Error);
+        assert_eq!(crate::takes::retry_plan(&saved), [2]);
+    }
+
+    #[test]
+    fn a_failed_frame_batch_removes_the_frames_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let export = |at: &u64| {
+            let path = dir.path().join(format!("{at}.png"));
+            fs::write(&path, b"png").unwrap();
+            if *at == 3000 {
+                return Err(format!("Frame at {at} ms: decoding failed"));
+            }
+            Ok(FrameExport {
+                path,
+                time_ms: *at,
+                width: 1,
+                height: 1,
+                cursor: None,
+                segment_id: None,
+            })
+        };
+        let error = export_all(&[0, 1000, 2000, 3000, 4000], |at| {
+            export(at).inspect_err(|_| {
+                let _ = fs::remove_file(dir.path().join(format!("{at}.png")));
+            })
+        })
+        .unwrap_err();
+        assert_eq!(error, "Frame at 3000 ms: decoding failed");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        let written = export_all(&[0, 1000], export).unwrap();
+        assert_eq!(
+            written.iter().map(|f| f.time_ms).collect::<Vec<_>>(),
+            [0, 1000]
+        );
+        assert!(written.iter().all(|f| f.path.is_file()));
+    }
+
+    #[test]
+    fn exports_refuse_urls_and_give_ffmpeg_only_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let id = session_in(&store, Vec::new());
+        for url in [
+            "pipe:1",
+            "tcp://127.0.0.1:9999/frame.png",
+            "file:frame.png",
+            "http://example.com/clip.mp4",
+            "data:image/png,x",
+        ] {
+            let error = output_path(&store, &id, 0, "png", Some(Path::new(url))).unwrap_err();
+            assert!(error.contains("local file path"), "{url}: {error}");
+            assert!(
+                exports_dir(&store, &id, Some(Path::new(url))).is_err(),
+                "{url}"
+            );
+        }
+        // An output starting with a dash stays a file, not an FFmpeg option.
+        let dashed = output_path(&store, &id, 0, "png", Some(Path::new("-y.png"))).unwrap();
+        assert!(dashed.is_absolute() && dashed.ends_with("-y.png"));
+        let argument = ffmpeg_file(&dashed);
+        assert!(argument.to_string_lossy().starts_with("file:"));
+        assert!(argument.to_string_lossy().ends_with("-y.png"));
+        // Default exports and given folders are absolute local paths too.
+        let default = output_path(&store, &id, 5, "png", None).unwrap();
+        assert!(default.is_absolute() && default.starts_with(dir.path()));
+        let given = dir.path().join("shots");
+        assert_eq!(exports_dir(&store, &id, Some(&given)).unwrap(), given);
+        #[cfg(windows)]
+        assert!(local_path(Path::new(r"C:\Exports\frame.png")).is_ok());
+        assert!(local_path(Path::new("./a:b.png")).is_ok());
+    }
+
     #[test]
     fn repeated_phrases_keep_distinct_original_times() {
         let transcript = Transcript {

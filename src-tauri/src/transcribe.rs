@@ -360,15 +360,30 @@ pub fn merge_live(
         takes: Vec::new(),
     }
 }
+/// Transcribes one folder's media, as [`transcribe_media`] does for the data
+/// root: the folder, how much of the media to read and whether it recorded
+/// audio. Tests pass fakes, so the take logic runs without Whisper.
+pub(crate) type Transcriber<'a> = &'a dyn Fn(&Path, u64, bool) -> Result<Transcript, String>;
+
 /// Transcribes the session and saves its transcript. A session recorded
 /// before takes existed is transcribed as one recording, as in v0.1. A
 /// session with takes transcribes every take on the timeline and records each
 /// take's outcome; it refuses while a take still waits to join the video.
 pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
+    let root = store.root.clone();
+    transcribe_with(store, id, &|folder, duration_ms, has_audio| {
+        transcribe_media(&root, folder, duration_ms, has_audio)
+    })
+}
+/// [`transcribe`] with each folder's media transcribed by `media`.
+pub(crate) fn transcribe_with(
+    store: &Store,
+    id: &str,
+    media: Transcriber<'_>,
+) -> Result<Transcript, String> {
     let session = store.session(id)?;
     if session.takes.is_empty() {
-        let transcript = transcribe_media(
-            &store.root,
+        let transcript = media(
             &store.session_dir(id)?,
             session.duration_ms,
             session.microphone_id.is_some() || session.system_audio,
@@ -379,8 +394,8 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
     let all = takes::list(&session);
     if let Some(take) = all.iter().find(|take| take.status == TakeStatus::Swapping) {
         return Err(format!(
-            "Take {} has not been added to the recording yet. Open CueReview and choose Retry to finish it.",
-            take.index
+            "Take {index} has not been added to the recording yet. Open CueReview and choose Retry to finish it, or drop it with cue discard-take {id} {index}.",
+            index = take.index
         ));
     }
     let dir = store.session_dir(id)?;
@@ -389,12 +404,7 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
     let mut failure = None;
     for take in all.iter().filter(|take| takes::on_timeline(take.status)) {
         let folder = takes::take_dir(&dir, take.index);
-        match transcribe_media(
-            &store.root,
-            &folder,
-            take.duration_ms,
-            takes::records_audio(take),
-        ) {
+        match media(&folder, take.duration_ms, takes::records_audio(take)) {
             Ok(update) => {
                 transcript = takes::merge_take(
                     &transcript,
@@ -424,8 +434,21 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
     failure.map_or(Ok(transcript), Err)
 }
 /// Transcribes only take `index` of a session with takes, shifted by its
-/// offset, and replaces that take's segments in the saved transcript.
+/// offset, and replaces that take's segments in the saved transcript. The
+/// take dividers are brought up to date even when transcription fails, so a
+/// take without a transcript still shows where it starts.
 pub fn transcribe_take(store: &Store, id: &str, index: u32) -> Result<Transcript, String> {
+    let root = store.root.clone();
+    transcribe_take_with(store, id, index, &|folder, duration_ms, has_audio| {
+        transcribe_media(&root, folder, duration_ms, has_audio)
+    })
+}
+fn transcribe_take_with(
+    store: &Store,
+    id: &str,
+    index: u32,
+    media: Transcriber<'_>,
+) -> Result<Transcript, String> {
     let session = store.session(id)?;
     let take = takes::list(&session)
         .into_iter()
@@ -435,18 +458,30 @@ pub fn transcribe_take(store: &Store, id: &str, index: u32) -> Result<Transcript
         return Err(format!("Take {index} is not part of the recording yet."));
     }
     let folder = takes::take_dir(&store.session_dir(id)?, index);
-    let update = transcribe_media(
-        &store.root,
-        &folder,
-        take.duration_ms,
-        takes::records_audio(&take),
-    )?;
+    let result = media(&folder, take.duration_ms, takes::records_audio(&take));
     // Merge into a fresh read so concurrent writes to other takes are kept.
     let _lock = store.lock_session(id)?;
     let marks = takes::marks(&takes::list(&store.session(id)?));
-    let merged = takes::merge_take(&store.transcript(id)?, update, index, take.offset_ms, marks);
-    store.save_transcript(id, &merged)?;
-    Ok(merged)
+    let existing = store.transcript(id)?;
+    match result {
+        Ok(update) => {
+            let merged = takes::merge_take(&existing, update, index, take.offset_ms, marks);
+            store.save_transcript(id, &merged)?;
+            Ok(merged)
+        }
+        Err(error) => {
+            if existing.takes != marks {
+                store.save_transcript(
+                    id,
+                    &Transcript {
+                        takes: marks,
+                        ..existing
+                    },
+                )?;
+            }
+            Err(error)
+        }
+    }
 }
 /// Transcribes one folder's media: `mic.wav`, else `audio.wav`, else
 /// `video.mp4`, limited to `duration_ms`. Times are relative to that media.
@@ -748,6 +783,186 @@ mod tests {
         assert_eq!(merged.segments[0].words.len(), 1);
         assert_eq!(merged.segments[0].words[0].end_ms, 11000);
     }
+    fn take(
+        index: u32,
+        offset_ms: u64,
+        duration_ms: u64,
+        status: TakeStatus,
+        audio: bool,
+    ) -> crate::models::Take {
+        crate::models::Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: audio.then(|| "mic:Studio".into()),
+            system_audio: false,
+        }
+    }
+    /// A session in error whose takes are `takes`, in a fresh store.
+    fn take_session(takes: Vec<crate::models::Take>) -> (tempfile::TempDir, Store, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().into()).unwrap();
+        let mut session = store
+            .create_session(
+                None,
+                Some("Takes"),
+                &crate::models::CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: Some("mic:Studio".into()),
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        session.status = "error".into();
+        session.duration_ms = takes
+            .iter()
+            .map(|t| t.offset_ms + t.duration_ms)
+            .max()
+            .unwrap();
+        session.takes = takes;
+        store.save_session(&session).unwrap();
+        (temp, store, session.id)
+    }
+    /// What a take's own transcript looks like: one segment 100 ms in.
+    fn spoken(text: &str) -> Transcript {
+        let mut transcript = sample_transcript(&[(text, 100, 900)]);
+        transcript.segments[0].id = "segment-0".into();
+        transcript
+    }
+    fn mark(index: u32, start_ms: u64) -> crate::models::TakeMark {
+        crate::models::TakeMark { index, start_ms }
+    }
+
+    #[test]
+    fn a_session_with_takes_is_transcribed_take_by_take_on_its_timeline() {
+        let (_temp, store, id) = take_session(vec![
+            take(1, 0, 2000, TakeStatus::Ready, true),
+            take(2, 2000, 1500, TakeStatus::Error, true),
+            take(3, 3500, 400, TakeStatus::Interrupted, true),
+            take(4, 3500, 1000, TakeStatus::Ready, false),
+        ]);
+        let dir = store.session_dir(&id).unwrap();
+        let calls = std::sync::Mutex::new(Vec::new());
+        let second_fails = |fail: bool| {
+            let calls = &calls;
+            let dir = dir.clone();
+            move |folder: &Path, duration_ms: u64, has_audio: bool| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((folder.to_owned(), duration_ms, has_audio));
+                if !has_audio {
+                    return Ok(empty_transcript());
+                }
+                if folder == takes::take_dir(&dir, 2) {
+                    if fail {
+                        return Err("Install the local speech model.".to_string());
+                    }
+                    return Ok(spoken("second"));
+                }
+                Ok(spoken("first"))
+            }
+        };
+        let error = transcribe_with(&store, &id, &second_fails(true)).unwrap_err();
+        assert_eq!(error, "Install the local speech model.");
+        // Every take on the timeline, from its own folder, for its own length.
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                (dir.clone(), 2000, true),
+                (takes::take_dir(&dir, 2), 1500, true),
+                (takes::take_dir(&dir, 4), 1000, false),
+            ]
+        );
+        let session = store.session(&id).unwrap();
+        let statuses: Vec<_> = session.takes.iter().map(|t| (t.index, t.status)).collect();
+        assert_eq!(
+            statuses,
+            [
+                (1, TakeStatus::Ready),
+                (2, TakeStatus::Error),
+                (3, TakeStatus::Interrupted),
+                (4, TakeStatus::Ready)
+            ]
+        );
+        let saved = store.transcript(&id).unwrap();
+        assert_eq!(saved.segments.len(), 1);
+        assert_eq!(saved.segments[0].text, "first");
+        assert_eq!(saved.takes, [mark(1, 0), mark(2, 2000), mark(4, 3500)]);
+
+        // Once take 2 succeeds, its words land at its offset with its prefix.
+        let transcript = transcribe_with(&store, &id, &second_fails(false)).unwrap();
+        let placed: Vec<_> = transcript
+            .segments
+            .iter()
+            .map(|s| (s.id.as_str(), s.start_ms, s.words[0].start_ms))
+            .collect();
+        assert_eq!(
+            placed,
+            [("segment-0", 100, 100), ("t2-segment-0", 2100, 2100)]
+        );
+        assert_eq!(
+            store.session(&id).unwrap().takes[1].status,
+            TakeStatus::Ready
+        );
+        assert_eq!(
+            serde_json::to_value(store.transcript(&id).unwrap()).unwrap(),
+            serde_json::to_value(&transcript).unwrap()
+        );
+
+        // A take still waiting to join the video stops it, with a way out.
+        store
+            .update_session(&id, |s| {
+                s.takes.push(take(5, 4500, 800, TakeStatus::Swapping, true));
+                Ok(())
+            })
+            .unwrap();
+        let error = transcribe_with(&store, &id, &|_, _, _| panic!("transcribed")).unwrap_err();
+        assert!(
+            error.contains(&format!("cue discard-take {id} 5")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_take_that_fails_to_transcribe_still_gets_its_divider() {
+        let (_temp, store, id) = take_session(vec![
+            take(1, 0, 2000, TakeStatus::Ready, true),
+            take(2, 2000, 1500, TakeStatus::Transcribing, true),
+        ]);
+        let first = spoken("first");
+        store.save_transcript(&id, &first).unwrap();
+        let missing = |_: &Path, _: u64, _: bool| {
+            Err::<Transcript, _>("Install the local speech model.".to_string())
+        };
+        assert!(transcribe_take_with(&store, &id, 2, &missing).is_err());
+        let saved = store.transcript(&id).unwrap();
+        assert_eq!(saved.takes, [mark(1, 0), mark(2, 2000)]);
+        assert_eq!(saved.segments.len(), 1);
+        assert_eq!(saved.segments[0].text, "first");
+        // A later success adds the take's words beside the same dividers.
+        let merged = transcribe_take_with(&store, &id, 2, &|_, _, _| Ok(spoken("second"))).unwrap();
+        assert_eq!(merged.segments[1].id, "t2-segment-0");
+        assert_eq!(merged.segments[1].start_ms, 2100);
+        assert_eq!(merged.takes, saved.takes);
+        // Takes off the timeline are refused before anything runs.
+        store
+            .update_session(&id, |s| {
+                s.takes[1].status = TakeStatus::Swapping;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            transcribe_take_with(&store, &id, 2, &|_, _, _| panic!("ran"))
+                .unwrap_err()
+                .contains("not part of the recording yet")
+        );
+    }
+
     #[test]
     #[ignore = "Requires FFmpeg; verifies live subprocess cancellation"]
     fn cancelling_live_job_terminates_its_media_process() {

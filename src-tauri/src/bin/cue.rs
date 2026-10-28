@@ -1,10 +1,10 @@
 use cuereview_lib::{
     agent, capture,
-    cli::{self, Command, Invocation, TranscriptFormat},
+    cli::{self, Command, TranscriptFormat},
     cursor, deps,
     models::CaptureConfig,
     store::{data_root, Store},
-    transcribe,
+    takes, transcribe,
 };
 use std::time::Duration;
 fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
@@ -17,19 +17,18 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     // Help and argument errors come first: they never open the store or take the lock.
-    let command = match cli::parse(&args)? {
-        Invocation::Help(text) => {
-            print!("{text}");
-            return Ok(());
-        }
-        Invocation::Run(command) => command,
-    };
-    let store = Store::open(data_root())?;
-    let _ownership = if command.needs_ownership() {
-        Some(store.acquire_ownership()?)
-    } else {
-        None
-    };
+    let help = cli::dispatch(
+        &args,
+        || Store::open(data_root()),
+        Store::acquire_ownership,
+        execute,
+    )?;
+    if let Some(text) = help {
+        print!("{text}");
+    }
+    Ok(())
+}
+fn execute(store: &Store, command: Command) -> Result<(), String> {
     match command {
         Command::Projects => print_json(&store.projects()?),
         Command::Sessions { project } => print_json(&store.sessions(project.as_deref())?),
@@ -53,32 +52,26 @@ fn run() -> Result<(), String> {
                     print!("{}", cli::format_segments(&t));
                     Ok(())
                 }
-                TranscriptFormat::Json => match cursor::load(&store, &id) {
+                TranscriptFormat::Json => match cursor::load(store, &id) {
                     Some(track) => print_json(&agent::transcript_with_cursor(&t, &track)),
                     None => print_json(&t),
                 },
             }
         }
-        Command::Find { id, phrase } => print_json(&agent::find_with_cursor(&store, &id, &phrase)?),
+        Command::Find { id, phrase } => print_json(&agent::find_with_cursor(store, &id, &phrase)?),
         Command::Frame {
             id,
             at,
             output,
             style,
-        } => print_json(&agent::frame_at(
-            &store,
-            &id,
-            &at,
-            output.as_deref(),
-            style,
-        )?),
+        } => print_json(&agent::frame_at(store, &id, &at, output.as_deref(), style)?),
         Command::Frames {
             id,
             times,
             output_dir,
             style,
         } => print_json(&agent::frames(
-            &store,
+            store,
             &id,
             &times,
             output_dir.as_deref(),
@@ -90,12 +83,12 @@ fn run() -> Result<(), String> {
             end_ms,
             output,
         } => {
-            let path = agent::clip(&store, &id, start_ms, end_ms, output.as_deref())?;
+            let path = agent::clip(store, &id, start_ms, end_ms, output.as_deref())?;
             print_json(&serde_json::json!({"path":path}))
         }
         Command::Rename { id, name } => print_json(&store.rename_session(&id, &name)?),
         Command::Moments { id, frames, style } => {
-            print_json(&agent::moments(&store, &id, frames, style)?)
+            print_json(&agent::moments(store, &id, frames, style)?)
         }
         Command::Setup { install } => print_json(&if install {
             deps::install_transcription()?
@@ -104,7 +97,8 @@ fn run() -> Result<(), String> {
         }),
         Command::Sources => print_json(&capture::sources()?),
         Command::Microphones => print_json(&capture::microphones()?),
-        Command::Transcribe { id } => print_json(&agent::transcribe_existing(&store, &id)?),
+        Command::Transcribe { id } => print_json(&agent::transcribe_existing(store, &id)?),
+        Command::DiscardTake { id, index } => print_json(&takes::discard(store, &id, index)?),
         Command::Record {
             project,
             source,
@@ -119,18 +113,24 @@ fn run() -> Result<(), String> {
                 system_audio,
                 fps: 30,
             };
+            // What the source is now, so a later Record more can check it.
+            let identity = capture::source_identity(&config.source_id);
             let mut session = store.create_session(project.as_deref(), name.as_deref(), &config)?;
+            if identity.is_some() {
+                session.source_identity = identity;
+                store.save_session(&session)?;
+            }
             let result = (|| {
                 let mut active = capture::start(config, &store.session_dir(&session.id)?)?;
                 std::thread::sleep(Duration::from_secs(seconds));
                 let stopped = active.stop();
                 session.duration_ms = active.elapsed_ms();
                 // Source loss may report an error after successfully finalizing usable video.
-                let video = cuereview_lib::attach_finished_video(&store, &mut session);
+                let video = cuereview_lib::attach_finished_video(store, &mut session);
                 stopped.and(video)?;
                 session.status = "processing".into();
                 store.save_session(&session)?;
-                let transcript = transcribe::transcribe(&store, &session.id)?;
+                let transcript = transcribe::transcribe(store, &session.id)?;
                 Store::apply_auto_title(&mut session, &transcript);
                 Ok::<(), String>(())
             })();
