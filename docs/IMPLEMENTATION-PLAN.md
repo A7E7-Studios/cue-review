@@ -207,9 +207,9 @@ Rules:
 | F vocabulary + settings | merged | b95916c. Combined: 170 web tests, 111 lib tests passing (25 ignored), clippy clean. Prompt cap is about 75 tokens (20 terms, 200 characters). `-mc` = prompt tokens + 1 with `--carry-initial-prompt`, so decoded text is never carried; the Whisper regression passes. The validation story's play test needs a focused tab |
 | G app integration | merged | adccdbe (merge bc58c90). Full branch: 198 web tests, 116 lib tests, build and `tauri build --debug` OK. Matches the mocks within about 2px at 1280×820. Minor gaps: word pill, sidebar heading +3px, recording row label vs dot. Real-app checks: video swap lock and reload, drag and maximize, Ctrl+R in WebView2, compact resize order, focus refresh after `cue rename` |
 | H docs + scripts | merged | 6e070e4 (+ 4135be1 doc fix). verify-cli 9/9, verify-pipeline, verify-failures and verify-alignment pass. Adds `scripts/test-env.cjs` and `verify-takes.cjs` (not yet run); release notes in `.github/RELEASE_NOTES.md`. Open: ship the Figtree OFL licence text; confirm H's assumed names against G (Title bar, Recording video and Transcript regions, Recording controls group, "Take N elapsed time", Record more, Dismiss error, Agent instructions copied) |
-| Independent review + fixes | pending | |
-| Design check | pending | |
-| Unattended verification | pending | |
+| Independent review + fixes | fixing | Frontend: 12 findings (2 major: Ctrl+R reload, Record more before devices). Rust: 15 findings (1 major: stale HWND reuse). Both fix agents running |
+| Design check | fixing | Windows review 92, recording 85, macOS review 89. Majors: word pill swallows spaces, sidebar recording label vs dot, dock wraps at 900×650 |
+| Unattended verification | pass | All checks green (198 web, 116 lib, 12 ignored ffmpeg/Whisper, pipeline, cli, failures, alignment, sidebar, recovery, folder-open, 90 stories). The release build needs `RC` set to the x86 Windows Kits rc.exe on this machine. Docs: VERIFICATION.md:81 should say `npx tauri build --no-bundle` |
 | Attended verification | pending | |
 | Version, PR, CI, squash merge | pending | |
 | Tag, release, install | pending | |

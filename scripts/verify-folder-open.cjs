@@ -5,7 +5,8 @@ const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { fileURLToPath } = require('url');
 const root = path.resolve(__dirname, '..');
 const runId = crypto.randomUUID(), sessionId = crypto.randomUUID();
-const dataRoot = path.join(process.env.LOCALAPPDATA, 'CueReview', 'folder-open-tests', runId, 'Storage with spaces');
+// Defaults under %LOCALAPPDATA% to exercise packaged-launcher redirection; set CUEREVIEW_FOLDER_OPEN_ROOT to keep the run elsewhere.
+const dataRoot = path.join(process.env.CUEREVIEW_FOLDER_OPEN_ROOT || path.join(process.env.LOCALAPPDATA, 'CueReview', 'folder-open-tests'), runId, 'Storage with spaces');
 const folder = path.join(dataRoot, 'sessions', sessionId);
 const output = path.join(root, 'test-results', 'folder-open', runId);
 const endpoint = 'http://127.0.0.1:9227';
