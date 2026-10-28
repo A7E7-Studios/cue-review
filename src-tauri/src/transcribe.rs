@@ -1,8 +1,9 @@
 use crate::{
     deps,
-    models::{Segment, Transcript, Word},
+    models::{Segment, TakeStatus, Transcript, Word},
     settings,
     store::{atomic_write, Store},
+    takes,
 };
 use serde_json::Value;
 use std::{
@@ -359,16 +360,110 @@ pub fn merge_live(
         takes: Vec::new(),
     }
 }
+/// Transcribes the session and saves its transcript. A session recorded
+/// before takes existed is transcribed as one recording, as in v0.1. A
+/// session with takes transcribes every take on the timeline and records each
+/// take's outcome; it refuses while a take still waits to join the video.
 pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
-    let folder = store.session_dir(id)?;
     let session = store.session(id)?;
-    if session.microphone_id.is_none() && !session.system_audio {
-        let t = Transcript {
+    if session.takes.is_empty() {
+        let transcript = transcribe_media(
+            &store.root,
+            &store.session_dir(id)?,
+            session.duration_ms,
+            session.microphone_id.is_some() || session.system_audio,
+        )?;
+        store.save_transcript(id, &transcript)?;
+        return Ok(transcript);
+    }
+    let all = takes::list(&session);
+    if let Some(take) = all.iter().find(|take| take.status == TakeStatus::Swapping) {
+        return Err(format!(
+            "Take {} has not been added to the recording yet. Open CueReview and choose Retry to finish it.",
+            take.index
+        ));
+    }
+    let dir = store.session_dir(id)?;
+    let mut transcript = store.transcript(id)?;
+    let mut outcomes = Vec::new();
+    let mut failure = None;
+    for take in all.iter().filter(|take| takes::on_timeline(take.status)) {
+        let folder = takes::take_dir(&dir, take.index);
+        match transcribe_media(
+            &store.root,
+            &folder,
+            take.duration_ms,
+            takes::records_audio(take),
+        ) {
+            Ok(update) => {
+                transcript = takes::merge_take(
+                    &transcript,
+                    update,
+                    take.index,
+                    take.offset_ms,
+                    takes::marks(&all),
+                );
+                outcomes.push((take.index, TakeStatus::Ready));
+            }
+            Err(error) => {
+                failure.get_or_insert(error);
+                outcomes.push((take.index, TakeStatus::Error));
+            }
+        }
+    }
+    transcript.takes = takes::marks(&all);
+    store.save_transcript(id, &transcript)?;
+    store.update_session(id, |session| {
+        for (index, status) in &outcomes {
+            if let Ok(take) = takes::take_mut(session, *index) {
+                take.status = *status;
+            }
+        }
+        Ok(())
+    })?;
+    failure.map_or(Ok(transcript), Err)
+}
+/// Transcribes only take `index` of a session with takes, shifted by its
+/// offset, and replaces that take's segments in the saved transcript.
+pub fn transcribe_take(store: &Store, id: &str, index: u32) -> Result<Transcript, String> {
+    let session = store.session(id)?;
+    let take = takes::list(&session)
+        .into_iter()
+        .find(|take| take.index == index)
+        .ok_or_else(|| format!("Take {index} is not part of this recording."))?;
+    if !takes::on_timeline(take.status) {
+        return Err(format!("Take {index} is not part of the recording yet."));
+    }
+    let folder = takes::take_dir(&store.session_dir(id)?, index);
+    let update = transcribe_media(
+        &store.root,
+        &folder,
+        take.duration_ms,
+        takes::records_audio(&take),
+    )?;
+    // Merge into a fresh read so concurrent writes to other takes are kept.
+    let _lock = store.lock_session(id)?;
+    let marks = takes::marks(&takes::list(&store.session(id)?));
+    let merged = takes::merge_take(&store.transcript(id)?, update, index, take.offset_ms, marks);
+    store.save_transcript(id, &merged)?;
+    Ok(merged)
+}
+/// Transcribes one folder's media: `mic.wav`, else `audio.wav`, else
+/// `video.mp4`, limited to `duration_ms`. Times are relative to that media.
+/// Scratch files and the raw Whisper output stay in `folder`; nothing is
+/// saved to the session. `root` is the data root whose settings choose the
+/// decoding options.
+pub fn transcribe_media(
+    root: &Path,
+    folder: &Path,
+    duration_ms: u64,
+    has_audio: bool,
+) -> Result<Transcript, String> {
+    if !has_audio {
+        return Ok(Transcript {
             status: Some("complete".into()),
             ..Default::default()
-        };
-        store.save_transcript(id, &t)?;
-        return Ok(t);
+        });
     }
     let mic = folder.join("mic.wav");
     let mix = folder.join("audio.wav");
@@ -392,7 +487,7 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         .arg(source)
         .args([
             "-t",
-            &format!("{:.3}", session.duration_ms as f64 / 1000.),
+            &format!("{:.3}", duration_ms as f64 / 1000.),
             "-vn",
             "-ac",
             "1",
@@ -403,10 +498,8 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         ])
         .arg(&speech);
     run_logged(ffmpeg, &folder.join("transcode.log"))?;
-    if !has_speech(&speech, &folder, &AtomicBool::new(false))? {
-        let transcript = empty_transcript();
-        store.save_transcript(id, &transcript)?;
-        return Ok(transcript);
+    if !has_speech(&speech, folder, &AtomicBool::new(false))? {
+        return Ok(empty_transcript());
     }
     let mut whisper = deps::command("whisper-cli")?;
     alignment_options(&mut whisper)?;
@@ -416,13 +509,11 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         .arg(deps::model_path())
         .arg("-f")
         .arg(speech)
-        .args(decoding_options(&store.root))
+        .args(decoding_options(root))
         .arg("-of")
         .arg(&prefix);
     run_logged(whisper, &folder.join("transcription.log"))?;
-    let transcript = accept_whisper_output(&prefix, &folder)?;
-    store.save_transcript(id, &transcript)?;
-    Ok(transcript)
+    accept_whisper_output(&prefix, folder)
 }
 #[cfg(test)]
 mod tests {
@@ -907,5 +998,124 @@ mod tests {
             assert!(!found.is_empty(), "Lost {phrase}");
             assert!(found[0].seek_ms.unwrap() < duration);
         }
+    }
+    #[test]
+    #[ignore = "Requires installed Whisper/model and test-results/speech/reference.wav; transcribes it as take 2"]
+    fn actual_whisper_take_two_keeps_session_offsets() {
+        use crate::models::{CaptureConfig, Take, TakeMark};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let reference = root.join("test-results/speech/reference.wav");
+        let wav = hound::WavReader::open(&reference).unwrap();
+        let duration = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("data")).unwrap();
+        let mut session = store
+            .create_session(
+                None,
+                Some("Two takes"),
+                &CaptureConfig {
+                    source_id: "fixture".into(),
+                    microphone_id: Some("fixture".into()),
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        let offset = 61_000;
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: Some("fixture".into()),
+            system_audio: false,
+        };
+        session.status = "processing".into();
+        session.duration_ms = offset + duration;
+        session.takes = vec![
+            take(1, 0, offset, TakeStatus::Ready),
+            take(2, offset, duration, TakeStatus::Transcribing),
+        ];
+        store.save_session(&session).unwrap();
+        // Take 1's saved transcript must survive untouched.
+        let earlier = Segment {
+            id: "segment-0".into(),
+            start_ms: 1000,
+            end_ms: 2000,
+            text: "Earlier take.".into(),
+            words: vec![Word {
+                text: "Earlier".into(),
+                start_ms: 1000,
+                end_ms: 2000,
+                seek_ms: Some(1200),
+            }],
+        };
+        store
+            .save_transcript(
+                &session.id,
+                &Transcript {
+                    segments: vec![earlier.clone()],
+                    language: Some("en".into()),
+                    status: Some("complete".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let folder = takes::take_dir(&store.session_dir(&session.id).unwrap(), 2);
+        fs::create_dir_all(&folder).unwrap();
+        fs::copy(&reference, folder.join("mic.wav")).unwrap();
+
+        let merged = transcribe_take(&store, &session.id, 2).unwrap();
+        // The take's own raw output, timed from the take's first sample.
+        let raw: Value = read_json(&folder.join("whisper.json")).unwrap();
+        let local = parse_whisper(&raw).unwrap();
+        assert!(!local.segments.is_empty());
+        assert_eq!(merged.segments[0].id, earlier.id);
+        assert_eq!(merged.segments[0].start_ms, earlier.start_ms);
+        let shifted = &merged.segments[1..];
+        assert_eq!(shifted.len(), local.segments.len());
+        for (placed, own) in shifted.iter().zip(&local.segments) {
+            assert_eq!(placed.id, format!("t2-{}", own.id));
+            assert_eq!(placed.text, own.text);
+            assert_eq!(
+                (placed.start_ms, placed.end_ms),
+                (own.start_ms + offset, own.end_ms + offset)
+            );
+            for (word, own) in placed.words.iter().zip(&own.words) {
+                assert_eq!(word.start_ms, own.start_ms + offset);
+                assert_eq!(word.seek_ms, own.seek_ms.map(|seek| seek + offset));
+                assert!(word.start_ms >= offset && word.end_ms <= offset + duration);
+            }
+        }
+        let phrase = crate::agent::find(&merged, "click here").unwrap();
+        let own = crate::agent::find(&local, "click here").unwrap();
+        assert_eq!(phrase[0].start_ms, own[0].start_ms + offset);
+        assert!(phrase[0].start_ms > offset);
+        assert_eq!(
+            merged.takes,
+            [
+                TakeMark {
+                    index: 1,
+                    start_ms: 0
+                },
+                TakeMark {
+                    index: 2,
+                    start_ms: offset
+                }
+            ]
+        );
+        assert_eq!(merged.language.as_deref(), Some("en"));
+        let saved = store.transcript(&session.id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(&merged).unwrap()
+        );
+        fs::write(
+            root.join("test-results/take-offset-transcript.json"),
+            serde_json::to_vec_pretty(&merged).unwrap(),
+        )
+        .unwrap();
     }
 }

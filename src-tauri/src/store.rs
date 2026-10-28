@@ -1,15 +1,72 @@
 use crate::models::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::{Condvar, Mutex},
+    thread::{self, ThreadId},
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,
+}
+
+// Sessions whose write lock is held in this process: owner thread and depth.
+// The guard is reentrant on its owner thread, so a locked read-modify-write can
+// call the public write helpers without deadlocking.
+static HELD_SESSIONS: Mutex<BTreeMap<PathBuf, (ThreadId, usize)>> = Mutex::new(BTreeMap::new());
+static RELEASED_SESSION: Condvar = Condvar::new();
+const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Exclusive write access to one session: an in-process mutex keyed by the
+/// session plus an advisory file lock that other processes (the `cue` CLI)
+/// honour. Dropping it releases both.
+#[derive(Debug)]
+pub struct SessionLock {
+    key: PathBuf,
+    file: Option<fs::File>,
+}
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        // Unlock the file before another thread here can take the session.
+        drop(self.file.take());
+        let mut held = HELD_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, depth)) = held.get_mut(&self.key) {
+            *depth -= 1;
+            if *depth == 0 {
+                held.remove(&self.key);
+            }
+        }
+        RELEASED_SESSION.notify_all();
+    }
+}
+fn lock_file(path: &Path, timeout: Duration) -> Result<fs::File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("Could not open the recording lock {}: {e}", path.display()))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25))
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err("Another CueReview process is still updating this recording. Try again in a moment.".into())
+            }
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(format!("Could not lock this recording for writing: {error}"))
+            }
+        }
+    }
 }
 
 pub fn data_root() -> PathBuf {
@@ -124,7 +181,7 @@ impl Store {
         Ok(file)
     }
     pub fn open(root: PathBuf) -> Result<Self, String> {
-        for dir in ["projects", "sessions", "tools", "models"] {
+        for dir in ["projects", "sessions", "tools", "models", "locks"] {
             fs::create_dir_all(root.join(dir)).map_err(|e| e.to_string())?;
         }
         Ok(Self { root })
@@ -132,6 +189,54 @@ impl Store {
     pub fn session_dir(&self, id: &str) -> Result<PathBuf, String> {
         valid_id(id)?;
         Ok(self.root.join("sessions").join(id))
+    }
+    /// Takes the per-session write lock. Every store write to a session holds
+    /// it, so the app and the CLI never lose each other's updates. Reentrant
+    /// on the calling thread; waits up to 10 s for another process.
+    pub fn lock_session(&self, id: &str) -> Result<SessionLock, String> {
+        self.lock_session_within(id, SESSION_LOCK_TIMEOUT)
+    }
+    fn lock_session_within(&self, id: &str, timeout: Duration) -> Result<SessionLock, String> {
+        valid_id(id)?;
+        // Lock files live outside the session folder so deleting a recording
+        // never races its own lock.
+        let locks = self.root.join("locks");
+        fs::create_dir_all(&locks).map_err(|e| e.to_string())?;
+        let key = locks.join(format!("{id}.lock"));
+        let me = thread::current().id();
+        let mut held = HELD_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match held.get_mut(&key) {
+                Some((owner, depth)) if *owner == me => {
+                    *depth += 1;
+                    return Ok(SessionLock { key, file: None });
+                }
+                Some(_) => {
+                    held = RELEASED_SESSION
+                        .wait(held)
+                        .unwrap_or_else(|e| e.into_inner())
+                }
+                None => break,
+            }
+        }
+        held.insert(key.clone(), (me, 1));
+        drop(held);
+        let mut guard = SessionLock { key, file: None };
+        guard.file = Some(lock_file(&guard.key, timeout)?);
+        Ok(guard)
+    }
+    /// Re-reads `session.json` under the session's write lock, applies `change`
+    /// and writes the result. Nothing is written when `change` fails.
+    pub fn update_session(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut Session) -> Result<(), String>,
+    ) -> Result<Session, String> {
+        let _lock = self.lock_session(id)?;
+        let mut session = self.session(id)?;
+        change(&mut session)?;
+        self.save_session(&session)?;
+        Ok(session)
     }
     pub fn project(&self, id: &str) -> Result<Project, String> {
         valid_id(id)?;
@@ -213,8 +318,12 @@ impl Store {
             self.checked_session_dir(&session.id)?;
         }
         for session in &mut sessions {
-            session.project_id = None;
-            self.save_session(session).map_err(|e| format!(
+            // Re-read each member so a concurrent rename is kept.
+            self.update_session(&session.id, |current| {
+                current.project_id = None;
+                Ok(())
+            })
+            .map_err(|e| format!(
                 "The section was not deleted. Some recordings may already be in Recents; try again. {e}"
             ))?;
         }
@@ -242,6 +351,7 @@ impl Store {
     }
     pub fn delete_session(&self, id: &str) -> Result<(), String> {
         let folder = self.checked_session_dir(id)?;
+        let lock = self.lock_session(id)?;
         let session = self.session(id)?;
         if session.id != id {
             return Err("The recording metadata does not match its directory.".into());
@@ -273,12 +383,19 @@ impl Store {
                 }
             ));
         }
+        let key = lock.key.clone();
+        drop(lock);
+        // Best effort: a lock file left behind is harmless.
+        let _ = fs::remove_file(key);
         Ok(())
     }
     pub fn session(&self, id: &str) -> Result<Session, String> {
         read_json(&self.session_dir(id)?.join("session.json"))
     }
+    /// Writes `s` as the session's metadata under its write lock. Prefer
+    /// [`Store::update_session`] when the change is based on a fresh read.
     pub fn save_session(&self, s: &Session) -> Result<(), String> {
+        let _lock = self.lock_session(&s.id)?;
         write_json(&self.session_dir(&s.id)?.join("session.json"), s)
     }
     pub fn sessions(&self, project: Option<&str>) -> Result<Vec<Session>, String> {
@@ -334,27 +451,32 @@ impl Store {
         self.save_session(&s)?;
         Ok(s)
     }
+    /// Renames under the session's write lock; the `cue rename` CLI calls this
+    /// while the app may be writing the same session.
     pub fn rename_session(&self, id: &str, name: &str) -> Result<Session, String> {
-        let mut s = self.session(id)?;
-        if matches!(s.status.as_str(), "recording" | "processing") {
-            return Err("Finish recording and processing before renaming this recording.".into());
-        }
-        s.name = valid_name(name)?;
-        s.auto_title = false;
-        self.save_session(&s)?;
-        Ok(s)
+        let name = valid_name(name)?;
+        self.update_session(id, |s| {
+            if matches!(s.status.as_str(), "recording" | "processing") {
+                return Err(
+                    "Finish recording and processing before renaming this recording.".into(),
+                );
+            }
+            s.name = name;
+            s.auto_title = false;
+            Ok(())
+        })
     }
     pub fn move_session(&self, id: &str, project: Option<&str>) -> Result<Session, String> {
-        let mut session = self.session(id)?;
-        if matches!(session.status.as_str(), "recording" | "processing") {
-            return Err("Finish recording and processing before moving this recording.".into());
-        }
         if let Some(project) = project {
             self.project(project)?;
         }
-        session.project_id = project.map(str::to_owned);
-        self.save_session(&session)?;
-        Ok(session)
+        self.update_session(id, |session| {
+            if matches!(session.status.as_str(), "recording" | "processing") {
+                return Err("Finish recording and processing before moving this recording.".into());
+            }
+            session.project_id = project.map(str::to_owned);
+            Ok(())
+        })
     }
     pub fn apply_auto_title(session: &mut Session, transcript: &Transcript) {
         if !session.auto_title {
@@ -402,6 +524,7 @@ impl Store {
     }
     pub fn save_transcript(&self, id: &str, transcript: &Transcript) -> Result<(), String> {
         let folder = self.session_dir(id)?;
+        let _lock = self.lock_session(id)?;
         write_json(&folder.join("transcript.json"), transcript)?;
         let text = transcript
             .segments
@@ -421,6 +544,7 @@ impl Store {
         }
     }
     pub fn add_marker(&self, id: &str, time_ms: u64, label: &str) -> Result<Marker, String> {
+        let _lock = self.lock_session(id)?;
         let s = self.session(id)?;
         if s.status != "recording" && time_ms > s.duration_ms {
             return Err("Marker is outside the recording.".into());
@@ -436,16 +560,25 @@ impl Store {
         write_json(&self.session_dir(id)?.join("markers.json"), &markers)?;
         Ok(m)
     }
+    /// Startup repair after a crash or forced close. Sessions recorded before
+    /// takes existed keep the v0.1 behavior; sessions with takes go through
+    /// [`crate::takes::recover`], which repairs each take on its own.
     pub fn recover_interrupted(&self) -> Result<(), String> {
-        for mut s in self.sessions(None)? {
-            if matches!(s.status.as_str(), "recording" | "processing") {
-                s.status = "error".into();
-                s.error = Some("The app closed before this session finished. Original media is retained in the session folder; retry transcription if video is available.".into());
-                let video = self.session_dir(&s.id)?.join("video.mp4");
-                if video.is_file() {
-                    s.video_path = Some(video.to_string_lossy().into());
-                }
-                self.save_session(&s)?;
+        for listed in self.sessions(None)? {
+            if !listed.takes.is_empty() {
+                crate::takes::recover(self, &listed.id)?;
+                continue;
+            }
+            if matches!(listed.status.as_str(), "recording" | "processing") {
+                let video = self.session_dir(&listed.id)?.join("video.mp4");
+                self.update_session(&listed.id, |s| {
+                    s.status = "error".into();
+                    s.error = Some("The app closed before this session finished. Original media is retained in the session folder; retry transcription if video is available.".into());
+                    if video.is_file() {
+                        s.video_path = Some(video.to_string_lossy().into());
+                    }
+                    Ok(())
+                })?;
             }
         }
         Ok(())
@@ -812,5 +945,126 @@ mod tests {
         store.save_session(&s).unwrap();
         assert!(store.add_marker(&s.id, 1001, "Too late").is_err());
         assert!(store.add_marker(&s.id, 1000, "End").is_ok());
+    }
+    #[test]
+    fn concurrent_session_updates_are_never_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = ready_session(&store, None);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let (store, id) = (&store, session.id.as_str());
+                scope.spawn(move || {
+                    for step in 0..10 {
+                        if worker % 2 == 0 {
+                            // The app: a read-modify-write of another field.
+                            store
+                                .update_session(id, |s| {
+                                    s.duration_ms += 1;
+                                    Ok(())
+                                })
+                                .unwrap();
+                        } else {
+                            // The CLI: rename while the app writes.
+                            store
+                                .rename_session(id, &format!("Rename {worker}-{step}"))
+                                .unwrap();
+                        }
+                    }
+                });
+            }
+        });
+        let saved = store.session(&session.id).unwrap();
+        assert_eq!(saved.duration_ms, 40);
+        assert!(saved.name.starts_with("Rename ") && !saved.auto_title);
+    }
+    #[test]
+    fn session_lock_is_reentrant_and_released_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = ready_session(&store, None);
+        let outer = store.lock_session(&session.id).unwrap();
+        // Nested writes on the same thread do not deadlock.
+        store.rename_session(&session.id, "Nested").unwrap();
+        let other = ready_session(&store, None);
+        let waiter = {
+            let store = store.clone();
+            let id = session.id.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                store.rename_session(&id, "After release").unwrap();
+                started.elapsed()
+            })
+        };
+        // Another session is not blocked by this one.
+        store.rename_session(&other.id, "Independent").unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(store.session(&session.id).unwrap().name, "Nested");
+        drop(outer);
+        assert!(waiter.join().unwrap() >= Duration::from_millis(100));
+        assert_eq!(store.session(&session.id).unwrap().name, "After release");
+        assert!(store.lock_session("../outside").is_err());
+        // A failed change writes nothing and releases the lock.
+        let before =
+            fs::read(store.session_dir(&session.id).unwrap().join("session.json")).unwrap();
+        assert!(store
+            .update_session(&session.id, |s| {
+                s.name = "Discarded".into();
+                Err("refused".into())
+            })
+            .is_err());
+        assert_eq!(
+            fs::read(store.session_dir(&session.id).unwrap().join("session.json")).unwrap(),
+            before
+        );
+        drop(store.lock_session(&session.id).unwrap());
+        // Deleting a session also removes its lock file.
+        let lock = dir.path().join("locks").join(format!("{}.lock", other.id));
+        assert!(lock.is_file());
+        store.delete_session(&other.id).unwrap();
+        assert!(!lock.exists());
+    }
+    #[test]
+    fn session_lock_blocks_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = ready_session(&store, None);
+        let child = |expect: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::tests::session_lock_child_probe",
+                    "--nocapture",
+                ])
+                .env("CUEREVIEW_SESSION_LOCK_ROOT", dir.path())
+                .env("CUEREVIEW_SESSION_LOCK_ID", &session.id)
+                .env("CUEREVIEW_SESSION_LOCK_EXPECT", expect)
+                .status()
+                .unwrap()
+        };
+        let held = store.lock_session(&session.id).unwrap();
+        assert!(child("blocked").success());
+        assert_eq!(store.session(&session.id).unwrap().name, "Review");
+        drop(held);
+        assert!(child("free").success());
+        assert_eq!(store.session(&session.id).unwrap().name, "From the CLI");
+    }
+    #[test]
+    fn session_lock_child_probe() {
+        let (Some(root), Some(id), Some(expect)) = (
+            std::env::var_os("CUEREVIEW_SESSION_LOCK_ROOT"),
+            std::env::var("CUEREVIEW_SESSION_LOCK_ID").ok(),
+            std::env::var("CUEREVIEW_SESSION_LOCK_EXPECT").ok(),
+        ) else {
+            return;
+        };
+        let store = Store::open(root.into()).unwrap();
+        let lock = store.lock_session_within(&id, Duration::from_millis(200));
+        if expect == "blocked" {
+            assert!(lock.unwrap_err().contains("Another CueReview process"));
+        } else {
+            drop(lock.unwrap());
+            store.rename_session(&id, "From the CLI").unwrap();
+        }
     }
 }

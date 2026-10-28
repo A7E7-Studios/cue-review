@@ -22,10 +22,20 @@ use std::{
 use store::Store;
 use tauri::{Emitter, Manager};
 
+/// A take of a session with takes, placed on the session timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TakeRef {
+    index: u32,
+    offset_ms: u64,
+}
 #[derive(Default)]
 struct Runtime {
     active: Option<(Session, capture::ActiveCapture)>,
+    /// Set while the active capture is a take recorded by Record more.
+    active_take: Option<TakeRef>,
     processing: Option<String>,
+    /// The take the processing job is working on, if it is a take job.
+    processing_take: Option<TakeRef>,
     last_error: Option<String>,
     live_transcript: Option<Transcript>,
     live_cancel: Option<Arc<AtomicBool>>,
@@ -59,12 +69,21 @@ impl ProcessingJob {
             runtime.last_error = Some(error);
         }
     }
+    /// Reports which take the job is working on in the recording status.
+    fn working_on(&self, take: Option<TakeRef>) {
+        if let Ok(mut runtime) = self.state.runtime.lock() {
+            if runtime.processing.as_deref() == Some(self.id.as_str()) {
+                runtime.processing_take = take;
+            }
+        }
+    }
 }
 impl Drop for ProcessingJob {
     fn drop(&mut self) {
         if let Ok(mut runtime) = self.state.runtime.lock() {
             if runtime.processing.as_deref() == Some(self.id.as_str()) {
                 runtime.processing = None;
+                runtime.processing_take = None;
             }
         }
     }
@@ -133,13 +152,20 @@ fn publish_live(
         });
     }
 }
-fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>) {
+/// Moves a snapshot's take-relative bounds onto the session timeline.
+fn on_session_clock(take: Option<TakeRef>, (start, end): (u64, u64)) -> (u64, u64) {
+    let offset = take.map_or(0, |take| take.offset_ms);
+    (start.saturating_add(offset), end.saturating_add(offset))
+}
+/// The live transcript covers only the capture in progress: a whole first
+/// recording, or just the take being recorded, timed on the session timeline.
+fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
     if !deps::setup_status().ready {
         publish_live(&s,&id,&cancel,Err("Install local transcription tools to see words while recording. The recording will still be saved.".into()));
         return;
     }
     let folder = match s.store.session_dir(&id) {
-        Ok(folder) => folder.join("live"),
+        Ok(folder) => takes::take_dir(&folder, take.map_or(1, |take| take.index)).join("live"),
         Err(_) => return,
     };
     if let Err(error) = std::fs::create_dir_all(&folder) {
@@ -166,7 +192,8 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>) {
             }
             runtime.active.as_ref().unwrap().1.snapshot_audio(&snapshot)
         };
-        let result = bounds.and_then(|(start, end)| {
+        let result = bounds.and_then(|bounds| {
+            let (start, end) = on_session_clock(take, bounds);
             let _inference = s.inference.lock().map_err(|e| e.to_string())?;
             if cancel.load(Ordering::Acquire) {
                 return Err("Live transcription cancelled.".into());
@@ -381,6 +408,38 @@ fn session_folder_for_shell(store: &Store, id: &str) -> Result<std::path::PathBu
         )
     })
 }
+/// Installs a started capture as the active recording. Returns the live
+/// transcription's cancel flag.
+fn activate(
+    runtime: &mut Runtime,
+    session: &Session,
+    active: capture::ActiveCapture,
+    take: Option<TakeRef>,
+) -> Arc<AtomicBool> {
+    runtime.last_error = None;
+    runtime.live_transcript = None;
+    let cancel = Arc::new(AtomicBool::new(false));
+    runtime.live_cancel = Some(cancel.clone());
+    runtime.active = Some((session.clone(), active));
+    runtime.active_take = take;
+    cancel
+}
+fn spawn_live(s: &Shared, id: &str, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
+    let state = s.clone();
+    let id = id.to_owned();
+    if let Err(error) = std::thread::Builder::new()
+        .name("live-transcription".into())
+        .spawn(move || live_transcription(state, id, cancel, take))
+    {
+        if let Ok(mut runtime) = s.runtime.lock() {
+            runtime.live_transcript = Some(Transcript {
+                status: Some("error".into()),
+                error: Some(format!("Live transcript could not start: {error}")),
+                ..Default::default()
+            });
+        }
+    }
+}
 #[tauri::command]
 async fn start_recording(
     s: CmdState<'_>,
@@ -416,29 +475,12 @@ async fn start_recording(
             muted.unwrap_or(false),
         ) {
             Ok(active) => {
-                runtime.last_error = None;
-                runtime.live_transcript = None;
-                let cancel = Arc::new(AtomicBool::new(false));
-                runtime.live_cancel = Some(cancel.clone());
-                runtime.active = Some((session.clone(), active));
+                let cancel = activate(&mut runtime, &session, active, None);
                 drop(runtime);
                 if session.microphone_id.is_some()
                     || (session.system_audio && !session.source_id.starts_with("android:"))
                 {
-                    let state = s.clone();
-                    let id = session.id.clone();
-                    if let Err(error) = std::thread::Builder::new()
-                        .name("live-transcription".into())
-                        .spawn(move || live_transcription(state, id, cancel))
-                    {
-                        if let Ok(mut runtime) = s.runtime.lock() {
-                            runtime.live_transcript = Some(Transcript {
-                                status: Some("error".into()),
-                                error: Some(format!("Live transcript could not start: {error}")),
-                                ..Default::default()
-                            });
-                        }
-                    }
+                    spawn_live(&s, &session.id, cancel, None);
                 }
                 Ok(session)
             }
@@ -460,10 +502,11 @@ fn finish_transcription(job: ProcessingJob) {
         .lock()
         .map_err(|e| e.to_string())
         .and_then(|_guard| transcribe::transcribe(&s.store, id));
-    if let Ok(mut session) = s.store.session(id) {
+    // Re-read under the session lock so a concurrent rename is kept.
+    let saved = s.store.update_session(id, |session| {
         match &result {
             Ok(transcript) => {
-                Store::apply_auto_title(&mut session, transcript);
+                Store::apply_auto_title(session, transcript);
                 session.status = "ready".into();
                 session.error = None;
             }
@@ -472,95 +515,282 @@ fn finish_transcription(job: ProcessingJob) {
                 session.error = Some(e.clone());
             }
         }
-        let save = s.store.save_session(&session);
-        if let Some(error) = result.err().or(save.err()) {
-            job.fail(error);
+        Ok(())
+    });
+    match saved {
+        Ok(_) => {
+            if let Err(error) = result {
+                job.fail(error);
+            }
         }
+        Err(update) => job.fail(if s.store.session(id).is_err() {
+            "Session metadata could not be read after transcription.".into()
+        } else {
+            result.err().unwrap_or(update)
+        }),
+    }
+}
+/// Adds one finished take to the combined video when it still waits for
+/// that, then transcribes only that take. The take ends ready or error, or
+/// stays swapping when the video could not be updated.
+fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
+    let session = s.store.session(id)?;
+    let take = takes::list(&session)
+        .into_iter()
+        .find(|take| take.index == index)
+        .ok_or_else(|| format!("Take {index} is not part of this recording."))?;
+    if take.status == TakeStatus::Swapping {
+        takes::complete_swap(&s.store, id, index)?;
     } else {
-        job.fail("Session metadata could not be read after transcription.".into());
+        takes::set_status(&s.store, id, index, TakeStatus::Transcribing)?;
+    }
+    let result = s
+        .inference
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|_guard| transcribe::transcribe_take(&s.store, id, index));
+    let status = if result.is_ok() {
+        TakeStatus::Ready
+    } else {
+        TakeStatus::Error
+    };
+    takes::set_status(&s.store, id, index, status)?;
+    result.map(|_| ())
+}
+/// Background job for takes: works through `indices` in order, then settles
+/// the session status from every take's outcome.
+fn finish_takes(job: ProcessingJob, indices: Vec<u32>) {
+    let s = &job.state;
+    let mut failure = None;
+    for index in indices {
+        let offset_ms = s
+            .store
+            .session(&job.id)
+            .ok()
+            .and_then(|session| takes::list(&session).into_iter().find(|t| t.index == index))
+            .map_or(0, |take| take.offset_ms);
+        job.working_on(Some(TakeRef { index, offset_ms }));
+        if let Err(error) = run_take(s, &job.id, index) {
+            failure.get_or_insert(error);
+        }
+    }
+    let transcript = s.store.transcript(&job.id).ok();
+    let settled = s.store.update_session(&job.id, |session| {
+        if let Some(transcript) = &transcript {
+            Store::apply_auto_title(session, transcript);
+        }
+        takes::settle(session, failure.clone());
+        Ok(())
+    });
+    if let Some(error) = failure.or(settled.err()) {
+        job.fail(error);
     }
 }
 #[tauri::command]
 async fn stop_recording(s: CmdState<'_>) -> Result<Session, String> {
     let s = s.inner().clone();
     blocking(move || {
-        let (mut session, mut active) = {
+        let (session, active, take) = {
             let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
-            let pair = runtime.active.take().ok_or("No recording is active.")?;
+            let (session, active) = runtime.active.take().ok_or("No recording is active.")?;
             if let Some(cancel) = runtime.live_cancel.take() {
                 cancel.store(true, Ordering::Release);
             }
-            runtime.processing = Some(pair.0.id.clone());
-            pair
+            let take = runtime.active_take.take();
+            runtime.processing = Some(session.id.clone());
+            runtime.processing_take = take;
+            (session, active, take)
         };
         let job = ProcessingJob {
             state: s.clone(),
             id: session.id.clone(),
         };
-        session.duration_ms = active.elapsed_ms();
-        session.status = "processing".into();
-        let _ = s.store.save_session(&session);
-        let stopped = active.stop();
-        session.duration_ms = active.elapsed_ms();
-        // A source/device failure may still leave a completely usable final video.
-        let video = attach_finished_video(&s.store, &mut session);
-        if let Err(error) = stopped
-            .and(video)
-            .and_then(|_| s.store.save_session(&session))
-        {
-            session.status = "error".into();
-            session.error = Some(error.clone());
-            let saved = s.store.save_session(&session);
-            let error = match saved {
-                Ok(()) => error,
-                Err(save) => format!("{error}; saving session metadata failed: {save}"),
-            };
-            job.fail(error.clone());
-            return Err(error);
+        match take {
+            Some(take) => stop_take(job, active, take),
+            None => stop_first(job, active),
         }
-        std::thread::Builder::new()
-            .name("transcription".into())
-            .spawn(move || finish_transcription(job))
-            .map_err(|e| e.to_string())?;
-        Ok(session)
     })
     .await
+}
+/// Stops a first recording, exactly as before takes existed.
+fn stop_first(job: ProcessingJob, mut active: capture::ActiveCapture) -> Result<Session, String> {
+    let s = job.state.clone();
+    let id = job.id.clone();
+    let elapsed = active.elapsed_ms();
+    let _ = s.store.update_session(&id, |session| {
+        session.duration_ms = elapsed;
+        session.status = "processing".into();
+        Ok(())
+    });
+    let stopped = active.stop();
+    let elapsed = active.elapsed_ms();
+    let mut failure = None;
+    let saved = s.store.update_session(&id, |session| {
+        session.duration_ms = elapsed;
+        session.status = "processing".into();
+        // A source/device failure may still leave a completely usable final video.
+        let video = attach_finished_video(&s.store, session);
+        if let Err(error) = stopped.and(video) {
+            session.status = "error".into();
+            session.error = Some(error.clone());
+            failure = Some(error);
+        }
+        Ok(())
+    });
+    let error = match (saved, failure) {
+        (Ok(session), None) => {
+            std::thread::Builder::new()
+                .name("transcription".into())
+                .spawn(move || finish_transcription(job))
+                .map_err(|e| e.to_string())?;
+            return Ok(session);
+        }
+        (Ok(_), Some(error)) => error,
+        (Err(save), Some(error)) => format!("{error}; saving session metadata failed: {save}"),
+        (Err(save), None) => {
+            let saved = s.store.update_session(&id, |session| {
+                session.status = "error".into();
+                session.error = Some(save.clone());
+                Ok(())
+            });
+            match saved {
+                Ok(_) => save,
+                Err(again) => format!("{save}; saving session metadata failed: {again}"),
+            }
+        }
+    };
+    job.fail(error.clone());
+    Err(error)
+}
+/// Stops a take: finalizes its own files, probes them, and leaves the swap
+/// and the transcription of only this take to a background job.
+fn stop_take(
+    job: ProcessingJob,
+    mut active: capture::ActiveCapture,
+    take: TakeRef,
+) -> Result<Session, String> {
+    let s = job.state.clone();
+    let id = job.id.clone();
+    let _ = takes::mark_finalizing(&s.store, &id, take.index, active.elapsed_ms());
+    let stopped = active.stop();
+    match takes::finish_capture(&s.store, &id, take.index, stopped) {
+        Ok(session) => {
+            std::thread::Builder::new()
+                .name("take".into())
+                .spawn(move || finish_takes(job, vec![take.index]))
+                .map_err(|e| e.to_string())?;
+            Ok(session)
+        }
+        Err(error) => {
+            job.fail(error.clone());
+            Err(error)
+        }
+    }
 }
 #[tauri::command]
 async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> {
     let s = s.inner().clone();
     blocking(move || {
-        let mut session = {
+        let session = {
             let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
             if runtime.active.is_some() || runtime.processing.is_some() {
                 return Err("Finish the current job first.".into());
             }
             let session = s.store.session(&id)?;
             runtime.processing = Some(id.clone());
+            runtime.processing_take = None;
             runtime.last_error = None;
             session
         };
         let job = ProcessingJob {
             state: s.clone(),
-            id,
+            id: id.clone(),
         };
-        if let Err(error) = attach_finished_video(&s.store, &mut session) {
+        // Sessions with takes retry only their unfinished takes.
+        let plan = (!session.takes.is_empty()).then(|| takes::retry_plan(&session));
+        let prepared = s.store.update_session(&id, |session| {
+            attach_finished_video(&s.store, session)?;
+            session.status = "processing".into();
+            session.error = None;
+            Ok(())
+        });
+        if let Err(error) = prepared {
             job.fail(error.clone());
             return Err(error);
         }
-        session.status = "processing".into();
-        session.error = None;
-        if let Err(error) = s.store.save_session(&session) {
-            job.fail(error.clone());
-            return Err(error);
+        let worker = std::thread::Builder::new().name("transcription".into());
+        match plan {
+            Some(plan) => worker.spawn(move || finish_takes(job, plan)),
+            None => worker.spawn(move || finish_transcription(job)),
         }
-        std::thread::Builder::new()
-            .name("transcription".into())
-            .spawn(move || finish_transcription(job))
-            .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
         Ok(())
     })
     .await
+}
+/// Starts take N of session `id`: validates that the session is ready (or in
+/// error with a usable video) and that nothing else is recording or
+/// processing, probes the combined video for the take's offset and starts
+/// capture into `takes/<N>/` from the session's own source.
+fn start_take(
+    s: &Shared,
+    id: &str,
+    microphone_id: Option<String>,
+    system_audio: Option<bool>,
+    muted: bool,
+) -> Result<Session, String> {
+    let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    if runtime.active.is_some() || runtime.processing.is_some() {
+        return Err("Finish the current recording or processing job first.".into());
+    }
+    let mut session = s.store.session(id)?;
+    takes::check_can_record_more(&session)?;
+    // The offset is the duration of the combined video as it is on disk.
+    attach_finished_video(&s.store, &mut session)
+        .map_err(|e| format!("Record more needs a playable recording: {e}"))?;
+    s.preview
+        .lock()
+        .map_err(|e| e.to_string())?
+        .stop_for_recording(&session.source_id);
+    let system_audio = system_audio.unwrap_or(session.system_audio);
+    let started = takes::begin(
+        &s.store,
+        id,
+        session.duration_ms,
+        microphone_id,
+        system_audio,
+    )?;
+    let take = TakeRef {
+        index: started.take.index,
+        offset_ms: started.take.offset_ms,
+    };
+    let config = CaptureConfig {
+        source_id: started.session.source_id.clone(),
+        microphone_id: started.take.microphone_id.clone(),
+        system_audio,
+        fps: 30,
+    };
+    let folder = takes::take_dir(&s.store.session_dir(id)?, take.index);
+    match capture::start_muted(config, &folder, muted) {
+        Ok(active) => {
+            let session = started.session.clone();
+            let cancel = activate(&mut runtime, &session, active, Some(take));
+            drop(runtime);
+            if started.take.microphone_id.is_some()
+                || (system_audio && !session.source_id.starts_with("android:"))
+            {
+                spawn_live(s, id, cancel, Some(take));
+            }
+            Ok(session)
+        }
+        Err(error) => {
+            let restored = takes::abandon(&s.store, id, started);
+            Err(match restored {
+                Ok(()) => error,
+                Err(restore) => format!("{error}; restoring the session failed: {restore}"),
+            })
+        }
+    }
 }
 /// Continues a ready session as a new take, locked to the session's source.
 /// As in `start_recording`, `None` for `microphone_id` records without a
@@ -574,9 +804,8 @@ async fn record_more(
     system_audio: Option<bool>,
     muted: Option<bool>,
 ) -> Result<Session, String> {
-    // WP C fills this
-    let _ = (s, id, microphone_id, system_audio, muted);
-    Err("Record more is not available yet".into())
+    let s = s.inner().clone();
+    blocking(move || start_take(&s, &id, microphone_id, system_audio, muted.unwrap_or(false))).await
 }
 #[tauri::command]
 fn get_settings(s: CmdState<'_>) -> Settings {
@@ -604,6 +833,7 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
     blocking(move || {
         let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
         if let Some((session, active)) = &runtime.active {
+            // elapsedMs stays relative to the take; takeOffsetMs places it.
             return Ok(RecordingStatus {
                 state: "recording".into(),
                 session_id: Some(session.id.clone()),
@@ -611,27 +841,30 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
                 audio_level: active.audio_level(),
                 error: active.error(),
                 live_transcript: runtime.live_transcript.clone(),
-                take_index: None,
-                take_offset_ms: None,
+                take_index: runtime.active_take.map(|take| take.index),
+                take_offset_ms: runtime.active_take.map(|take| take.offset_ms),
             });
         }
-        Ok(RecordingStatus {
-            state: if runtime.processing.is_some() {
-                "processing"
-            } else {
-                "idle"
-            }
-            .into(),
-            session_id: runtime.processing.clone(),
-            elapsed_ms: 0,
-            audio_level: 0.,
-            error: runtime.last_error.clone(),
-            live_transcript: None,
-            take_index: None,
-            take_offset_ms: None,
-        })
+        Ok(idle_status(&runtime))
     })
     .await
+}
+fn idle_status(runtime: &Runtime) -> RecordingStatus {
+    RecordingStatus {
+        state: if runtime.processing.is_some() {
+            "processing"
+        } else {
+            "idle"
+        }
+        .into(),
+        session_id: runtime.processing.clone(),
+        elapsed_ms: 0,
+        audio_level: 0.,
+        error: runtime.last_error.clone(),
+        live_transcript: None,
+        take_index: runtime.processing_take.map(|take| take.index),
+        take_offset_ms: runtime.processing_take.map(|take| take.offset_ms),
+    }
 }
 pub fn run() {
     tauri::Builder::default()
@@ -833,6 +1066,206 @@ mod orchestration_tests {
         let transcript = runtime.live_transcript.as_ref().unwrap();
         assert_eq!(transcript.status.as_deref(), Some("previous"));
         assert!(transcript.error.is_none());
+        assert!(runtime.last_error.is_none());
+    }
+    fn word(text: &str, start_ms: u64, end_ms: u64) -> Word {
+        Word {
+            text: text.into(),
+            start_ms,
+            end_ms,
+            seek_ms: None,
+        }
+    }
+    #[test]
+    fn take_snapshots_are_placed_on_the_session_timeline() {
+        assert_eq!(on_session_clock(None, (5000, 8000)), (5000, 8000));
+        let take = Some(TakeRef {
+            index: 2,
+            offset_ms: 80000,
+        });
+        let (start, end) = on_session_clock(take, (5000, 8000));
+        assert_eq!((start, end), (85000, 88000));
+        let update = Transcript {
+            segments: vec![Segment {
+                id: "segment-0".into(),
+                start_ms: 100,
+                end_ms: 500,
+                text: "here".into(),
+                words: vec![word("here", 100, 500)],
+            }],
+            ..Default::default()
+        };
+        let live = transcribe::merge_live(&Transcript::default(), update, start, end);
+        assert_eq!(live.segments[0].id, "live-85000-0");
+        assert_eq!(
+            (
+                live.segments[0].words[0].start_ms,
+                live.segments[0].words[0].end_ms
+            ),
+            (85100, 85500)
+        );
+    }
+    #[test]
+    fn processing_status_reports_the_take_until_the_job_ends() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let take = TakeRef {
+            index: 3,
+            offset_ms: 134000,
+        };
+        {
+            let mut runtime = state.runtime.lock().unwrap();
+            runtime.processing = Some("take-job".into());
+            runtime.processing_take = Some(take);
+        }
+        let status = idle_status(&state.runtime.lock().unwrap());
+        assert_eq!(status.state, "processing");
+        assert_eq!(status.session_id.as_deref(), Some("take-job"));
+        assert_eq!(
+            (status.take_index, status.take_offset_ms),
+            (Some(3), Some(134000))
+        );
+        let other = ProcessingJob {
+            state: state.clone(),
+            id: "other".into(),
+        };
+        other.working_on(None);
+        drop(other);
+        assert_eq!(state.runtime.lock().unwrap().processing_take, Some(take));
+        drop(ProcessingJob {
+            state: state.clone(),
+            id: "take-job".into(),
+        });
+        let status = idle_status(&state.runtime.lock().unwrap());
+        assert_eq!(status.state, "idle");
+        assert_eq!((status.take_index, status.take_offset_ms), (None, None));
+    }
+    fn ready_with_takes(state: &Shared) -> Session {
+        let mut session = state
+            .store
+            .create_session(
+                None,
+                Some("Takes"),
+                &CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: None,
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        session.status = "ready".into();
+        session.duration_ms = 2000;
+        state.store.save_session(&session).unwrap();
+        session
+    }
+    #[test]
+    fn record_more_is_refused_while_busy_or_without_a_playable_recording() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let session = ready_with_takes(&state);
+        state.runtime.lock().unwrap().processing = Some("other".into());
+        assert!(start_take(&state, &session.id, None, None, false)
+            .unwrap_err()
+            .contains("Finish the current"));
+        state.runtime.lock().unwrap().processing = None;
+        // No combined video on disk: nothing to continue from.
+        assert!(start_take(&state, &session.id, None, None, false)
+            .unwrap_err()
+            .contains("playable recording"));
+        state
+            .store
+            .update_session(&session.id, |s| {
+                s.status = "processing".into();
+                Ok(())
+            })
+            .unwrap();
+        assert!(start_take(&state, &session.id, None, None, false).is_err());
+        let unchanged = state.store.session(&session.id).unwrap();
+        assert!(unchanged.takes.is_empty());
+        assert!(state.runtime.lock().unwrap().active.is_none());
+        assert!(!state
+            .store
+            .session_dir(&session.id)
+            .unwrap()
+            .join("takes")
+            .exists());
+    }
+    #[test]
+    fn retrying_a_take_transcribes_only_it_and_settles_the_session() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let mut session = ready_with_takes(&state);
+        // Video-only takes need no speech tools: each transcribes as empty.
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: None,
+            system_audio: false,
+        };
+        session.status = "processing".into();
+        session.duration_ms = 3500;
+        session.takes = vec![
+            take(1, 0, 2000, TakeStatus::Ready),
+            take(2, 2000, 1500, TakeStatus::Error),
+        ];
+        state.store.save_session(&session).unwrap();
+        let kept = Segment {
+            id: "segment-0".into(),
+            start_ms: 100,
+            end_ms: 900,
+            text: "Take one".into(),
+            words: vec![word("Take", 100, 400), word("one", 500, 900)],
+        };
+        state
+            .store
+            .save_transcript(
+                &session.id,
+                &Transcript {
+                    segments: vec![kept.clone()],
+                    status: Some("complete".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        state.runtime.lock().unwrap().processing = Some(session.id.clone());
+        let plan = takes::retry_plan(&state.store.session(&session.id).unwrap());
+        assert_eq!(plan, [2]);
+        finish_takes(
+            ProcessingJob {
+                state: state.clone(),
+                id: session.id.clone(),
+            },
+            plan,
+        );
+        let done = state.store.session(&session.id).unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.error.as_deref()),
+            ("ready", None)
+        );
+        assert_eq!(done.takes[1].status, TakeStatus::Ready);
+        let transcript = state.store.transcript(&session.id).unwrap();
+        assert_eq!(transcript.segments.len(), 1);
+        assert_eq!(transcript.segments[0].text, kept.text);
+        assert_eq!(
+            transcript.takes,
+            [
+                TakeMark {
+                    index: 1,
+                    start_ms: 0
+                },
+                TakeMark {
+                    index: 2,
+                    start_ms: 2000
+                }
+            ]
+        );
+        let runtime = state.runtime.lock().unwrap();
+        assert!(runtime.processing.is_none() && runtime.processing_take.is_none());
         assert!(runtime.last_error.is_none());
     }
     #[test]
