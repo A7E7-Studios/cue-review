@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import type { Settings, SetupStatus } from '../backend';
 import type { WindowTheme } from '../chrome/windowApi';
-import { estimateTokens, normalizeVocabulary, SettingsDialog } from './SettingsDialog';
+import { estimateTokens, FONT_CREDIT, normalizeVocabulary, SettingsDialog } from './SettingsDialog';
 
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => false }));
 
@@ -180,6 +180,13 @@ describe('SettingsDialog', () => {
     expect(screen.queryByRole('button', { name: 'Install transcription' })).not.toBeInTheDocument();
   });
 
+  it('credits the bundled Figtree font and points at its shipped licence', () => {
+    render(<Harness setup={null}/>);
+    const dialog = screen.getByRole('dialog', { name: 'Settings' });
+    expect(dialog).toHaveTextContent(FONT_CREDIT);
+    expect(FONT_CREDIT).toMatch(/SIL Open Font License 1\.1/);
+    expect(FONT_CREDIT).toContain('licenses/Figtree-OFL.txt');
+  });
   it('explains that tools are only inspected in the desktop app', () => {
     render(<Harness setup={null}/>);
     expect(screen.getByText('Start the desktop app to inspect installed recording tools.')).toBeVisible();
