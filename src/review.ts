@@ -1,7 +1,15 @@
-import type { Segment, Word } from './backend';
+import type { Segment, TakeMark, Word } from './backend';
 export function formatTime(ms: number): string {
   const seconds = Math.floor(Math.max(0, Number.isFinite(ms) ? ms : 0) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+/** The recording dock's clock: "00:08", "12:34", then "1:02:03" after an hour. */
+export function formatTimer(ms: number): string {
+  const seconds = Math.floor(Math.max(0, Number.isFinite(ms) ? ms : 0) / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
+  const rest = String(seconds % 60).padStart(2, '0');
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${rest}` : `${String(minutes).padStart(2, '0')}:${rest}`;
 }
 export function seekTime(ms: number, durationMs: number): number {
   return Math.max(0, Math.min(Number.isFinite(durationMs) ? durationMs : 0, Number.isFinite(ms) ? ms : 0));
@@ -41,6 +49,43 @@ export function activeSegment(segments: Segment[], ms: number): number {
   }));
   if(nearest!==-1)return nearest;
   return segments.findIndex(segment => segment.words.some(hasSeekAnchor) ? activeWord(segment.words,ms)!==-1 : segment.startMs <= ms && ms < segment.endMs);
+}
+/** What a segment says: its words when it has them, otherwise its text. */
+export function segmentText(segment: Segment): string {
+  return segment.words.length ? segment.words.map(word => word.text).join(' ') : segment.text;
+}
+/** Indexes of the segments containing `query`, ignoring case and surrounding space. */
+export function findMatches(segments: Segment[], query: string): number[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [];
+  return segments.flatMap((segment, index) => segmentText(segment).toLocaleLowerCase().includes(needle) ? [index] : []);
+}
+
+export type TranscriptItem =
+  /** "Take N · m:ss", or "Take N · recording" for the take being recorded. */
+  | { kind: 'divider'; take: number; startMs: number; live: boolean }
+  /** `live` rows belong to the take being recorded; `tail` is its last row. */
+  | { kind: 'segment'; index: number; live: boolean; tail: boolean };
+/**
+ * Segments in order with a divider before the first segment of each take after
+ * take 1. While a take records, pass it as `liveTake`: its segments are live, the
+ * last one is the tail, and its divider is shown even before it has any words.
+ */
+export function transcriptItems(segments: Segment[], takes: TakeMark[] = [], liveTake?: TakeMark): TranscriptItem[] {
+  const dividers = takes.filter(take => take.index > 1 && take.index !== liveTake?.index)
+    .map(take => ({ kind: 'divider' as const, take: take.index, startMs: take.startMs, live: false }));
+  if (liveTake && liveTake.index > 1) dividers.push({ kind: 'divider', take: liveTake.index, startMs: liveTake.startMs, live: true });
+  dividers.sort((a, b) => a.startMs - b.startMs || a.take - b.take);
+  const lastLive = liveTake ? segments.reduce((last, segment, index) => segment.startMs >= liveTake.startMs ? index : last, -1) : -1;
+  const items: TranscriptItem[] = [];
+  let next = 0;
+  segments.forEach((segment, index) => {
+    while (next < dividers.length && dividers[next].startMs <= segment.startMs) items.push(dividers[next++]);
+    const live = !!liveTake && segment.startMs >= liveTake.startMs;
+    items.push({ kind: 'segment', index, live, tail: live && index === lastLive });
+  });
+  while (next < dividers.length) items.push(dividers[next++]);
+  return items;
 }
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
