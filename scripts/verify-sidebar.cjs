@@ -1,5 +1,7 @@
 // Real WebView2 mouse dragging and persistence in an owned, isolated desktop app.
+// Controls are found by the accessible names in src/workspace/types.ts (NAMES) and its HOOKS.
 const { chromium } = require('playwright');
+const { withSpeechPath } = require('./test-env.cjs');
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const root = path.resolve(__dirname, '..'), runId = crypto.randomUUID();
@@ -12,6 +14,25 @@ const assert = (ok, message) => { if (!ok) throw Error(message); };
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 let child, browser, page;
 const invoke = (command, args) => page.evaluate(({ command, args }) => window.__TAURI_INTERNALS__.invoke(command, args), { command, args });
+// The theme lives in Settings → Appearance, opened from the title bar (decision 14).
+async function setTheme(theme) {
+  await page.locator('[aria-label="Title bar"]').getByRole('button', { name: 'Settings', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await dialog.getByLabel('Appearance', { exact: true }).selectOption(theme);
+  await page.waitForFunction(value => document.documentElement.dataset.theme === value, theme);
+  await dialog.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await dialog.waitFor({ state: 'detached' });
+}
+// An inactive row's text color and the --color-row-text token it should resolve to in the current theme.
+const rowText = () => page.evaluate(() => {
+  const row = document.querySelector('.session:not([aria-current])');
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--color-row-text)';
+  row.parentElement.append(probe);
+  const expected = getComputedStyle(probe).color;
+  probe.remove();
+  return { actual: getComputedStyle(row).color, expected };
+});
 (async () => {
   fs.mkdirSync(output, { recursive: true });
   fs.mkdirSync(path.join(dataRoot, 'projects'), { recursive: true });
@@ -34,7 +55,7 @@ const invoke = (command, args) => page.evaluate(({ command, args }) => window.__
     try { await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(500) }); occupied = true; } catch {}
     assert(!occupied, 'CDP9228 is occupied; refusing to attach to an unowned app.');
     const local = path.join(process.env.LOCALAPPDATA, 'CueReview');
-    child = spawn(path.join(root, 'src-tauri', 'target', 'release', 'cuereview.exe'), [], { cwd: root, windowsHide: true, stdio: 'ignore', env: { ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: path.join(local, 'models', 'ggml-base.bin'), CUEREVIEW_VAD_MODEL: path.join(local, 'models', 'ggml-silero-v6.2.0.bin'), PATH: `${path.join(local, 'tools', 'whisper-b5454')};${process.env.PATH}`, WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9228' } });
+    child = spawn(path.join(root, 'src-tauri', 'target', 'release', 'cuereview.exe'), [], { cwd: root, windowsHide: true, stdio: 'ignore', env: withSpeechPath({ ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: path.join(local, 'models', 'ggml-base.bin'), CUEREVIEW_VAD_MODEL: path.join(local, 'models', 'ggml-silero-v6.2.0.bin'), WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9228' }) });
     result.ownedPid = child.pid;
     for (let i = 0; i < 75; i++) {
       assert(child.exitCode === null, 'Owned app exited before startup.');
@@ -77,9 +98,16 @@ const invoke = (command, args) => page.evaluate(({ command, args }) => window.__
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByRole('button', { name: 'Section options for Design', exact: true }).waitFor();
     await page.getByRole('button', { name: 'PlayalongXR', exact: true }).click();
+    if (await page.evaluate(() => document.documentElement.dataset.theme) !== 'light') await setTheme('light');
+    const light = await rowText();
+    assert(light.actual === light.expected, `Light sidebar rows are ${light.actual}, not --color-row-text ${light.expected}.`);
     await page.screenshot({ path: path.join(output, 'light-sidebar.png') });
-    await page.getByRole('button', { name: 'Use dark theme', exact: true }).click();
-    await page.waitForFunction(() => getComputedStyle(document.querySelector('.session')).color === 'rgb(228, 230, 236)');
+    await setTheme('dark');
+    // Rows follow the theme once any color transition settles.
+    for (let i = 0; i < 50; i++) { const dark = await rowText(); if (dark.actual === dark.expected) break; await delay(100); }
+    const dark = await rowText();
+    assert(dark.actual === dark.expected && dark.actual !== light.actual, `Dark sidebar rows are ${dark.actual}, not --color-row-text ${dark.expected} (light ${light.actual}).`);
+    result.checks.themeRows = { light: light.actual, dark: dark.actual };
     await page.screenshot({ path: path.join(output, 'dark-sidebar.png') });
     await page.reload();
     await page.getByRole('region', { name: 'Section: Design', exact: true }).getByRole('button', { name: 'Workspace issues', exact: true }).waitFor();
@@ -133,6 +161,23 @@ const invoke = (command, args) => page.evaluate(({ command, args }) => window.__
     assert((await invoke('list_sessions', { projectId: null })).length === 4, 'Deleted recording returned after reload.');
     assert(!(await invoke('list_projects')).some(item => item.id === sections[1].id), 'Deleted section returned after reload.');
     result.checks.deleteRecordingFiles = true;
+    // Ctrl+K focuses the title bar search, which filters by session name only (decision 11).
+    const rows = () => sidebar.locator('.session').count();
+    const allRows = await rows();
+    await page.keyboard.press('Control+k');
+    const search = page.getByRole('searchbox', { name: 'Search recordings', exact: true });
+    assert(await search.evaluate(input => input === document.activeElement), 'Ctrl+K did not focus Search recordings.');
+    await search.fill('quest');
+    await sidebar.getByRole('button', { name: 'Quest performance', exact: true }).waitFor();
+    assert(await rows() === 1, 'Search did not narrow the sidebar to the matching session.');
+    await search.fill('moment');
+    await sidebar.getByRole('status').filter({ hasText: 'No matches' }).waitFor();
+    assert(await rows() === 0, 'Search matched transcript text instead of session names only.');
+    await page.screenshot({ path: path.join(output, 'search-no-matches.png') });
+    await search.fill('');
+    for (let i = 0; i < 50 && await rows() !== allRows; i++) await delay(100);
+    assert(await rows() === allRows, 'Clearing the search did not restore every session.');
+    result.checks.search = { rows: allRows, quest: 1, transcriptOnlyTerm: 0 };
     assert(result.pageErrors.length === 0, 'WebView errors occurred.');
     result.passed = true;
   } catch (error) { result.error = error.stack || String(error); result.passed = false; process.exitCode = 1; if (page) { await page.screenshot({ path: path.join(output, 'failure.png') }).catch(() => {}); result.alerts = await page.getByRole('alert').allTextContents().catch(() => []); } }

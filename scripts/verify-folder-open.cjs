@@ -36,7 +36,7 @@ function windows() {
     }
     browser = await chromium.connectOverCDP(endpoint);
     page = browser.contexts()[0].pages()[0];
-    await page.locator('.session').filter({ hasText: 'Folder opening verification' }).click();
+    await page.getByRole('complementary', { name: 'Recordings', exact: true }).getByRole('button', { name: 'Folder opening verification', exact: true }).click();
     await page.getByRole('button', { name: 'Open recording folder', exact: true }).click();
     for (let i = 0; i < 20; i++) {
       opened = windows().find(item => {

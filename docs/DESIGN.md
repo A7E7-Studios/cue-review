@@ -1,68 +1,87 @@
-# CueReview design review and shared foundation
+# CueReview design system: Float v2
 
-Review date: 28 October 2026. Baseline: installed v0.1.0; improvements on `codex/design-polish`.
+Updated 28 October 2026 for v0.2.0. The v0.1 review that led here is summarized at the end.
 
-## Assessment
+## Source of truth
 
-The compact, neutral shell is the right direction. The next quality step comes from stronger composition and predictable behavior. Making the controls progressively smaller would hurt legibility without resolving the empty workspace, abrupt state changes, or uneven keyboard behavior.
+- **Mocks:** `docs/design/float-v2/`. `FloatV2ReviewWindows.dc.html`, `FloatV2RecordMoreWindows.dc.html` (recording take 2) and `FloatV2ReviewMac.dc.html` are Design Component files: fill each `{{…}}` hole from the `renderVals()` script at the bottom (accent `#5B5BD6`, font Figtree; icon paths in `ic`). `sample-capture.svg` is the sample recorded screen. They come from row "C2 · Float, revised" of the design canvas.
+- **Not mocked:** the fresh draft, compact, dark and Linux states. Derive them from the same system and review them against the mocks.
+- **Tokens:** `src/ui/tokens.css`. Float v2 roles use the `--color-*`, `--size-*`, `--radius-*` and `--font-size-*` prefixes; the older short names remain only for styles not yet moved.
+- **Names:** `src/workspace/types.ts`. `NAMES` holds every accessible name the app, its tests and `scripts/verify-*.cjs` find controls by; `HOOKS` lists the few class hooks the scripts still use. Renaming a control there is a breaking change.
+- **Working specification:** Storybook (`npm run storybook`). Each component shows its default, hover/focus, disabled, busy, error, long-content, dark and reduced-motion states where they apply.
 
-Keep one application identity in native window chrome, text-only recording rows, optional sections, immediate recording into a temporary session, and direct source selection. Avoid decorative cards, large onboarding copy, repeated status footers, and animation around live media. Sections categorize recordings; they do not introduce a project workflow.
+## Principles
 
-The font is `system-ui`, with `Segoe UI` and sans-serif fallbacks. On Windows this resolves to the system UI font; it is not a bundled custom font. The new scale is 13px body, 12px controls, 11px metadata, and 16px session titles. A shared family across platforms should mean a consistent hierarchy, rather than forcing Windows typography onto macOS.
+Keep the shell compact and neutral. Recording starts immediately into a temporary session, sources are chosen directly, rows are text only, and sections categorize recordings without introducing a project workflow. Avoid decorative cards, large onboarding copy, repeated status footers, and animation around live media. Shrinking controls further would hurt legibility; composition and predictable behavior carry the quality.
 
-## Changes implemented in this pass
+## Layout
 
-| Area | Change | Purpose |
+- **Ground and sheet.** The window ground (`--color-ground`) carries the sidebar; the white sheet (`--color-sheet`) holds the workspace. On Windows the sheet has a 1px `--color-sheet-edge` top and left border and an 8px top-left radius.
+- **Sidebar, 232px.** New recording is the primary button at the top, with a New section icon button beside it. Rows show the session name only; duration and date appear on hover or focus as `aria-hidden` text. No section counts. Rows are 32px with a 7px radius; hover is `--color-row-hover`, and the selected row is white with a small shadow (on macOS, an accent tint in the inset sidebar panel). The sidebar auto-hides below about 1000px wide.
+- **Center.** The title row holds the title (click to rename), Open recording folder and the **Copy for agent** accent pill; no metadata chips. Below it, the video has exactly one border (a 1px ring drawn as a shadow, 10px radius, 12px on macOS), is top-aligned under the title and keeps its aspect ratio; unused space shows the neutral surface. The controls sit directly under the video.
+- **Transcript column, 320px (at least 280px),** running the full height on the right. Focus video hides it and gives the video the space. There is no resizable split yet.
+- **Compact recording mode, about 520×320:** the dock and a drag strip only.
+
+## Window chrome
+
+This replaces the v0.1 rule of keeping native window chrome.
+
+| Platform | Chrome |
+| --- | --- |
+| Windows | `decorations: false` and a 40px custom title bar: logo, sidebar toggle, centered search (`Ctrl+K`), Settings, then Minimize, Maximize/Restore and Close at 46×40. Close hovers `#C42B1C` with white. Drag regions (`data-tauri-drag-region`) sit only on empty bar areas, never on a control or the search field; double-clicking them maximizes. |
+| macOS | `titleBarStyle: Overlay` with a hidden title. The native traffic lights sit inside the inset sidebar panel (78×28 reserved); the content toolbar is 52px with search and Settings, and shows a sidebar toggle only while the sidebar is hidden. |
+| Linux | Native decorations, with the Windows bar layout minus window controls and drag regions. |
+
+Window control names are "Minimize window", "Maximize window" or "Restore window", and "Close window". Compact mode keeps only a drag strip: Minimize and Close on Windows, room for the traffic lights on macOS, nothing on Linux. Close stays guarded while recording or processing, whichever control asks. Known cost: custom controls lose the Windows 11 Snap Layouts flyout on the maximize button.
+
+## Typography
+
+- **Family:** Figtree, bundled as a variable font through `@fontsource-variable/figtree` and imported in `src/main.tsx` and `.storybook/preview.tsx`. Fallbacks are `system-ui`, `Segoe UI` and sans-serif. Inter is the documented alternative. No Google Fonts: the CSP allows only `'self'`.
+- **Scale:** title 18/700; body 13.5; transcript 14 with 1.55 line height; meta 12; controls 12.5; shortcut hints 11; the dock timer 19 with tabular numbers.
+- **Attribution:** Figtree is Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree), licensed under the SIL Open Font License 1.1. The license text is in `node_modules/@fontsource-variable/figtree/LICENSE`. The bundled WOFF2 files carry the copyright notice and the license URL but not the license text. Open item: ship the OFL text with the app's other third-party licenses.
+
+## Tokens (light)
+
+| Role | Value |
+| --- | --- |
+| Ground and sidebar | `#ECEEF2` |
+| Sheet | `#FFFFFF`; Windows edge `#DFE2E7` |
+| Divider | `#EEEFF2` |
+| Text | `#18181B`; secondary `#52525B`; tertiary `#66666F`; rows `#27272A`; transcript `#3F3F46`, past `#52525B` |
+| Accent | `#5B5BD6`. The current transcript row is an 8% accent tint (`#F2F2FC`); the spoken word is accent with white text in a 999px pill |
+| Neutral pill | `#F4F4F7` |
+| New recording | White with a 1px `#DCDFE5` ring |
+| Scrubber | Track `#F0F0F4`, unplayed speech `#DCDCE5`, played speech accent, take tick `#A1A1AA`, white knob |
+| Recording | Record dot `#E5484D`; Stop `#D7333A` with white text; live dot `#FF6369`; status chip `#FDECEC` with `#B42318`; preview ring 2px `#E5484D` |
+| Recording dock | `#18181B`, divider `#3F3F46`, secondary text `#A1A1AA`, meter `#4ADE80` / `#FACC15` / `#3F3F46` |
+| Radii | Window 8 (16 on macOS); rows 7; pills 999; video 10 (12 on macOS); macOS sidebar panel 16; current transcript row 12 |
+| Sizes | Windows title bar 40 with 46×40 controls; macOS toolbar 52; sidebar 232; transcript 320 (min 280); rows 32; New recording 36; play 40; pills 32–36; dock controls 44 |
+
+The dark theme (`:root[data-theme='dark']`) is derived from these roles. It has not been designed in the mocks yet and needs its own review. The theme is chosen only in **Settings → Appearance**; there is no theme button in the sidebar or title bar.
+
+## States and components
+
+- **Status.** A status chip shows only while Recording or Processing; nothing shows once the recording is ready, and there is no "Synced" badge. Errors appear inline where they happen, with Retry; empty states appear in the body.
+- **One slot, two modes.** In review, the slot under the video is the scrubber and controls: a visually hidden native range named "Playback position" with speech segments, take ticks and the played part drawn over it, then play, time, speed, focus and the **Record more** pill. While recording, the same slot becomes the dark dock: timer (`role=timer`), "Take N" from take 2, level meter, the locked source, mute, compact and Stop. There is no progress bar while recording; the Live badge and the red ring appear on the preview.
+- **Draft.** Source and microphone pickers and Record sit in the same slot. The pickers are anchored popovers that flip within the viewport, with arrow keys, Home/End and typeahead.
+- **Takes.** The transcript shows a "Take N · m:ss" divider where each take starts, and "Take N · recording" with a live tail and its note while recording. Copy for agent is disabled while recording.
+- **Transcript.** Word-level seek stays: words render inline with one roving tab stop, labelled "Seek to {word} at m:ss" or "Seek to m:ss". The column follows playback until the reader scrolls away, then offers **Return to playback**. **Find in transcript** searches the text. Title bar search filters sessions by name only.
+- **Settings dialog.** Appearance, the recording tools' status with Install transcription and technical details, the vocabulary field, and the shortcut list.
+
+## Shortcuts and hints
+
+| Action | Windows and Linux | macOS |
 | --- | --- | --- |
-| Foundation | Semantic colors, spacing, radii, control sizes and motion in `src/ui/tokens.css` | Establish reusable decisions instead of one-off screen values |
-| Readability | Stronger secondary text, 13px transcript, 11px metadata | Preserve compact density while making actual work easier to read |
-| Controls | 28px icon targets, 30–32px common controls, small glyphs | Make compact controls easier to acquire |
-| Settings | Three capability statuses; technical paths/tools behind a disclosure | Keep everyday decisions visible and troubleshooting available |
-| Dialogs | Shared portal, background inertness, focus containment/restoration, busy guards | Make keyboard behavior match the modal appearance |
-| Markers | Capture the timestamp when Add marker is invoked | Preserve the intended moment while the user writes a note |
-| Sidebar | Section reveal, menu entry/exit, measured edge placement, typeahead and one tab stop | Improve continuity and keyboard predictability |
-| Reduced motion | Shared CSS and JS preference, including transcript seeking | Avoid smooth movement when the user requests reduced motion |
-| Workshop | 25 real-component stories, light/dark, reduced motion, compact sizes, errors and long content | Make states repeatable and inspectable without recording or changing files |
+| Record in a draft, Record more in review, Stop while recording | `Ctrl+R` | `⌘R` |
+| New recording, the only way to start a new session | `Ctrl+N` | `⌘N` |
+| Focus search | `Ctrl+K` | `⌘K` |
+| Play or pause; seek 5 s | `Space`; `←` / `→` | `Space`; `←` / `→` |
 
-`src/ui/polish.css` is a transitional layer over the existing screen stylesheet. Move legacy rules into component styles when those components are extracted; avoid accumulating further override layers. Shared dialog CSS uses the same tokens. The workshop imports the actual application styles and components, not a second implementation.
+Shortcut hints stay hidden until hover or focus, as in the Claude app ("Ctrl+N", "⌘N"). The `<kbd>` is `aria-hidden` and the control carries `aria-keyshortcuts`, so accessible names never change. Pill buttons put the shortcut in their tooltip. Shortcuts must not fire inside editable fields, dialogs or menus.
 
-## Prioritized next changes
+## Markers removed
 
-These are open findings, not completed behavior.
-
-### 1. Give each workspace state an intentional composition
-
-**Fresh session:** the empty transcript column currently reserves space without helping the next action. Let the source preview own the workspace; reveal transcript space when text or processing status exists. Keep source/audio controls in one quiet bottom strip. No welcome paragraph or naming step.
-
-**Review:** video remains top-aligned while the transcript stretches, leaving a large unused area below the player. Use a bounded, resizable split between media and transcript. Preserve media aspect ratio and keep playback controls attached to the media. Use the neutral surface for unused media space; do not add a black decorative frame in light mode. Persist the user's split preference, with sane minimum sizes.
-
-**Recording to review:** retain the same media region and source context through stop, finalization and transcription. Change the relevant status in place. Do not replace the entire workspace with a spinner or move the primary action unexpectedly.
-
-Acceptance: fresh, recording, processing and review feel related at 1280×820 and 900×650. Compact mode remains usable at 520×320. No nested horizontal scrolling, clipped primary actions or large unexplained blank panels.
-
-### 2. Finish the source picker as a single-step control
-
-The direct picker already satisfies the one-click requirement, but the list mixes displays, windows and connected devices. Group by source type; show only actual available devices, with a short reason for unavailable sources. Add search only when the list becomes long. Anchor to the invoking control and flip within the viewport instead of relying on fixed offsets.
-
-Complete Arrow Up/Down, Home/End and typeahead support, keeping Tab and Escape predictable. Preserve focus on the trigger after selection. Device failure must say what failed and offer a retry; it must not simultaneously say “Loading preview”.
-
-### 3. Make transcript navigation calm and keyboard efficient
-
-Every word currently creates a tab stop. Use one entry point for the active segment and arrow navigation within the transcript, retaining pointer word seeking. Keep focus visible independently of playback highlighting.
-
-Follow playback initially. If the user scrolls to read another passage, suspend automatic following and expose a contextual “Return to playback” action. Resume on explicit seek or that action. Do not add an always-visible preference for normal following, and do not force the scroll position while the user is reading elsewhere.
-
-### 4. Separate pending, failed and acknowledged states
-
-When selecting another recording, pause the old media and show which row is loading. Preserve the workspace geometry until the requested content is ready. Keep failed selection recoverable and avoid displaying old content as if it belongs to the newly selected row.
-
-Track acknowledged errors by failure identity so the 700ms runtime poll cannot immediately resurrect a dismissed message. Scope busy labels to the affected action: copying text or renaming a section should not turn Record into “Please wait…”. Use inline errors where a recovery action belongs, and transient status only for completed actions.
-
-### 5. Finish desktop input conventions
-
-Support Command on macOS and Control on Windows/Linux, including visible shortcut labels. Ignore recording/seek shortcuts inside editable controls and popovers. A bare marker shortcut must not accidentally match unrelated modifier combinations.
-
-For drag organization, add edge autoscroll and delayed expansion when hovering over a collapsed section. Announce the resulting move to assistive technology and preserve a keyboard equivalent. Section deletion must continue returning recordings to Recents; recording deletion remains explicitly destructive.
+Markers are out of the v0.2.0 UI: no Add marker button, no M shortcut, no marker dialog and no marker CLI commands. Spoken pointing ("look at this") replaces them, found by `cue moments`. The store keeps reading `markers.json` for one release.
 
 ## Motion contract
 
@@ -76,6 +95,7 @@ Use motion to explain a state change. Recording start/stop, timecode, video fram
 | Dialog | 180ms opacity and 5px translation | Implemented; background stays inert through exit |
 | Section disclosure | 180ms height reveal; chevron rotation | Implemented; collapsed content inert immediately |
 | Toast | 180ms opacity | Entry implemented; dismissal continuity remains open |
+| Shortcut hints | 120ms opacity on hover or focus | Implemented |
 | Workspace changes | At most 180–220ms restrained transition after content is ready | Proposed; do not animate resize or crossfade live video |
 | Reduced motion | No translation, fade, smooth scroll or delayed unmount | Implemented for shared surfaces and explicit transcript scroll |
 
@@ -83,18 +103,22 @@ Use `cubic-bezier(.2,.8,.2,1)` for surface motion. No bounce, spring, pulsing re
 
 ## Reuse boundary
 
-Keep the foundation local until another helper app needs it. Export tokens, Dialog/presence behavior, and eventually Button, IconButton and anchored Menu primitives. Keep capture, transcription, storage, shortcuts and workflow orchestration in CueReview. Reuse should not require every helper app to have the same sidebar or recording footer.
-
-Storybook is the working specification. Each shared component should show default, hover/focus, disabled, busy, error, long-content, dark and reduced-motion behavior where relevant. Prefer a small set of real primitives over a broad speculative component library.
+Keep the foundation local until another helper app needs it. Export tokens, Dialog/presence behavior, and eventually Button, IconButton and anchored Menu primitives. Keep capture, transcription, storage, shortcuts and workflow orchestration in CueReview. Reuse should not require every helper app to have the same sidebar or recording dock. Prefer a small set of real primitives over a broad speculative component library.
 
 ## Verification and limits
 
-- Automated application tests cover marker timing, dialog focus/inertness/busy behavior, section hiding and menu keyboard behavior. Production and static Storybook builds are required.
-- The workshop isolates its backend with Storybook-only Vite aliases. Its captures, recordings and file operations are in-memory fixtures. They do not validate native capture or filesystem behavior.
-- Accessibility scans are visible in Storybook and configured as inspection findings, not a blocking CI gate or certification. The foundation scan caught selected-label contrast; that token and dark destructive-button foreground were corrected.
-- This pass: 74 automated tests passed, along with the production build and static Storybook build. Manual workshop checks covered light/dark foundations, Settings, 520×320 compact recording, direct device selection, dialog focus, reduced-motion computed styles, and moving a recording to Recents. Foundation scans reported zero violations in both themes; this is a narrow scan result, not whole-application accessibility certification.
-- Independent review caught keyboard activation during dialog exit and installation preventing Settings dismissal. Both were corrected and covered by regressions, including cancelling deletion then immediately pressing Enter, and closing Settings to stop a recording during installation.
-- Inspect the real app at normal and compact sizes, both themes, 100% and increased OS scaling, keyboard-only input, and reduced motion. Observe rapid open/close and interrupted transitions. Unit tests alone cannot establish visual quality.
-- Recheck native window chrome, resize, Quest/display preview smoothness and actual stop/finalization with a dedicated test recording before shipping a new release. This design pass does not change capture encoding or certify hardware performance.
+- Compare Storybook and the dev app with the rendered mocks at 1280×820: spacing, type, colors, radii and states. Also check 900×650, compact 520×320 and the dark theme, at 100% and increased OS scaling, with keyboard-only input and reduced motion. Unit tests alone cannot establish visual quality.
+- The workshop isolates its backend with Storybook-only Vite aliases. Its captures, recordings and file operations are in-memory fixtures and do not validate native capture, window management or filesystem behavior.
+- Accessibility scans in Storybook are inspection findings, not a blocking CI gate or a certification.
+- Native chrome needs a manual pass on Windows: drag, double-click to maximize, edge resize, snapping, and close blocked while recording. `scripts/verify-native-ux.cjs` checks the bar's size, controls and drag regions.
 
-Run `npm run storybook` for development or `npm run build-storybook` for a static workshop. The installed v0.1.0 app remains separate from this branch until a new release is built and installed.
+## Still open
+
+- The dark theme review, and the fresh draft, compact and Linux states that the mocks do not cover.
+- A resizable media/transcript split (decision 13 defers it) and full transcript search in the sidebar (search covers names only).
+- From the v0.1 review, not part of v0.2.0: grouping sources by type, drag edge autoscroll with delayed expansion of collapsed sections and a spoken announcement of moves, and tracking acknowledged errors by failure identity.
+- Shipping the Figtree OFL text with the app.
+
+## History: the v0.1 review
+
+The 28 October 2026 review of v0.1.0 found the compact neutral shell right and asked for stronger composition and predictable behavior: an intentional layout for each workspace state, a single-step source picker with full keyboard support, one tab stop in the transcript with a "Return to playback" escape, separate pending/failed/acknowledged states, and Command/Control parity. It also built the shared foundation (tokens, the Dialog with focus containment, presence-based motion, reduced motion) and the Storybook workshop. Float v2 is the composition that review asked for; the items it did not cover are listed above.

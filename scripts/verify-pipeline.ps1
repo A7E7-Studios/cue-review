@@ -5,12 +5,23 @@ $env:CUEREVIEW_DATA_DIR = Join-Path $taskRoot '.local\pipeline-data'
 $env:CUEREVIEW_MODEL = Join-Path $env:LOCALAPPDATA 'CueReview\models\ggml-base.bin'
 $env:CUEREVIEW_VAD_MODEL = Join-Path $env:LOCALAPPDATA 'CueReview\models\ggml-silero-v6.2.0.bin'
 $env:CUEREVIEW_DTW_MODEL = 'base'
-$env:PATH = (Join-Path $env:LOCALAPPDATA 'CueReview\tools\whisper-b5454') + ';' + $env:PATH
+# The speech runtime: CUEREVIEW_WHISPER_DIR, else the one the app downloads, else the one the installer bundles.
+$whisperDir = $env:CUEREVIEW_WHISPER_DIR
+if ($whisperDir) {
+  if (!(Test-Path -LiteralPath (Join-Path $whisperDir 'whisper-cli.exe'))) { throw "CUEREVIEW_WHISPER_DIR has no whisper-cli.exe: $whisperDir" }
+} else {
+  $whisperDir = @((Join-Path $env:LOCALAPPDATA 'CueReview\tools\whisper-b5454'), (Join-Path $env:LOCALAPPDATA 'Programs\CueReview\tools\whisper-b5454')) | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'whisper-cli.exe') } | Select-Object -First 1
+}
+if ($whisperDir) { $env:PATH = $whisperDir + ';' + $env:PATH }
+# A real captured window from the capture::tests run, or CUEREVIEW_PIPELINE_VIDEO.
+$capturedVideo = if ($env:CUEREVIEW_PIPELINE_VIDEO) { $env:CUEREVIEW_PIPELINE_VIDEO } else { Join-Path $taskRoot 'test-results\native-capture\window\video.mp4' }
+if (!(Test-Path -LiteralPath $capturedVideo)) { throw "Captured window video missing: $capturedVideo. Run the capture::tests first or set CUEREVIEW_PIPELINE_VIDEO." }
+if (!(Test-Path -LiteralPath $cueExe)) { throw "Build the CLI first (cargo build --bin cue): $cueExe is missing" }
 $projectId = [guid]::NewGuid().ToString()
 $sessionId = [guid]::NewGuid().ToString()
 $projectDir = Join-Path $env:CUEREVIEW_DATA_DIR 'projects'
 $sessionDir = Join-Path $env:CUEREVIEW_DATA_DIR "sessions\$sessionId"
-New-Item -ItemType Directory -Force -Path $projectDir,$sessionDir | Out-Null
+New-Item -ItemType Directory -Force -Path $projectDir,$sessionDir,(Join-Path $taskRoot 'test-results') | Out-Null
 $created = [DateTimeOffset]::UtcNow.ToString('o')
 @{id=$projectId;name='Speech pipeline verification';createdAt=$created} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $projectDir "$projectId.json")
 Add-Type -AssemblyName System.Speech
@@ -19,7 +30,7 @@ $speech.SetOutputToWaveFile((Join-Path $sessionDir 'mic.wav'))
 $speech.Speak('When I open the library, the transition feels slow. When I click here, the details panel does not update. Move this button to the top toolbar.')
 $speech.Dispose()
 $seconds = [double](& ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 (Join-Path $sessionDir 'mic.wav'))
-& ffmpeg -hide_banner -loglevel error -y -stream_loop -1 -i (Join-Path $taskRoot 'test-results\native-capture\window\video.mp4') -i (Join-Path $sessionDir 'mic.wav') -map 0:v:0 -map 1:a:0 -t $seconds -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -movflags +faststart (Join-Path $sessionDir 'video.mp4')
+& ffmpeg -hide_banner -loglevel error -y -stream_loop -1 -i $capturedVideo -i (Join-Path $sessionDir 'mic.wav') -map 0:v:0 -map 1:a:0 -t $seconds -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -movflags +faststart (Join-Path $sessionDir 'video.mp4')
 if ($LASTEXITCODE -ne 0) { throw 'Fixture media creation failed' }
 @{id=$sessionId;projectId=$projectId;name='Known speech over real captured window';createdAt=$created;durationMs=[long]($seconds*1000);status='error';videoPath=$null;folderPath=$sessionDir;error='Test fixture awaiting transcription';sourceId='fixture:captured-window';microphoneId='fixture:local-speech';systemAudio=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sessionDir 'session.json')
 & $cueExe transcribe $sessionId | Set-Content -LiteralPath (Join-Path $sessionDir 'cli-transcript.json')
@@ -34,7 +45,7 @@ if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $clip.path)) { throw 'Clip 
 if ($LASTEXITCODE -ne 0) { throw 'Exported clip failed full decode' }
 $info = (& $cueExe info $sessionId) | ConvertFrom-Json
 if ($info.status -ne 'ready' -or !$info.videoPath) { throw 'Successful transcription did not restore usable session metadata' }
-$result = @{sessionId=$sessionId;durationMs=$info.durationMs;phrase=$matches;frame=$frame.path;clip=$clip.path;status='passed';fixture='Local Windows speech synthesis over a real captured window, separate from hardware microphone tests'}
+$result = @{sessionId=$sessionId;whisperDir=$whisperDir;durationMs=$info.durationMs;phrase=$matches;frame=$frame.path;clip=$clip.path;status='passed';fixture='Local Windows speech synthesis over a real captured window, separate from hardware microphone tests'}
 $json = $result | ConvertTo-Json -Depth 5
 [IO.File]::WriteAllText((Join-Path $taskRoot 'test-results\pipeline-verification.json'), $json, (New-Object Text.UTF8Encoding($false)))
 Write-Output $json

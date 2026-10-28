@@ -1,6 +1,8 @@
 // Native recovery audit: copies only the named test fixture into a unique data root.
 // The user's regular app/profile/data are never attached, changed, or closed.
+// Controls are found by the accessible names in src/workspace/types.ts (NAMES) and its HOOKS.
 const { chromium } = require('playwright');
+const { withSpeechPath, whisperDir } = require('./test-env.cjs');
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -18,7 +20,9 @@ const testModel = path.join(dataRoot, 'models', 'intentionally-missing.bin');
 const sessionId = crypto.randomUUID(), projectId = crypto.randomUUID();
 const sessionDir = path.join(dataRoot, 'sessions', sessionId);
 const endpoint = 'http://127.0.0.1:9225';
-const result = { runId, dataRoot, sourceFixture: fixture, executable, startedAt: new Date().toISOString(), checks: {}, screenshots: [], ownedPids: [], pageErrors: [], cleanup: {} };
+const result = { runId, dataRoot, sourceFixture: fixture, executable, whisperDir: whisperDir(), startedAt: new Date().toISOString(), checks: {}, screenshots: [], ownedPids: [], pageErrors: [], cleanup: {} };
+// Markers left the UI in v0.2.0 (decision 5); a legacy markers.json must stay readable through get_markers.
+const legacyMarkers = [{ id: crypto.randomUUID(), timeMs: 1000, label: 'Legacy marker from v0.1' }];
 let child, browser, page, childLog;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -26,6 +30,7 @@ const invoke = (command, args) => page.evaluate(({ command, args }) => window.__
 const shot = async name => { const target = path.join(output, `${name}.png`); await page.screenshot({ path: target }); result.screenshots.push(target); };
 const mediaHashes = () => Object.fromEntries(['video.mp4', 'mic.wav'].map(name => [name, hash(path.join(sessionDir, name))]));
 const assertMedia = before => { const after = mediaHashes(); if (JSON.stringify(before) !== JSON.stringify(after)) throw Error('Original recording media changed during recovery/retry'); return after; };
+const sidebar = () => page.getByRole('complementary', { name: 'Recordings', exact: true });
 
 async function closeOwned() {
   if (!child) return;
@@ -49,7 +54,7 @@ async function closeOwned() {
 async function launchOwned() {
   try { const response = await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(600) }); if (response.ok) throw Error('CDP9225 is already occupied; refusing to attach to an unowned app'); }
   catch (error) { if (error.message.includes('already occupied')) throw error; }
-  const env = { ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: testModel, CUEREVIEW_VAD_MODEL: vadModel, CUEREVIEW_DTW_MODEL: process.env.CUEREVIEW_DTW_MODEL || 'base', WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'webview-profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9225', PATH: `${path.join(normalLocal, 'tools', 'whisper-b5454')};${process.env.PATH}` };
+  const env = withSpeechPath({ ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: testModel, CUEREVIEW_VAD_MODEL: vadModel, CUEREVIEW_DTW_MODEL: process.env.CUEREVIEW_DTW_MODEL || 'base', WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'webview-profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9225' });
   child = spawn(executable, [], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', childLog, childLog] });
   result.ownedPids.push(child.pid);
   let connected = false;
@@ -64,7 +69,7 @@ async function launchOwned() {
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => result.pageErrors.push(error.message));
   await page.waitForFunction(() => !!window.__TAURI_INTERNALS__);
-  await page.locator('.session').filter({ hasText: 'Recovery audit fixture' }).click();
+  await sidebar().getByRole('button', { name: 'Recovery audit fixture', exact: true }).click();
   await page.locator('video').waitFor();
   await page.waitForFunction(() => { const video = document.querySelector('video'); return video && video.readyState >= 2; });
 }
@@ -88,7 +93,7 @@ async function verifyWord(word, index, label) {
   return { text: word.text, expectedMs, originalStartMs: word.startMs, actualSeconds };
 }
 async function verifyNativeSourceControls() {
-  await page.locator('.side-tools').getByRole('button', { name: 'New recording', exact: true }).click();
+  await sidebar().getByRole('button', { name: 'New recording', exact: true }).click();
   await page.locator('.mic-trigger').click();
   await page.getByRole('group', { name: 'Microphone options', exact: true }).getByRole('button', { name: 'No microphone', exact: true }).click();
   await page.locator('.source-trigger').click();
@@ -135,6 +140,7 @@ async function verifyNativeSourceControls() {
     const createdAt = new Date().toISOString();
     fs.writeFileSync(path.join(dataRoot, 'projects', `${projectId}.json`), JSON.stringify({ id: projectId, name: 'Isolated recovery verification', createdAt }));
     fs.writeFileSync(path.join(sessionDir, 'session.json'), JSON.stringify({ ...metadata, id: sessionId, projectId, name: 'Recovery audit fixture', autoTitle: false, createdAt, status: 'processing', videoPath: null, folderPath: sessionDir, error: null }));
+    fs.writeFileSync(path.join(sessionDir, 'markers.json'), JSON.stringify(legacyMarkers));
     result.sessionId = sessionId;
     result.initialFixtureStatus = 'processing';
     childLog = fs.openSync(path.join(output, 'owned-app.log'), 'a');
@@ -143,6 +149,10 @@ async function verifyNativeSourceControls() {
     if (recovered.status !== 'error' || !recovered.videoPath || !/closed before|retained/i.test(recovered.error || '')) throw Error('Startup did not recover interrupted processing as an actionable retained-media error');
     result.checks.startupRecovery = recovered;
     result.checks.playableAfterRecovery = await page.locator('video').evaluate(video => ({ readyState: video.readyState, duration: video.duration, error: video.error?.message || null }));
+    const markersAtStartup = await invoke('get_markers', { id: sessionId });
+    if (JSON.stringify(markersAtStartup) !== JSON.stringify(legacyMarkers)) throw Error(`Legacy markers.json is no longer readable: ${JSON.stringify(markersAtStartup)}`);
+    if (await page.getByRole('button', { name: 'Add marker', exact: true }).count()) throw Error('The retired Add marker control is still shown');
+    result.checks.legacyMarkersReadable = { markers: markersAtStartup, markerUiAbsent: true };
     await shot('startup-recovered-playable');
     const failed = await retryThroughUi();
     result.checks.failedRetryObserved = failed;
@@ -163,20 +173,17 @@ async function verifyNativeSourceControls() {
     const lateIndex = words.findLastIndex(word => (word.seekMs ?? word.startMs) < ready.durationMs - 200);
     result.checks.earlySeek = await verifyWord(words[earlyIndex], earlyIndex, 'Early');
     result.checks.lateSeek = await verifyWord(words[lateIndex], lateIndex, 'Late');
-    await page.getByRole('button', { name: 'Add marker', exact: true }).click();
-    await page.getByRole('textbox', { name: 'Note' }).fill('Recovered late-word marker');
-    await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await page.getByRole('button', { name: /Recovered late-word marker/ }).waitFor();
-    const savedMarkers = await invoke('get_markers', { id: sessionId });
-    await shot('retry-success-words-and-marker');
+    await shot('retry-success-words');
     await closeOwned();
     await launchOwned();
     const reopened = await invoke('get_session', { id: sessionId });
+    const reopenedTranscript = await invoke('get_transcript', { id: sessionId });
     const reopenedMarkers = await invoke('get_markers', { id: sessionId });
-    if (reopened.status !== 'ready' || JSON.stringify(savedMarkers) !== JSON.stringify(reopenedMarkers) || !reopenedMarkers.some(marker => marker.label === 'Recovered late-word marker' && marker.timeMs === (words[lateIndex].seekMs ?? words[lateIndex].startMs))) throw Error('Recovered session or marker did not survive owned-app relaunch');
-    await page.getByRole('button', { name: /Recovered late-word marker/ }).click();
-    result.checks.markerAfterRelaunch = { status: reopened.status, markers: reopenedMarkers, actualVideoSeconds: await page.locator('video').evaluate(video => video.currentTime), mediaHashes: assertMedia(originalHashes) };
-    await shot('relaunch-persisted-marker');
+    if (reopened.status !== 'ready' || JSON.stringify(reopenedTranscript.segments) !== JSON.stringify(transcript.segments)) throw Error('Recovered session or transcript did not survive owned-app relaunch');
+    if (JSON.stringify(reopenedMarkers) !== JSON.stringify(legacyMarkers)) throw Error('Legacy markers changed across relaunch');
+    await page.locator('.word').last().waitFor();
+    result.checks.relaunch = { status: reopened.status, segments: reopenedTranscript.segments.length, lateSeek: await verifyWord(words[lateIndex], lateIndex, 'Relaunched late'), legacyMarkers: reopenedMarkers.length, mediaHashes: assertMedia(originalHashes) };
+    await shot('relaunch-persisted-transcript');
     await verifyNativeSourceControls();
     if (result.pageErrors.length) throw Error('Recovery WebView emitted script errors');
     result.passed = true;

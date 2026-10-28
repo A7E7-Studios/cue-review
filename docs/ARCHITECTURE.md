@@ -1,21 +1,24 @@
 # Architecture
 
-CueReview is a Windows desktop application for recording a review, replaying its video alongside a local transcript, and handing selected evidence to an agent. Tauri owns native operations; React owns presentation and playback. Recording data stays in local project/session folders. No account or hosted inference service is required.
+CueReview is a desktop application for recording a review, replaying its video alongside a local transcript, and handing selected evidence to an agent. Windows is the hardware-verified platform; macOS and Linux builds share the same code with platform capture backends. Tauri owns native operations; React owns presentation and playback. Recording data stays in local project/session folders. No account or hosted inference service is required.
 
 ## Responsibilities
 
 | Component | Responsibility |
 | --- | --- |
-| React/WebView2 | Project/session navigation, source selection, playback, word seeking, transcript and markers |
+| React/WebView2 | Session navigation and search, source selection, playback, word seeking, transcript, takes, settings, window chrome |
 | Tauri/Rust | Validate command arguments, own capture processes and devices, persist metadata, run local media/transcription jobs |
 | Windows Graphics Capture | Capture a selected display or window through `windows-capture` |
+| Cursor sampler (`cursor.rs`) | Record the pointer and its buttons beside Windows display/window captures |
 | CPAL/WASAPI | Capture the selected microphone and optional system output loopback |
 | scrcpy/ADB | Capture authorized Android devices, including compatible Quest devices |
-| FFmpeg/ffprobe | Normalize and combine media, inspect duration, extract frames and clips |
+| FFmpeg/ffprobe | Normalize and combine media, append takes, inspect duration, extract frames and clips |
 | whisper.cpp | Transcribe local audio and produce timestamped token JSON |
-| Local agent CLI | Discover sessions and retrieve transcript, frame, and clip evidence |
+| Agent CLI (`cli.rs`, `agent.rs`, `bin/cue.rs`) | Discover sessions and retrieve transcript, frame, clip, cursor and moment evidence |
 
 The implementation uses one active recording at a time. Long operations must run outside the UI thread. Native errors must reach the interface with recovery details; dependency or hardware failures must never return demonstration data.
+
+The window chrome is part of the web UI on Windows: the window has no native decorations, and `src/chrome/TitleBar.tsx` draws the title bar with the Minimize, Maximize/Restore and Close controls through `src/chrome/windowApi.ts`. macOS uses an overlay title bar with the native traffic lights; Linux keeps native decorations. The backend still refuses to close while recording or processing, whichever control asks. See [DESIGN.md](DESIGN.md).
 
 ## Capture and synchronization
 
@@ -29,7 +32,46 @@ scrcpy records encoded device streams with device timestamps. Those timestamps p
 
 Previews use a continuous MJPEG response over an ephemeral loopback listener with a random per-stream URL token. There is no screenshot polling or per-frame React state update. Windows capture pushes JPEG frames directly; device previews run the installed matching scrcpy server in video-only raw-stream mode on a unique ADB forward and decode H.264 with FFmpeg. Cameras use a continuous DirectShow/FFmpeg capture. Only the latest frame is retained if the viewer falls behind. Preview resolution is bounded independently of recording resolution. Starting a recording keeps the existing preview stream; switching sources or entering review stops its owned resources. Frontend start/stop operations are ordered, and stale stop IDs cannot terminate a newer stream. Source errors reach the UI through a Tauri channel. Meta/Oculus Quest virtual-camera filters are excluded from enumeration in favor of authorized USB devices.
 
-Final playback encoding uses x264 veryfast CRF23, retaining capture resolution and frame rate. A successful encoder exit is followed by stream and duration validation; only a clean capture with verified output removes its owned native-video.mp4 or native-video.mkv intermediate. Capture/finalization failures retain the native video. Lossless audio and transcription evidence remain available for retry. This policy applies to new captures, without retroactive changes to existing recordings.
+Final playback encoding uses x264 veryfast CRF23, retaining capture resolution and frame rate. A successful encoder exit is followed by stream and duration validation; only a clean capture with verified output removes its owned native-video.mp4 or native-video.mkv intermediate. Capture/finalization failures retain the native video. Lossless audio and transcription evidence remain available for retry. A Windows capture without microphone or system audio still gets a silent audio track, because appending a take needs an audio track on both sides. This policy applies to new captures, without retroactive changes to existing recordings.
+
+## Takes (Record more)
+
+"Record more" continues a ready session as a new take (`src-tauri/src/takes.rs`, plan decision 10).
+
+**Layout.** Take 1 is the session folder itself, so every recording made before takes existed is a one-take session and needs no migration. Take N records into `sessions/<id>/takes/<N>/` with the same files a single recording has. `video.mp4` in the session folder is the combined recording. `session.json` lists the takes once there is a second one: `takes: [{index, offsetMs, durationMs, status, folder, microphoneId?, systemAudio}]`. A legacy session's take 1 is synthesized from the session until Record more writes it out. Folders are always derived from the take index, never from `folder` or other metadata, so a damaged `session.json` cannot redirect cleanup.
+
+**Offsets.** Starting a take probes the combined `video.mp4`; that validated duration becomes the take's `offsetMs`. The source is locked to the session's source; microphone and system audio can be chosen again for each take. While recording, `get_recording_status` reports `takeIndex` and `takeOffsetMs`; `elapsedMs` stays relative to the take. Live transcription shifts its words by the offset, so live words land on the combined timeline.
+
+**Lifecycle.** A take's status runs `recording` → `finalizing` → `swapping` → `transcribing` → `ready` or `error`. A take is on the combined timeline exactly when it is `transcribing`, `ready` or `error`, so `error` always means "on the timeline, transcript missing". A take whose capture produced no usable video, or that the app lost while recording, becomes `interrupted`: it is not on the timeline and its folder keeps whatever was captured. Stop first probes the take's own `video.mp4`, then appends it, then transcribes it, re-reading `session.json` under the session lock at each step. Stop returns before the swap finishes; the session stays `processing` until it does.
+
+**Swap.** Appending writes `video.<uuid>.tmp.mp4` with the FFmpeg concat demuxer: an ffconcat list with each file's exact duration, video stream-copied, audio re-encoded to AAC, and `-copyts` so the AAC priming packet does not shift the timeline. A take with another frame size, rate or pixel format is first re-encoded to the combined video's format (`normalized.mp4`): scaled uniformly to fit, centered with even padding, and the placement is recorded as `normalize{scale, padX, padY, baseWidth, baseHeight}` in the take's `capture-timing.json`. The temporary file must last the previous duration plus the take (within a third of the take, at most 150 ms) and decode cleanly with video and audio on both sides of the boundary. Only then does it replace `video.mp4`. Windows refuses to replace a file that a player holds open, so the rename is retried with backoff (100 ms to 3 s, about 6 s in total). If it is still refused, `takes/<N>/swap.json` names the validated temporary file and the take stays `swapping`; Retry, or the next start, finishes it without rebuilding. The UI unloads the video before Record more and reloads it with a cache-buster afterwards. After a verified swap the take's own video copies are removed; its lossless audio stays for transcription retries. During the swap the session briefly needs about twice the size of `video.mp4`.
+
+**Transcription.** Only the new take is transcribed, from its own audio, and its segments are shifted by its offset and given `t{N}-` id prefixes before they replace that take's segments in `transcript.json`. `transcript.takes` lists one `{index, startMs}` mark per take on the timeline (none for a single take); the UI draws "Take N · m:ss" dividers and scrubber ticks from it, and `cue transcript --segments` prints `── Take N · m:ss ──` lines. Retry works on the unfinished takes (`swapping`, `transcribing`, `error`), or every take on the timeline when none is unfinished. Record more is refused while any take is unfinished, and Copy for agent is disabled while recording.
+
+**Recovery at startup.** `Store::recover_interrupted` repairs every session the app did not finish:
+
+| State found | Single-take session | Take N of a multi-take session |
+| --- | --- | --- |
+| `recording`, `finalizing` | Session `error`, original media retained, Retry offered when video exists | Take `interrupted`, raw tracks kept in `takes/<N>/`, earlier takes intact |
+| `swapping` | — | `video.mp4`'s duration decides: already appended → take `error` (transcript missing); a validated `swap.json` file waiting → moved into place, then `error`; otherwise the take stays `swapping` for Retry |
+| `transcribing` / `processing` | Session `error`, retained media, Retry | Take `error`, so Retry transcribes only that take |
+| Stray `video.*.tmp.mp4`, `concat-t*.ffconcat` | — | Deleted, except a temporary file a `swap.json` still names |
+
+A session then settles: `error` with a message naming the first unfinished take, or `ready`.
+
+## Cursor tracking
+
+On Windows, display and window recordings run a sampler thread beside the capture (`src-tauri/src/cursor.rs`), for the app and `cue record` alike. It starts once the first video frame has arrived and is stopped and joined first when the capture stops, so every sample lies inside the take. About 60 times a second it reads `GetCursorPos` and the left, right and middle buttons through `GetAsyncKeyState`, honoring swapped buttons; a press and release between two polls is still written. The thread is per-monitor-v2 DPI aware, so coordinates are physical pixels, like the captured frames.
+
+**Clock.** Samples are timed on the capture epoch, which is also t=0 of the take's video, audio and transcript words. Adding the take's offset puts them on the session timeline.
+
+**Origin.** Positions are relative to the top-left corner of the source, which is the top-left corner of the canvas (the first frame's size). For a display it is the monitor bounds from `GetMonitorInfoW`; for a window, the DWM extended frame bounds, re-read on every sample because the window can move. `WindowFromPoint` records whether the pointer was over the source window or something covering it. A pointer on another monitor is outside the source; a minimized or closed window, or the secure desktop (UAC, lock screen), is a gap.
+
+**File.** Each take writes `cursor.jsonl` in its take folder: a header line (`{"format":"cuereview-cursor","version":1,"source":"window","canvasWidth":…,"canvasHeight":…,"sampleHz":60}`), then delta-encoded integer arrays: `[dt, dx, dy]` for a move, `[dt, dx, dy, state]` when the button/outside state changes, `[dt]` for a gap. A line is written on every change and at least every 250 ms. The file is append-only and flushed about once a second, so a crash loses at most the last second; readers stop at the first unparsable line. `capture-timing.json` records the canvas size and `cursorLines` or `cursorError`.
+
+**Queries.** `cursor::load` stitches every take's track onto the session timeline with its offset and ends each take with a gap. `at(t)` returns the nearest earlier sample unless it is a gap or older than 750 ms; `clicks` lists presses. `x`/`y` are fractions of the canvas measured at the pixel center; `px`/`py` scale them to the session video, which is take 1's canvas rounded down to even sizes; `inVideo` is false outside the canvas or when the pointer was not over the source. The CLI attaches `cursor` to transcript words and segments (`--json`), `find`, `frame`, `frames` and `moments`, and `--mark-cursor` draws a ring on exported PNGs. JSON output only gains fields, so older consumers keep working.
+
+**Limits.** Polling can miss clicks shorter than about 16 ms. `px`/`py` for a later take recorded at a different canvas size assume the take was stretched to take 1's size; the scale and padding recorded in `normalize` are not applied yet, so such positions can be off by the padding. macOS, Linux, device sources (scrcpy) and cameras have no sampler, and `load` returns nothing. The module notes in `cursor.rs` describe what macOS (`CGEventGetLocation` and display bounds) and Linux X11 (`XQueryPointer`) would need; Wayland exposes no global pointer position outside the screencast portal.
 
 ## Local transcription
 
@@ -45,23 +87,44 @@ Alignment increased the measured two-thread inference time from roughly 2.2 to 4
 
 Transcription failure must preserve playable recorded media and offer retry. An empty result from silent audio is a valid empty transcript, not a fabricated paragraph.
 
-During recording, a background worker takes an audio snapshot after about eight seconds and repeats after each inference plus another eight seconds. Each snapshot contains at most the latest 30 seconds. Whisper works in the session's `live` scratch directory, outside the capture/state lock. Snapshot-relative words receive the session offset; the overlapping provisional tail is replaced while earlier words remain. Results publish only for the still-active session. Stopping cancels the live subprocess, and a shared inference lock prevents overlap with final full-recording transcription. Updates arrive after local inference completes; their wording and timing can change until the final pass.
+During recording, a background worker takes an audio snapshot after about eight seconds and repeats after each inference plus another eight seconds. Each snapshot contains at most the latest 30 seconds. Whisper works in the session's `live` scratch directory, outside the capture/state lock. Snapshot-relative words receive the session offset (plus the take's offset for a later take); the overlapping provisional tail is replaced while earlier words remain. Results publish only for the still-active session. Stopping cancels the live subprocess, and a shared inference lock prevents overlap with final full-recording transcription. Updates arrive after local inference completes; their wording and timing can change until the final pass.
 
 Live snapshots use the PC microphone, or Windows loopback when no microphone is selected. Android device audio by itself has no local PCM snapshot track and is transcribed after stopping; selecting a PC microphone enables progressive commentary for device reviews.
 
+## Settings and decoding policy
+
+App-wide preferences live in `<root>/settings.json` (`src-tauri/src/settings.rs`), shared by the app (`get_settings`/`save_settings`) and the CLI. Saving validates, normalizes and writes the file atomically; a missing or unreadable file falls back to the defaults, so it never blocks recording or transcription. Every field is optional, so older and newer files stay readable.
+
+`settings::decoding_args` builds the Whisper options for every final and live transcription: `-l auto -ojf -ng`, then `-nf -nth 0.3` so noise is not retried at higher temperatures. Without a vocabulary it passes `-mc 0`, which carries no decoded text into later 30-second windows and avoids repeating a hallucination across them.
+
+The vocabulary is off by default. It accepts at most 20 terms separated by commas or new lines, 200 characters joined with ", ", and an estimated 75 prompt tokens, in printable ASCII only (on Windows, `whisper-cli` reads its arguments in the ANSI code page). The Settings dialog applies the same rules before saving, and the backend validates again. When it is set, the args become `-mc <prompt tokens + 1> --prompt "<terms>" --carry-initial-prompt`: the prompt is repeated in every window, and the context budget leaves no room for decoded text, which keeps the `-mc 0` behavior otherwise. The exact token count comes from the model's own tokenizer, by a short `whisper-cli` probe that stops before the encoder runs, cached per process. A prompt whose real count exceeds 96 tokens, or whose count cannot be measured (for example, no model yet), is not used, and decoding stays as without it. Measurements behind these limits are in the module notes: even 23 carried tokens let a hallucination repeat across a noisy recording, and prompts of 130 tokens or more invented lists on noise.
+
+## Agent CLI
+
+`cue` is a thin binary (`src-tauri/src/bin/cue.rs`) over the library:
+
+- `cli.rs` is pure: the argument parser, per-command help and the plain-text formatters (`--segments`, clocks). `cargo test --lib` covers it. `parse` runs first; `--help`, `-h` and `help COMMAND` print and exit 0 before the store is opened or a lock is taken, and an unknown option or a missing value is an error that points at the command's help.
+- `agent.rs` holds the handoff text (Copy for agent), phrase search, frame and batch-frame export, clips and moments. Frames are scaled down with `--max-width` and never up, written to new files only, and an invalid batch writes nothing. `moments` matches pointing words ("here", "there", "this", "these", "that", "those", "see", "look at", "right here", "over here"), skipping "that" as a conjunction and "there is", and adds the cursor and the clicks within 1 s of each moment.
+- Only `record`, `transcribe` and `setup --install` hold the data folder's process lock (`.instance.lock`), which the desktop app holds while it runs. Everything else, `rename` included, runs beside the app. Every write to a session (app or CLI) takes that session's lock in `<root>/locks/<id>.lock` and re-reads `session.json` before changing it; the lock files live outside the session folders so deleting a recording never races its own lock. The app refreshes the sidebar when its window regains focus, which picks up a CLI rename.
+- Output is JSON on stdout and errors on stderr with a nonzero exit. New fields are only ever added (`takes`, `cursor`, `width`/`height`), so existing consumers keep working.
+
 ## Persistence and process ownership
 
-Each session groups its metadata, final video, transcript, and evidence exports. Persist state transitions so a restart can identify interrupted recording or processing work. Write metadata atomically. Validate identifiers and resolve paths under the configured data directory. The agent interface should report errors on stderr and machine-readable results on stdout.
+Each session groups its metadata, final video, transcript, takes and evidence exports. Persist state transitions so a restart can identify interrupted recording or processing work. Write metadata atomically. Validate identifiers and resolve paths under the configured data directory. The agent interface should report errors on stderr and machine-readable results on stdout.
 
-The sidebar presents optional collapsible sections and ungrouped Recents in one list, without project tabs or a recording-header category picker. Sections reuse the existing project metadata and IDs. New recordings have `projectId: null`; dragging into a section or using Move to section changes only that field, leaving the session directory unchanged. Dropping back into Recents clears it. Section expansion is remembered locally, and unknown section IDs fall back to Recents so recordings remain reachable. WebView native file-drop interception is disabled to support HTML drag-and-drop on Windows. Unnamed recordings carry `autoTitle: true` and receive a short title from the first nonempty transcript phrase. An explicit rename clears that flag. Legacy sessions default to manual titles and retain their existing project IDs, requiring no destructive migration.
+The sidebar presents optional collapsible sections and ungrouped Recents in one list, without project tabs or a recording-header category picker. Sections reuse the existing project metadata and IDs. New recordings have `projectId: null`; dragging into a section or using Move to section changes only that field, leaving the session directory unchanged. Dropping back into Recents clears it. Section expansion is remembered locally, and unknown section IDs fall back to Recents so recordings remain reachable. The title bar search filters sessions by name only. WebView native file-drop interception is disabled to support HTML drag-and-drop on Windows. Unnamed recordings carry `autoTitle: true` and receive a short title from the first nonempty transcript phrase. An explicit rename, in the app or with `cue rename`, clears that flag. Legacy sessions default to manual titles and retain their existing project IDs, requiring no destructive migration.
 
 Section order is saved atomically in section-order.json. Deleting a section first clears each member recording's projectId, then removes the section metadata. Deleting a recording validates the physical UUID directory under the configured sessions root, rejects linked/reparse paths, and removes its payload before session.json so a locked-file failure remains retryable. UI confirmation identifies the recording and the selected video is unloaded before deleting its files. Runtime ownership guards serialize these operations against capture/transcription start; partial section failures refresh sidebar membership.
+
+Markers left the UI in v0.2.0. The store functions, the `get_markers`/`add_marker` commands and `markers.json` remain for one release so legacy data stays readable; they are deprecated, and the CLI has no marker commands.
 
 Launch dependencies with argument arrays rather than shell-generated command strings. Retain process handles, capture diagnostic output, stop recorders gracefully, and check exit status and output validity before declaring success. Killing an encoder may leave an unfinished container; intermediate recordings and logs should be retained for recovery.
 
 ## Dependency setup
 
 Development requires Node.js, the Rust MSVC toolchain, Visual Studio C++ build tools, a Windows SDK, and WebView2. Runtime media work needs FFmpeg/ffprobe and whisper.cpp plus a model. Device capture additionally needs scrcpy and ADB. Pin dependency versions and document their source and license when bundling. Install or download tools into an application-controlled directory; a developer's PATH must not be the only working configuration in a packaged build.
+
+Tools are found in this order: the downloaded runtime in `<root>/tools/whisper-b5454`, `<root>/tools`, the runtime bundled next to the app (`tools/whisper-b5454` in the resource folder or beside the executable), PATH, and on macOS/Linux the standard Homebrew and system binary folders.
 
 Setup checks should distinguish missing executables, missing models, unavailable microphone/output endpoints, and unauthorized/disconnected devices. Only capabilities affected by a missing optional device dependency should be unavailable.
 
@@ -76,3 +139,4 @@ Setup checks should distinguish missing executables, missing models, unavailable
 - [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 - [Whisper CLI implementation](https://github.com/ggml-org/whisper.cpp/blob/master/examples/cli/cli.cpp)
 - [FFmpeg capture devices](https://ffmpeg.org/ffmpeg-devices.html)
+- [FFmpeg concat demuxer](https://ffmpeg.org/ffmpeg-formats.html#concat-1)
