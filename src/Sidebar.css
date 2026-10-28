@@ -1,60 +1,152 @@
-.recording-list { flex: 1; overflow: auto; scrollbar-width: thin; margin: 0 -5px; padding: 0 5px; }
-.recording-section { margin-bottom: 18px; border-radius: 6px; outline: 1px solid transparent; outline-offset: 2px; }
-.section-heading { display: flex; align-items: center; min-height: 28px; margin-bottom: 3px; color: var(--muted); font-size: 11px; }
-.section-toggle { flex: 1; min-width: 0; justify-content: flex-start; padding: 4px 6px; font-size: 11px; font-weight: 500; }
+/* Float v2 sidebar (decision 2). Windows and Linux: it sits on the window ground beside the white sheet.
+   macOS: an inset rounded panel whose first row leaves room for the native traffic lights. */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 6px 10px 14px;
+  border-right: 0;
+  background: var(--color-ground);
+  color: var(--color-text);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+}
+.sidebar[data-platform='macos'] {
+  margin: 8px 0 8px 8px;
+  padding: 0 10px 14px;
+  border-radius: var(--radius-sidebar-panel);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-panel);
+}
+
+/* The panel's top row is centred on y = 26, like the traffic lights and the 52px toolbar. */
+.side-header { display: flex; align-items: center; flex: none; height: 28px; margin-bottom: -10px; }
+.sidebar[data-platform='macos'] .side-header { height: 36px; margin-bottom: -6px; }
+/* The lights end about 78px from the window edge; the panel starts 18px in (8px inset, 10px padding). */
+.side-traffic-lights { flex: none; width: calc(var(--size-traffic-lights-width) - 18px); height: var(--size-traffic-lights-height); }
+.side-collapse { width: 30px; height: 26px; margin-left: auto; padding: 0; display: grid; place-items: center; border-radius: var(--radius-row); color: var(--color-text-secondary); }
+.side-collapse:hover { background: var(--color-row-hover); color: var(--color-text); }
+
+.sidebar .side-tools { display: flex; align-items: center; gap: 6px; flex: none; min-height: 0; margin: 0; color: var(--color-text-secondary); }
+.sidebar .side-tools .new-recording {
+  flex: 1;
+  min-width: 0;
+  height: var(--size-new-recording);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 10px 0 12px;
+  border-radius: var(--radius-button);
+  background: var(--color-button);
+  box-shadow: var(--shadow-button);
+  color: var(--color-text);
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-strong);
+  white-space: nowrap;
+}
+.sidebar .side-tools .new-recording:hover { background: color-mix(in srgb, var(--color-button) 96%, var(--color-text)); color: var(--color-text); }
+.sidebar .side-tools .new-recording:disabled { background: var(--color-button-disabled); box-shadow: none; }
+.new-recording-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: var(--color-record); }
+.new-recording-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.sidebar .side-tools .new-section { width: var(--size-new-recording); height: var(--size-new-recording); flex: none; padding: 0; display: grid; place-items: center; border-radius: var(--radius-button); color: var(--color-text-secondary); }
+.sidebar .side-tools .new-section:hover { background: var(--color-row-hover); color: var(--color-text); }
+
+/* Decision 7: shortcut hints are aria-hidden and fade in on hover or focus. --motion-fast is 0ms under reduced motion. */
+.sidebar .kbd-hint { flex: none; font-family: inherit; font-size: var(--font-size-kbd); font-weight: 400; color: var(--color-text-tertiary); white-space: nowrap; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
+.sidebar[data-platform='macos'] .kbd-hint { font-size: var(--font-size-meta); }
+.sidebar .has-kbd:hover .kbd-hint, .sidebar .has-kbd:focus-visible .kbd-hint { opacity: 1; }
+/* At the 232px sidebar the label and the hint do not both fit, so the hidden hint takes no width. */
+.sidebar .new-recording .kbd-hint { max-width: 0; overflow: hidden; }
+.sidebar .new-recording:hover .kbd-hint, .sidebar .new-recording:focus-visible .kbd-hint { max-width: none; }
+
+.recording-list { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; margin: 0 -5px; padding: 0 5px; }
+.recording-section { position: relative; margin-bottom: 14px; border-radius: var(--radius-row); outline: 1px solid transparent; outline-offset: 2px; }
+.recording-section:last-of-type { margin-bottom: 4px; }
+
+.section-heading { display: flex; align-items: center; min-height: 0; margin: 0; color: var(--color-text-tertiary); }
+.sidebar .section-toggle { flex: 1; min-width: 0; min-height: 24px; justify-content: flex-start; gap: 4px; padding: 2px 10px; border-radius: var(--radius-row); color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
+.sidebar .section-toggle:hover { background: transparent; color: var(--color-text-secondary); }
 .section-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.section-toggle svg { width: 10px; height: 10px; color: var(--faint); }
-.section-options, .session-options { padding: 3px; color: var(--muted); opacity: 0; }
-.section-options svg, .session-options svg { width: 13px; height: 13px; }
+/* The disclosure chevron shows on hover or focus, and stays visible while the section is collapsed. */
+.section-chevron { width: 10px; height: 10px; flex: none; opacity: 0; transform: rotate(90deg); transition: transform var(--motion-normal) var(--ease-out), opacity var(--motion-fast) linear; }
+.section-toggle[aria-expanded='false'] .section-chevron { transform: none; opacity: 1; }
+.section-heading:hover .section-chevron, .section-toggle:focus-visible .section-chevron { opacity: 1; }
+.recents-heading { min-height: 24px; padding: 2px 10px; font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
+
+.section-options, .session-options { min-width: 26px; min-height: 26px; padding: 3px; color: var(--color-text-secondary); opacity: 0; }
+.sidebar .section-options { min-width: 24px; min-height: 24px; padding: 2px; }
+.section-options svg, .session-options svg { width: 14px; height: 14px; }
 .section-heading:hover .section-options, .section-heading:focus-within .section-options,
 .session-row:hover .session-options, .session-row:focus-within .session-options,
-.session-options[aria-expanded=true] { opacity: 1; }
-.recents-heading { padding: 4px 7px; font-weight: 500; }
-.session-row { display: flex; position: relative; align-items: center; border-radius: 5px; min-height: 31px; margin-bottom: 1px; }
-.session-row:hover { background: var(--hover); }
-.session-row.active { background: var(--active); }
+.section-options[aria-expanded=true], .session-options[aria-expanded=true] { opacity: 1; }
+.sidebar .section-options:hover, .sidebar .session-options:hover { background: var(--color-row-hover); color: var(--color-text); }
+
+.session-row { display: flex; position: relative; align-items: center; min-height: var(--size-row); margin-bottom: 1px; border-radius: var(--radius-row); transition: background-color var(--motion-fast) linear; }
+.session-row:not(.active):hover { background: var(--color-row-hover); }
+.session-row.active { background: var(--color-row-selected); box-shadow: var(--shadow-row-selected); }
+.sidebar[data-platform='macos'] .session-row.active { background: var(--color-panel-row-selected); box-shadow: none; }
 .session-row.dragging { opacity: .45; }
-.session { display: flex; justify-content: flex-start; gap: 5px; width: 100%; min-width: 0; text-align: left; padding: 6px 27px 6px 9px; min-height: 31px; font-size: 12px; color: var(--muted); }
-.session > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session.active { color: var(--text); }
-.session small { font-size: 10px; color: var(--faint); margin-left: auto; }
-.section-sessions .session { padding-left: 22px; }
-.session-options { position: absolute; right: 4px; top: 5px; }
+.sidebar .session {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: var(--size-row);
+  min-height: var(--size-row);
+  padding: 0 10px;
+  border-radius: var(--radius-row);
+  background: transparent;
+  color: var(--color-row-text);
+  font-size: var(--font-size-body);
+  text-align: left;
+}
+.sidebar .session:hover { background: transparent; color: var(--color-row-text); }
+.sidebar .session.active { color: var(--color-text); font-weight: var(--font-weight-strong); }
+.sidebar .session:focus-visible { outline-offset: -2px; outline-color: var(--color-focus); }
+.session-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session small { flex: none; font-size: var(--font-size-meta); color: var(--color-text-tertiary); }
+/* Hover and focus make room for the options button and reveal the duration and date. */
+.session-row:hover .session, .session-row:focus-within .session { padding-right: 34px; }
+.session-meta { display: none; flex: none; font-size: var(--font-size-meta); font-weight: 400; color: var(--color-text-secondary); white-space: nowrap; }
+.session-meta::after { content: attr(data-meta); }
+.session-row:hover .session-meta, .session-row:focus-within .session-meta { display: inline; }
+.session-options { position: absolute; top: 3px; right: 3px; }
 .session-options:disabled { visibility: hidden; }
-.side-empty { padding: 4px 9px; font-size: 11px; color: var(--faint); }
-.section-sessions .side-empty { padding-left: 22px; }
-.drop-target { background: var(--active); outline-color: var(--accent); }
-.new-section { color: var(--muted); font-size: 11px; justify-content: flex-start; padding: 6px; }
-.new-section svg { width: 12px; height: 12px; }
-.sidebar-menu { position: fixed; z-index: 25; width: 224px; padding: 5px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; box-shadow: var(--shadow); font-size: 12px; }
-.sidebar-menu button { width: 100%; text-align: left; justify-content: flex-start; padding: 6px 8px; min-height: 30px; overflow-wrap: anywhere; }
+
+.side-empty { padding: 4px 10px; font-size: var(--font-size-meta); color: var(--color-text-tertiary); }
+.drop-target { background: var(--color-row-hover); outline-color: var(--color-accent); }
+.side-bottom { display: flex; align-items: center; justify-content: flex-end; gap: 1px; flex: none; margin-top: -8px; }
+
+.sidebar-menu { position: fixed; z-index: 25; width: 224px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--color-sheet-edge); border-radius: var(--radius-panel); background: var(--color-sheet); box-shadow: var(--shadow); color: var(--color-text); font-size: var(--font-size-control); opacity: 1; transform: translateY(0); transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
+.sidebar-menu[data-state=entering], .sidebar-menu[data-state=exiting] { opacity: 0; transform: translateY(3px); }
+.sidebar-menu[data-state=exiting] { pointer-events: none; }
+.sidebar-menu button { width: 100%; min-height: 32px; justify-content: flex-start; padding: 6px 8px; text-align: left; overflow-wrap: anywhere; }
+.sidebar-menu button:hover { background: var(--color-row-hover); }
 .sidebar-menu button > svg { width: 12px; height: 12px; }
 .sidebar-menu button:not(.menu-separated) > svg:last-child { margin-left: auto; }
-.sidebar-menu .menu-separated { border-top: 1px solid var(--line); border-radius: 0; margin-top: 4px; padding-top: 9px; }
-.sidebar-menu-title { font-size: 11px; color: var(--faint); padding: 5px 8px 7px; }
+.sidebar-menu .menu-separated { border-top: 1px solid var(--color-divider); border-radius: 0; margin-top: 4px; padding-top: 9px; }
+.sidebar-menu-title { font-size: var(--font-size-meta); color: var(--color-text-tertiary); padding: 5px 8px 7px; }
 .section-destinations { max-height: 192px; overflow: auto; scrollbar-width: thin; }
-.section-options[aria-expanded=true] { opacity: 1; }
-.recording-section { position: relative; }
+
 .dragging-section { opacity: .45; }
-.insert-before::before, .insert-after::after { content: ''; position: absolute; left: 1px; right: 1px; height: 2px; background: var(--accent); border-radius: 2px; pointer-events: none; }
-.insert-before::before { top: -7px; }
-.insert-after::after { bottom: -9px; }
+.insert-before::before, .insert-after::after { content: ''; position: absolute; left: 1px; right: 1px; height: 2px; background: var(--color-accent); border-radius: 2px; pointer-events: none; }
+.insert-before::before { top: -8px; }
+.insert-after::after { bottom: -8px; }
+
+.section-reveal { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--motion-normal) var(--ease-out), opacity var(--motion-fast) linear; }
+.section-reveal > .section-sessions { min-height: 0; overflow: hidden; }
+.section-reveal[data-open=false] { grid-template-rows: 0fr; opacity: 0; }
+
+/* Dialogs App.tsx opens from the sidebar. */
 .destructive { color: var(--red); }
 .delete-dialog p { color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
 .delete-dialog strong { color: var(--text); font-weight: 500; }
 .danger-button { background: var(--red); color: white; padding: 6px 12px; }
 .danger-button:hover { background: var(--red); color: white; filter: brightness(1.1); }
-
-.section-reveal { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--motion-normal) var(--ease-out), opacity var(--motion-fast) linear; }
-.section-reveal > .section-sessions { min-height: 0; overflow: hidden; }
-.section-reveal[data-open=false] { grid-template-rows: 0fr; opacity: 0; }
-.section-toggle svg { transition: transform var(--motion-normal) var(--ease-out); }
-.section-options, .session-options { min-width: 26px; min-height: 26px; }
-.session-options { top: 3px; right: 2px; }
-.session { padding-right: 30px; min-height: 32px; }
-.session-row { min-height: 32px; transition: background-color var(--motion-fast) linear; }
-.session-row.active::before { content: ''; position: absolute; left: 2px; top: 10px; bottom: 10px; width: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; }
-.sidebar-menu { max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; overscroll-behavior: contain; opacity: 1; transform: translateY(0); transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
-.sidebar-menu[data-state=entering], .sidebar-menu[data-state=exiting] { opacity: 0; transform: translateY(3px); }
-.sidebar-menu[data-state=exiting] { pointer-events: none; }
-.sidebar-menu button { min-height: 32px; }
