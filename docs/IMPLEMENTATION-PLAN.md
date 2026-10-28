@@ -206,7 +206,7 @@ Rules:
 | E CLI + handoff | merged | 515d0b4. 65 lib tests passing; 2 ignored ffmpeg tests passing; verify-cli 9/9. `cursor` is null in frame/frames/moments until D lands |
 | F vocabulary + settings | merged | b95916c. Combined: 170 web tests, 111 lib tests passing (25 ignored), clippy clean. Prompt cap is about 75 tokens (20 terms, 200 characters). `-mc` = prompt tokens + 1 with `--carry-initial-prompt`, so decoded text is never carried; the Whisper regression passes. The validation story's play test needs a focused tab |
 | G app integration | pending | |
-| H docs + scripts | pending | |
+| H docs + scripts | merged | 6e070e4 (+ 4135be1 doc fix). verify-cli 9/9, verify-pipeline, verify-failures and verify-alignment pass. Adds `scripts/test-env.cjs` and `verify-takes.cjs` (not yet run); release notes in `.github/RELEASE_NOTES.md`. Open: ship the Figtree OFL licence text; confirm H's assumed names against G (Title bar, Recording video and Transcript regions, Recording controls group, "Take N elapsed time", Record more, Dismiss error, Agent instructions copied) |
 | Independent review + fixes | pending | |
 | Design check | pending | |
 | Unattended verification | pending | |
