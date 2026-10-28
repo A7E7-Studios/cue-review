@@ -268,8 +268,10 @@ pub fn check_can_record_more(session: &Session) -> Result<(), String> {
 pub const SOURCE_GONE: &str = "The original window/display for this recording is no longer available. Start a new recording to capture another source.";
 /// Record more captures the session's source again only while it is what
 /// was first recorded. `current` is what `session.source_id` names now (see
-/// [`crate::capture::source_identity`]): a window's title, process and class,
-/// or a display's device name and bounds, must equal the stored identity.
+/// [`crate::capture::source_identity`]): a window must still belong to the
+/// same process and window class, and a display must be the same device.
+/// Titles and display bounds may change between takes (a browser switches
+/// tabs, a display changes resolution, which takes normalize).
 /// A session recorded before identities were stored may continue a display
 /// that still exists, but never a window, whose handle can belong to any
 /// window after a restart. Other sources (devices, cameras) are not checked.
@@ -280,7 +282,7 @@ pub fn check_source(session: &Session, current: Option<&SourceIdentity>) -> Resu
         return Ok(());
     }
     let same = match (&session.source_identity, current) {
-        (Some(stored), Some(current)) => stored == current,
+        (Some(stored), Some(current)) => same_source(stored, current),
         (None, Some(SourceIdentity::Display { .. })) => display,
         _ => false,
     };
@@ -288,6 +290,26 @@ pub fn check_source(session: &Session, current: Option<&SourceIdentity>) -> Resu
         Ok(())
     } else {
         Err(SOURCE_GONE.into())
+    }
+}
+fn same_source(stored: &SourceIdentity, current: &SourceIdentity) -> bool {
+    match (stored, current) {
+        (
+            SourceIdentity::Window {
+                process: a_process,
+                class: a_class,
+                ..
+            },
+            SourceIdentity::Window {
+                process: b_process,
+                class: b_class,
+                ..
+            },
+        ) => a_process.eq_ignore_ascii_case(b_process) && a_class == b_class,
+        (SourceIdentity::Display { device: a, .. }, SourceIdentity::Display { device: b, .. }) => {
+            a.eq_ignore_ascii_case(b)
+        }
+        _ => false,
     }
 }
 /// Takes a Retry works on: the unfinished ones, or every take on the
@@ -2764,15 +2786,30 @@ mod tests {
             right: 2560,
             bottom: 1440,
         };
+        let other_app = SourceIdentity::Window {
+            title: "Review — Notes".into(),
+            process: "chat.exe".into(),
+            class: "NotesWindow".into(),
+        };
+        let other_display = SourceIdentity::Display {
+            device: r"\\.\DISPLAY2".into(),
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
         for (source, stored, current, allowed) in [
-            // Still the same window or display.
+            // Still the same window or display, even with a new title or
+            // resolution.
             ("window:4242", Some(&window), Some(&window), true),
+            ("window:4242", Some(&window), Some(&renamed), true),
             ("monitor:1", Some(&display), Some(&display), true),
+            ("monitor:1", Some(&display), Some(&resized), true),
             // Gone, or the id now names something else.
             ("window:4242", Some(&window), None, false),
-            ("window:4242", Some(&window), Some(&renamed), false),
+            ("window:4242", Some(&window), Some(&other_app), false),
             ("monitor:1", Some(&display), None, false),
-            ("monitor:1", Some(&display), Some(&resized), false),
+            ("monitor:1", Some(&display), Some(&other_display), false),
             ("monitor:1", Some(&window), Some(&display), false),
             // Recorded before identities were stored: a display that still
             // exists is fine, a window never is.
