@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>CueReview records your spoken feedback with the microphone you select.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>CueReview uses the camera only when you select it as your recording source.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>CueReview captures the display you select to record visual feedback.</string>
+</dict>
+</plist>
