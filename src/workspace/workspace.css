@@ -104,9 +104,12 @@
 .cr-media-empty p { margin: 0; max-width: 340px; font-size: var(--font-size-meta); line-height: 1.5; }
 .cr-preview-error {
   position: absolute; left: 10px; right: 10px; bottom: 10px; margin: 0; padding: 8px 12px; border-radius: 8px;
+  display: flex; align-items: center; gap: 12px;
   background: var(--color-sheet); box-shadow: 0 0 0 1px var(--color-control-ring);
   color: var(--color-status-recording-text); font-size: var(--font-size-meta); line-height: 1.4; overflow-wrap: anywhere;
 }
+.cr-preview-error > span { flex: 1; min-width: 0; }
+.cr-preview-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); box-shadow: var(--shadow-button); }
 .cr-live-badge {
   position: absolute; top: 10px; left: 10px; max-width: calc(100% - 20px); height: 26px; box-sizing: border-box;
   display: inline-flex; align-items: center; gap: 7px; padding: 0 11px 0 9px; border-radius: var(--radius-pill);

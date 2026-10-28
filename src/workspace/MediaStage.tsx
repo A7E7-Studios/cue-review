@@ -41,7 +41,7 @@ export interface MediaStageViewProps extends MediaStageProps {
  * sized to fit the stage in both directions (decision 1). The controls passed as
  * children sit directly under it; unused space stays below them.
  */
-export function MediaStage({ mode, previewUrl, sourceName, previewError, videoSrc, videoKey, videoRef, videoProps, empty, focused = false, children }: MediaStageViewProps) {
+export function MediaStage({ mode, previewUrl, sourceName, previewError, onPreviewError, onRetryPreview, videoSrc, videoKey, videoRef, videoProps, empty, focused = false, children }: MediaStageViewProps) {
   const stage = useRef<HTMLDivElement>(null);
   const controls = useRef<HTMLDivElement>(null);
   const image = useRef<HTMLImageElement>(null);
@@ -75,13 +75,16 @@ export function MediaStage({ mode, previewUrl, sourceName, previewError, videoSr
     <section className="cr-media" aria-label={capture ? NAMES.capturePreview : NAMES.recordingVideo} data-live={live || undefined} data-fitted={fitted ? '' : undefined} style={style}>
       {capture
         ? previewUrl
-          ? <img ref={image} className="preview-image" src={previewUrl} alt={NAMES.livePreview(sourceName || 'capture source')} onLoad={event => remember(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}/>
+          ? <img ref={image} className="preview-image" src={previewUrl} alt={NAMES.livePreview(sourceName || 'capture source')} onLoad={event => remember(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} onError={onPreviewError}/>
           : <EmptyMedia state={fallback}/>
         : videoSrc
           ? <video key={videoKey} ref={videoRef} playsInline preload="metadata" {...forwarded} src={videoSrc}
               onLoadedMetadata={event => { remember(event.currentTarget.videoWidth, event.currentTarget.videoHeight); onLoadedMetadata?.(event); }}/>
           : <EmptyMedia state={fallback}/>}
-      {capture && previewError && <p className="cr-preview-error">{previewError}</p>}
+      {capture && previewError && <p className="cr-preview-error">
+        <span>{previewError}</span>
+        {onRetryPreview && <button type="button" className="cr-btn cr-pill" aria-label={NAMES.retryPreview} onClick={onRetryPreview}><Icon name="refresh" strokeWidth={1.8}/>Retry</button>}
+      </p>}
       {live && <span className="cr-live-badge"><i aria-hidden="true"/>{sourceName ? `Live · ${sourceName}` : 'Live'}</span>}
     </section>
     <div ref={controls} className="cr-stage-controls">{children}</div>
