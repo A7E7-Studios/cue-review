@@ -68,14 +68,22 @@
 //! sample, unless it is a gap or older than [`STALE_MS`].
 //! [`CursorTrack::clicks`] lists presses.
 //!
-//! [`CursorPoint::x`]/[`CursorPoint::y`] are fractions of the canvas, measured
-//! at the pointer's pixel center. `px`/`py` scale them to the session video,
-//! which is take 1's canvas rounded down to even sizes (`finalize` scales by
-//! `trunc(iw/2)*2`). Later takes with another canvas are assumed to be scaled
-//! to that size without padding when the combined video is rebuilt.
-//! `in_video` is false outside the canvas and when the pointer was not over
-//! the source: on another monitor, or over a window covering the source
-//! window.
+//! [`CursorPoint::x`]/[`CursorPoint::y`] are fractions of the session video,
+//! measured at the pointer's pixel center, and `px`/`py` are its pixels. The
+//! session video is take 1's canvas rounded down to even sizes (`finalize`
+//! scales by `trunc(iw/2)*2`). A later take of another size is re-encoded by
+//! [`crate::takes`] to fit that frame (`scale=…,pad=W:H:padX:padY`), and its
+//! `capture-timing.json` records
+//! `"normalize": {"scale", "padX", "padY", "baseWidth", "baseHeight"}`. Its
+//! points then follow its pixels: through its own `finalize` size, times
+//! `scale`, plus `padX`/`padY` from the top-left corner, as fractions of
+//! `baseWidth`×`baseHeight`. A take without a valid `normalize` entry is
+//! assumed to be scaled to the session video without padding, so its
+//! fractions are of its own canvas.
+//!
+//! `in_video` is false outside the canvas (which covers any padding), outside
+//! the session video, and when the pointer was not over the source: on
+//! another monitor, or over a window covering the source window.
 //!
 //! # Other platforms
 //!
@@ -367,19 +375,89 @@ pub fn decode(text: &str) -> Option<(Header, Vec<Sample>)> {
     Some((header, samples))
 }
 
+/// A pixel's center as a fraction of `size` pixels.
+fn fraction(pixel: i32, size: u32) -> f64 {
+    (f64::from(pixel) + 0.5) / f64::from(size.max(1))
+}
+
+/// Whether `pixel` lies in `0..size`.
+fn inside(pixel: i32, size: u32) -> bool {
+    pixel >= 0 && i64::from(pixel) < i64::from(size)
+}
+
+/// Fractions are reported to four decimals.
+fn round_fraction(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
 /// Places a canvas position on the session video. See the module docs.
 pub fn video_point(t_ms: u64, at: Position, canvas: (u32, u32), video: (u32, u32)) -> CursorPoint {
-    let fraction = |pixel: i32, size: u32| (f64::from(pixel) + 0.5) / f64::from(size.max(1));
     let (x, y) = (fraction(at.x, canvas.0), fraction(at.y, canvas.1));
-    let inside = |pixel: i32, size: u32| pixel >= 0 && i64::from(pixel) < i64::from(size);
-    let round = |value: f64| (value * 10_000.0).round() / 10_000.0;
     CursorPoint {
         t_ms,
-        x: round(x),
-        y: round(y),
+        x: round_fraction(x),
+        y: round_fraction(y),
         px: (x * f64::from(video.0)).floor() as i32,
         py: (y * f64::from(video.1)).floor() as i32,
         in_video: at.over_source && inside(at.x, canvas.0) && inside(at.y, canvas.1),
+    }
+}
+
+/// How [`crate::takes`] fitted a take of another size into the session
+/// video: the `normalize` entry of the take's `capture-timing.json`, written
+/// with ffmpeg's `scale=…,pad=baseWidth:baseHeight:padX:padY`.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Normalize {
+    /// Uniform factor from the take's video pixels to session video pixels.
+    scale: f64,
+    /// Where the scaled picture's top-left corner sits in the session video.
+    pad_x: u32,
+    pad_y: u32,
+    /// The session video's size.
+    base_width: u32,
+    base_height: u32,
+}
+
+impl Normalize {
+    /// The `normalize` entry of a parsed `capture-timing.json`. `None` when it
+    /// is absent or malformed, so the take keeps the unpadded mapping.
+    fn from_timing(timing: &serde_json::Value) -> Option<Self> {
+        // An object only: serde would also read a struct from an array.
+        let entry = timing.get("normalize").filter(|entry| entry.is_object())?;
+        let entry = Self::deserialize(entry).ok()?;
+        let valid = entry.scale.is_finite()
+            && entry.scale > 0.0
+            && entry.pad_x < entry.base_width
+            && entry.pad_y < entry.base_height;
+        valid.then_some(entry)
+    }
+
+    /// Places a canvas position on the session video the way the take's
+    /// pixels went there: `finalize` makes the canvas even, then the picture
+    /// is scaled by `scale` and offset by the padding from the top-left. A
+    /// point inside the canvas lands on the scaled picture, never on the
+    /// padding; it must still land inside the session video.
+    fn place(&self, t_ms: u64, at: Position, canvas: (u32, u32)) -> CursorPoint {
+        let video = video_size(canvas);
+        let axis = |pixel: i32, canvas: u32, video: u32, pad: u32| {
+            fraction(pixel, canvas) * f64::from(video) * self.scale + f64::from(pad)
+        };
+        let x = axis(at.x, canvas.0, video.0, self.pad_x);
+        let y = axis(at.y, canvas.1, video.1, self.pad_y);
+        let (px, py) = (x.floor() as i32, y.floor() as i32);
+        CursorPoint {
+            t_ms,
+            x: round_fraction(x / f64::from(self.base_width)),
+            y: round_fraction(y / f64::from(self.base_height)),
+            px,
+            py,
+            in_video: at.over_source
+                && inside(at.x, canvas.0)
+                && inside(at.y, canvas.1)
+                && inside(px, self.base_width)
+                && inside(py, self.base_height),
+        }
     }
 }
 
@@ -409,7 +487,10 @@ struct TakeCursor {
     /// Where the take ends on the session timeline, when known.
     end_ms: Option<u64>,
     canvas: (u32, u32),
+    /// The session video, for a take without `normalize`.
     video: (u32, u32),
+    /// How the take was fitted into the session video, when it was.
+    normalize: Option<Normalize>,
     samples: Vec<Sample>,
 }
 
@@ -446,9 +527,10 @@ impl CursorTrack {
                 if track.entries.last().is_some_and(|last| last.t_ms > t_ms) {
                     continue;
                 }
-                let point = sample
-                    .at
-                    .map(|at| video_point(t_ms, at, take.canvas, take.video));
+                let point = sample.at.map(|at| match take.normalize {
+                    Some(normalize) => normalize.place(t_ms, at, take.canvas),
+                    None => video_point(t_ms, at, take.canvas, take.video),
+                });
                 if let (Some(at), Some(point)) = (sample.at, point) {
                     if let Some(before) = held {
                         for (bit, button) in [
@@ -498,15 +580,22 @@ fn is_root(relative: &str) -> bool {
         .all(|part| part == Component::CurDir)
 }
 
-/// The canvas recorded for a take: `capture-timing.json`, else the header.
-fn take_canvas(dir: &Path, header: Option<&Header>) -> Option<(u32, u32)> {
-    let timing = fs::read(dir.join("capture-timing.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|timing| {
-            let size = |key: &str| u32::try_from(timing[key].as_u64()?).ok();
-            Some((size("canvasWidth")?, size("canvasHeight")?))
-        });
+/// A take's `capture-timing.json`, when it is readable JSON.
+fn read_timing(dir: &Path) -> Option<serde_json::Value> {
+    let bytes = fs::read(dir.join("capture-timing.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// The canvas recorded for a take: its `timing`, else the header.
+fn take_canvas(
+    dir: &Path,
+    timing: Option<&serde_json::Value>,
+    header: Option<&Header>,
+) -> Option<(u32, u32)> {
+    let timing = timing.and_then(|timing| {
+        let size = |key: &str| u32::try_from(timing[key].as_u64()?).ok();
+        Some((size("canvasWidth")?, size("canvasHeight")?))
+    });
     let header = || {
         let header = match header {
             Some(header) => header.clone(),
@@ -534,9 +623,10 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
         takes.push((0, end.unwrap_or(session.duration_ms), "."));
     }
     takes.sort_by_key(|take| take.0);
-    let base = takes
-        .first()
-        .and_then(|take| take_canvas(&take_dir(folder, take.2)?, None));
+    let base = takes.first().and_then(|take| {
+        let dir = take_dir(folder, take.2)?;
+        take_canvas(&dir, read_timing(&dir).as_ref(), None)
+    });
     let mut found = false;
     let mut placed = Vec::new();
     for (index, &(offset_ms, duration_ms, relative)) in takes.iter().enumerate() {
@@ -549,7 +639,8 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
         else {
             continue;
         };
-        let Some(canvas) = take_canvas(&dir, Some(&header)) else {
+        let timing = read_timing(&dir);
+        let Some(canvas) = take_canvas(&dir, timing.as_ref(), Some(&header)) else {
             continue;
         };
         found = true;
@@ -560,6 +651,7 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
             end_ms: own_end.into_iter().chain(next).min(),
             canvas,
             video: video_size(base.unwrap_or(canvas)),
+            normalize: timing.as_ref().and_then(Normalize::from_timing),
             samples,
         });
     }
@@ -1079,6 +1171,198 @@ mod tests {
         )];
         let (_root, store, id) = session_with(Vec::new(), 0, &files);
         assert!(load(&store, &id).is_none());
+    }
+
+    /// Take 1 on a `base` canvas, then take 2 from 1 s on a `canvas`, with
+    /// `timing` as take 2's `capture-timing.json`. Returns take 2's points at
+    /// the canvas pixels `at`, sampled 100 ms apart.
+    fn second_take_points(
+        base: (u32, u32),
+        canvas: (u32, u32),
+        timing: Option<&str>,
+        at: &[(i32, i32)],
+    ) -> Vec<CursorPoint> {
+        let samples = (1..)
+            .zip(at)
+            .map(|(step, &(x, y))| sample(100 * step, position(x, y, 0)))
+            .collect();
+        let files = [
+            (
+                ".",
+                Header::new("display", Some(base)),
+                vec![sample(10, position(1, 1, 0))],
+            ),
+            ("takes/2", Header::new("display", Some(canvas)), samples),
+        ];
+        let takes = vec![
+            take(1, 0, 1_000, ".", TakeStatus::Ready),
+            take(2, 1_000, 5_000, "takes/2", TakeStatus::Ready),
+        ];
+        let (_root, store, id) = session_with(takes, 6_000, &files);
+        if let Some(timing) = timing {
+            let dir = store.session_dir(&id).unwrap().join("takes/2");
+            fs::write(dir.join("capture-timing.json"), timing).unwrap();
+        }
+        let track = load(&store, &id).unwrap();
+        (1..=at.len() as u64)
+            .map(|step| track.at(1_000 + 100 * step).unwrap())
+            .collect()
+    }
+
+    /// A 256x256 take 2's timing without `normalize`.
+    const SQUARE_TIMING: &str = r#"{"canvasWidth":256,"canvasHeight":256}"#;
+    /// A 256x256 take 2's corners, then left of its canvas (over the left
+    /// padding once it is fitted into 320x240) and right of it.
+    const SQUARE_POINTS: [(i32, i32); 4] = [(0, 0), (255, 255), (-10, 100), (256, 10)];
+
+    fn summary(points: &[CursorPoint]) -> Vec<(i32, i32, bool)> {
+        points
+            .iter()
+            .map(|point| (point.px, point.py, point.in_video))
+            .collect()
+    }
+
+    #[test]
+    fn a_padded_take_is_scaled_and_offset_from_the_top_left() {
+        // takes::fit(256, 256, 320, 240): 240x240 with 40 px of padding each side.
+        let timing = r#"{"canvasWidth":256,"canvasHeight":256,"normalize":{"scale":0.9375,"padX":40,"padY":0,"baseWidth":320,"baseHeight":240}}"#;
+        let points = second_take_points((320, 240), (256, 256), Some(timing), &SQUARE_POINTS);
+        assert_eq!(
+            summary(&points),
+            [
+                (40, 0, true),
+                (279, 239, true),
+                (31, 94, false),
+                (280, 9, false)
+            ]
+        );
+        assert_eq!((points[0].x, points[0].y), (0.1265, 0.002));
+        assert_eq!((points[1].x, points[1].y), (0.8735, 0.998));
+        // Left of the canvas is on the padding: inside the video, never marked.
+        assert!((0.0..1.0).contains(&points[2].x) && !marks(&points[2]));
+    }
+
+    #[test]
+    fn an_unpadded_take_matches_the_plain_scaling() {
+        let at = [(640, 360), (1279, 719), (1280, 0)];
+        let timing = r#"{"canvasWidth":1280,"canvasHeight":720,"normalize":{"scale":1.5,"padX":0,"padY":0,"baseWidth":1920,"baseHeight":1080}}"#;
+        let points = second_take_points((1920, 1080), (1280, 720), Some(timing), &at);
+        assert_eq!(
+            summary(&points),
+            [(960, 540, true), (1919, 1079, true), (1920, 0, false)]
+        );
+        assert_eq!((points[0].x, points[0].y), (0.5004, 0.5007));
+        let plain = r#"{"canvasWidth":1280,"canvasHeight":720}"#;
+        assert_eq!(
+            points,
+            second_take_points((1920, 1080), (1280, 720), Some(plain), &at)
+        );
+    }
+
+    #[test]
+    fn a_take_without_normalize_keeps_the_unpadded_mapping() {
+        let points =
+            second_take_points((320, 240), (256, 256), Some(SQUARE_TIMING), &SQUARE_POINTS);
+        // Fractions of take 2's own canvas, stretched over take 1's video.
+        assert_eq!(
+            summary(&points),
+            [
+                (0, 0, true),
+                (319, 239, true),
+                (-12, 94, false),
+                (320, 9, false)
+            ]
+        );
+        assert_eq!((points[1].x, points[1].y), (0.998, 0.998));
+        // No capture-timing.json at all: the header's canvas, same mapping.
+        assert_eq!(
+            points,
+            second_take_points((320, 240), (256, 256), None, &SQUARE_POINTS)
+        );
+    }
+
+    #[test]
+    fn a_malformed_normalize_is_ignored() {
+        let fallback =
+            second_take_points((320, 240), (256, 256), Some(SQUARE_TIMING), &SQUARE_POINTS);
+        for entry in [
+            "null",
+            "[0.9375, 40, 0, 320, 240]",
+            r#""scale=240:240,pad=320:240:40:0""#,
+            r#"{"scale":"0.9375","padX":40,"padY":0,"baseWidth":320,"baseHeight":240}"#,
+            r#"{"scale":0.9375,"padX":40,"padY":0,"baseWidth":320}"#,
+            r#"{"scale":0.9375,"padX":-40,"padY":0,"baseWidth":320,"baseHeight":240}"#,
+            r#"{"scale":0.9375,"padX":40.5,"padY":0,"baseWidth":320,"baseHeight":240}"#,
+            r#"{"scale":0,"padX":40,"padY":0,"baseWidth":320,"baseHeight":240}"#,
+            r#"{"scale":-0.9375,"padX":40,"padY":0,"baseWidth":320,"baseHeight":240}"#,
+            r#"{"scale":0.9375,"padX":320,"padY":0,"baseWidth":320,"baseHeight":240}"#,
+            r#"{"scale":0.9375,"padX":0,"padY":0,"baseWidth":0,"baseHeight":0}"#,
+            r#"{"scale":0.9375,"padX":40,"padY":0,"baseWidth":4294967296,"baseHeight":240}"#,
+        ] {
+            let timing = format!(r#"{{"canvasWidth":256,"canvasHeight":256,"normalize":{entry}}}"#);
+            let points = second_take_points((320, 240), (256, 256), Some(&timing), &SQUARE_POINTS);
+            assert_eq!(points, fallback, "{entry}");
+        }
+        // An unreadable capture-timing.json falls back to the header's canvas.
+        let torn = r#"{"canvasWidth":256,"canvasHeight":256,"normalize":{"scale":0.9"#;
+        assert_eq!(
+            second_take_points((320, 240), (256, 256), Some(torn), &SQUARE_POINTS),
+            fallback
+        );
+    }
+
+    #[test]
+    fn normalized_points_follow_finalize_then_scale_then_padding() {
+        let at = |x, y| Position {
+            x,
+            y,
+            over_source: true,
+            buttons: 0,
+        };
+        // takes::fit(3840, 1080, 1920, 1080): 1920x540, padded 270 px from the top.
+        let timing = json!({"normalize": {"scale": 0.5, "padX": 0, "padY": 270,
+            "baseWidth": 1920, "baseHeight": 1080, "later": true}});
+        let wide = Normalize::from_timing(&timing).unwrap();
+        assert_eq!(
+            wide,
+            Normalize {
+                scale: 0.5,
+                pad_x: 0,
+                pad_y: 270,
+                base_width: 1920,
+                base_height: 1080
+            }
+        );
+        let center = wide.place(5, at(1920, 540), (3840, 1080));
+        assert_eq!((center.px, center.py, center.in_video), (960, 540, true));
+        assert_eq!((center.x, center.y), (0.5001, 0.5002));
+        for (y, py) in [(-1, 269), (1080, 810)] {
+            let padding = wide.place(5, at(100, y), (3840, 1080));
+            assert_eq!((padding.py, padding.in_video), (py, false), "{y}");
+            assert!((0.0..1.0).contains(&padding.y));
+        }
+        let hidden = Position {
+            over_source: false,
+            ..at(10, 10)
+        };
+        assert!(!wide.place(5, hidden, (3840, 1080)).in_video);
+        // finalize made a 1281x721 canvas 1280x720 before the take was scaled
+        // by 1.5, so its last pixel stays inside (1280.5 * 1.5 would not).
+        let odd = Normalize {
+            scale: 1.5,
+            pad_x: 0,
+            pad_y: 0,
+            base_width: 1920,
+            base_height: 1080,
+        };
+        let corner = odd.place(5, at(1280, 720), (1281, 721));
+        assert_eq!((corner.px, corner.py, corner.in_video), (1919, 1079, true));
+        // An entry that pushes the picture past the frame: in the canvas, but
+        // not in the video.
+        let shifted = Normalize { pad_x: 1900, ..odd };
+        let off = shifted.place(5, at(100, 100), (1281, 721));
+        assert!(!off.in_video && off.x > 1.0 && off.px >= 1920);
+        assert_eq!(Normalize::from_timing(&json!([1, 2])), None);
     }
 
     fn gray_png(dir: &Path, width: u32, height: u32) -> PathBuf {
