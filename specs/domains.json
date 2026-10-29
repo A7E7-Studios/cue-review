@@ -1,0 +1,22 @@
+[
+  {
+    "id": "capture",
+    "title": "Capture",
+    "purpose": "Recording a review: choosing and previewing a display, window or Android/Quest device, recording it with the microphone and system audio in sync, the pointer or touches beside it, Record more takes, and finalizing the media into a playable session."
+  },
+  {
+    "id": "transcription",
+    "title": "Transcription",
+    "purpose": "Turning a session's audio into a local, timestamped transcript: the speech runtime and its models, speech detection, the vocabulary prompt, word timing that seeking relies on, and retrying a failed transcription."
+  },
+  {
+    "id": "workspace",
+    "title": "Review workspace",
+    "purpose": "What the person sees and does in the app: projects and sessions in the sidebar, playback and the scrubber, the transcript and word seeking, the recording dock, settings, the window chrome and the agent handoff."
+  },
+  {
+    "id": "agent-cli",
+    "title": "Agent CLI",
+    "purpose": "The `cue` command an agent runs to find sessions and take evidence from them: transcripts, frames, clips, cursor positions and the moments a reviewer pointed at."
+  }
+]

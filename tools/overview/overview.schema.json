@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/A7E7-Studios/faster-spec/blob/main/tools/overview/overview.schema.json",
+  "title": "Overview index",
+  "description": "The solution across repositories: capabilities with their scenarios and human review state, the changes waiting for the owner's review, and the modules. Written by tools/overview/overview.mjs; version 2.",
+  "type": "object",
+  "required": ["version", "generatedAt", "assetsDir", "repos", "domains", "capabilities", "changes", "modules", "totals"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 2 },
+    "generatedAt": { "type": "string", "format": "date-time", "description": "When the index was written (UTC)." },
+    "assetsDir": { "type": ["string", "null"], "description": "The --assets folder every asset path is relative to; null without --assets." },
+    "repos": { "type": "array", "items": { "$ref": "#/$defs/repo" } },
+    "domains": { "type": "array", "items": { "$ref": "#/$defs/domain" }, "description": "specs/domains.json of the first repository that has one, then any other ids the others add." },
+    "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" }, "description": "In domain order, then by id. A capability present in several repositories is one entry with a side per repository." },
+    "changes": { "type": "array", "items": { "$ref": "#/$defs/change" }, "description": "Every changes/<id>/ at the read refs: the to-review list. One entry per id across repositories." },
+    "modules": { "type": "array", "items": { "$ref": "#/$defs/module" } },
+    "totals": { "$ref": "#/$defs/totals" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+    "capabilityId": { "type": "string", "pattern": "^[^/]+/[^/]+$", "description": "<domain>/<capability>" },
+    "repoId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "repo": {
+      "type": "object",
+      "required": ["id", "name", "ref", "commit"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/repoId" },
+        "name": { "type": "string", "description": "owner/name from the origin URL, else the folder's name." },
+        "ref": { "type": "string" },
+        "commit": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "required": ["id", "title", "purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "purpose": { "type": "string" }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "required": ["id", "domain", "title", "purpose", "sides", "requirements", "pendingChanges", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/capabilityId" },
+        "domain": { "type": "string" },
+        "title": { "type": "string", "description": "From the first repository given that has the capability." },
+        "purpose": { "type": "string", "description": "The spec's ## Purpose, inline Markdown kept; from the first repository given." },
+        "sides": { "type": "array", "items": { "$ref": "#/$defs/capabilitySide" } },
+        "requirements": { "type": "array", "items": { "$ref": "#/$defs/requirement" }, "description": "Every side's requirements, each tagged with its repository." },
+        "pendingChanges": { "type": "array", "items": { "type": "string" }, "description": "Ids of the changes waiting for review that name this capability." },
+        "state": {
+          "enum": ["failing", "unreviewed", "approved", "automated"],
+          "description": "failing if any scenario is failing; else unreviewed if a pending change names it, any scenario is open or a side has problems; else approved if any scenario is approved; else automated."
+        }
+      }
+    },
+    "capabilitySide": {
+      "type": "object",
+      "required": ["repo", "spec", "code", "modules", "problems"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "$ref": "#/$defs/repoId" },
+        "spec": { "type": "string", "description": "specs/<domain>/<capability>/spec.md" },
+        "code": { "type": "array", "items": { "type": "string" }, "description": "The spec's code paths; a folder ends with /." },
+        "modules": { "type": "array", "items": { "type": "string" }, "description": "The path of the nearest (deepest) module up each code path." },
+        "problems": { "type": "array", "items": { "type": "string" }, "description": "\"<line>: <message>\" for each break of the spec format; empty for a spec the gate passes." }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "required": ["repo", "name", "text", "scenarios"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "$ref": "#/$defs/repoId" },
+        "name": { "type": "string" },
+        "text": { "type": "string", "description": "The requirement's statement, inline Markdown kept." },
+        "scenarios": { "type": "array", "items": { "$ref": "#/$defs/scenario" } }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["name", "slug", "text", "look", "proofs", "tested", "human"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "slug": { "type": "string" },
+        "text": { "type": "string", "description": "One line per step: \"GIVEN …\", \"WHEN …\", \"THEN …\", \"AND …\"." },
+        "look": { "$ref": "#/$defs/look" },
+        "proofs": { "type": "array", "items": { "$ref": "#/$defs/proof" } },
+        "tested": { "type": "boolean", "description": "It has at least one test: line." },
+        "human": {
+          "enum": ["failing", "open", "approved", "automated"],
+          "description": "failing if any human check is fail; else open if any is open or a PROOF line other than test: is invalid; else approved if it has a human check (all pass); else automated."
+        }
+      }
+    },
+    "look": {
+      "type": ["object", "null"],
+      "description": "specs/<domain>/<capability>/look/<slug>.png when the repository has it.",
+      "required": ["repo", "path", "asset"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "$ref": "#/$defs/repoId" },
+        "path": { "type": "string" },
+        "asset": { "type": ["string", "null"], "description": "<repo-id>/<path> under assetsDir; null without --assets or when unresolved." },
+        "missing": { "const": "lfs", "description": "Present when --assets could not resolve the LFS object." }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "required": ["check", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "check": { "type": "string", "description": "test, desk, headset, two-headsets, printed-card, live-tenant (unknown for an unreadable line)." },
+        "state": { "enum": ["test", "open", "pass", "fail", "invalid"], "description": "invalid: the line breaks the format; unless its check is test, the scenario counts it as open." },
+        "path": { "type": "string", "description": "test: the test's path." },
+        "selector": { "type": "string", "description": "test: what follows ::" },
+        "exists": { "type": "boolean", "description": "test: the path exists at the read ref." },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "build": { "type": "string" },
+        "by": { "type": "string" },
+        "note": { "type": "string" },
+        "error": { "type": "string", "description": "invalid: why the line breaks the format." }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["path", "asset"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "asset": { "type": ["string", "null"], "description": "<repo-id>/<path> under assetsDir; null without --assets or when unresolved." },
+        "missing": { "const": "lfs" }
+      }
+    },
+    "change": {
+      "type": "object",
+      "required": ["id", "title", "review", "followUps", "sides"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string", "description": "From the first repository given; the id when it has no proposal.md." },
+        "review": { "enum": ["unreviewed", "changes-requested"], "description": "changes-requested when any side says so." },
+        "followUps": { "type": "array", "items": { "type": "string" } },
+        "sides": { "type": "array", "items": { "$ref": "#/$defs/changeSide" } }
+      }
+    },
+    "changeSide": {
+      "type": "object",
+      "required": ["repo", "path", "review", "capabilities", "removes", "files", "looks", "directions", "evidence", "landed"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "$ref": "#/$defs/repoId" },
+        "path": { "type": "string", "description": "changes/<id>" },
+        "review": { "enum": ["unreviewed", "changes-requested"] },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "removes": { "type": "array", "items": { "type": "string" }, "description": "Capability ids this change deletes." },
+        "files": { "type": "array", "items": { "type": "string" } },
+        "looks": { "type": "array", "items": { "$ref": "#/$defs/asset" }, "description": "Files directly in look/." },
+        "directions": { "type": "array", "items": { "$ref": "#/$defs/asset" }, "description": "Files under look/directions/." },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/asset" }, "description": "Files under evidence/." },
+        "landed": {
+          "type": ["object", "null"],
+          "description": "The newest first-parent commit on the ref that added proposal.md; null when there is no proposal.md.",
+          "required": ["commit", "date", "pr"],
+          "additionalProperties": false,
+          "properties": {
+            "commit": { "$ref": "#/$defs/sha" },
+            "date": { "type": "string", "format": "date-time" },
+            "pr": { "type": ["integer", "null"], "description": "From a subject ending (#<n>)." }
+          }
+        }
+      }
+    },
+    "module": {
+      "type": "object",
+      "description": "A folder holding a file a module marker matches (overview.moduleMarkers; README.md, package.json, pyproject.toml, build.gradle, build.gradle.kts, a non-test *.asmdef when the config names none), never under node_modules.",
+      "required": ["repo", "path", "readme", "assembly", "package", "manifest", "title", "summary", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "$ref": "#/$defs/repoId" },
+        "path": { "type": "string", "description": "The folder; . for the root." },
+        "readme": { "type": ["string", "null"], "description": "The folder's README.md, or null." },
+        "assembly": { "type": ["string", "null"], "description": "The name of the folder's non-test *.asmdef, or null." },
+        "package": { "type": ["string", "null"], "description": "The package name its manifest gives (package.json name, pyproject.toml [project] or [tool.poetry] name), or null." },
+        "manifest": { "type": ["string", "null"], "description": "The folder's first marker file other than README.md and *.asmdef, in marker order (package.json, pyproject.toml, build.gradle.kts, …), or null." },
+        "title": { "type": "string", "description": "The README's first heading, else the assembly's name, else the package's name, else the folder's name." },
+        "summary": { "type": "string", "maxLength": 300, "description": "The README's first paragraph as plain text, else the manifest's description, else empty." },
+        "capabilities": { "type": "array", "items": { "type": "string" }, "description": "Capabilities with a code path whose nearest (deepest) module up its tree is this one." }
+      }
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "totals": {
+      "type": "object",
+      "required": ["repos", "domains", "modules", "capabilities", "scenarios", "changes"],
+      "additionalProperties": false,
+      "properties": {
+        "repos": { "$ref": "#/$defs/count" },
+        "domains": { "$ref": "#/$defs/count" },
+        "modules": { "$ref": "#/$defs/count" },
+        "capabilities": {
+          "type": "object",
+          "required": ["total", "failing", "unreviewed", "approved", "automated"],
+          "additionalProperties": false,
+          "properties": {
+            "total": { "$ref": "#/$defs/count" },
+            "failing": { "$ref": "#/$defs/count" },
+            "unreviewed": { "$ref": "#/$defs/count" },
+            "approved": { "$ref": "#/$defs/count" },
+            "automated": { "$ref": "#/$defs/count" }
+          }
+        },
+        "scenarios": {
+          "type": "object",
+          "required": ["total", "failing", "open", "approved", "automated", "tested"],
+          "additionalProperties": false,
+          "properties": {
+            "total": { "$ref": "#/$defs/count" },
+            "failing": { "$ref": "#/$defs/count" },
+            "open": { "$ref": "#/$defs/count" },
+            "approved": { "$ref": "#/$defs/count" },
+            "automated": { "$ref": "#/$defs/count" },
+            "tested": { "$ref": "#/$defs/count" }
+          }
+        },
+        "changes": {
+          "type": "object",
+          "required": ["total", "unreviewed", "changesRequested"],
+          "additionalProperties": false,
+          "properties": {
+            "total": { "$ref": "#/$defs/count" },
+            "unreviewed": { "$ref": "#/$defs/count" },
+            "changesRequested": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    }
+  }
+}

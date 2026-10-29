@@ -1,0 +1,71 @@
+name: gate
+
+# The formality gate (tools/gate) on every PR into main. REPORT-ONLY while tools/gate/config.json
+# on main says reportOnly: true: the job passes and its summary says what would fail. The one
+# exception is the protected check, a safety boundary: a PR that touches a protected path (the
+# gate, the overview, anything under .github/, a skill, the agent rules and settings; see
+# tools/gate/README.md#protected-paths) fails this job always, and only the owner merges it.
+#
+# pull_request_target, so this file, the gate's code and its config always come from main, never
+# from the PR: a PR cannot rewrite its own gate. That is safe only while nothing from the PR runs,
+# so the job checks out main only, fetches the PR head as git objects, and the gate reads the head
+# with git cat-file / git diff as data. Nothing is installed (the gate has no dependencies) and no
+# step executes anything from the head. No secrets; the job token reads, and is used for one fetch.
+#
+# To spend no Actions minutes on work in progress, a draft PR is skipped and a description edit
+# runs nothing: the gate runs when a PR opens, gets a push, reopens or leaves draft. The pr check
+# reads ## Tests and ## Review from that event's payload, so an edited description counts from the
+# next push.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out main, never the PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          lfs: false
+          persist-credentials: false
+
+      # The token is used for this one fetch and is not left in .git/config.
+      - name: Fetch the PR head as data
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --quiet origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      # --base HEAD and --main HEAD: the main just checked out, so the PR is judged against main as
+      # it is now. The PR description comes from the event payload; the summary is the report.
+      - name: Gate
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node tools/gate/gate.mjs --pr "$PR" --base HEAD --head "$PR_HEAD" --main HEAD \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

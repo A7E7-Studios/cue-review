@@ -1,0 +1,12 @@
+{
+  "name": "kit",
+  "private": true,
+  "description": "Writes a pinned kit version into a project and its lock, tools/kit/lock.json; the gate's kit check holds the copy to it. No dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
