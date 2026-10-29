@@ -1,4 +1,7 @@
 {
+  "app": {
+    "windows": [{ "label": "main", "title": "CueReview", "width": 1280, "height": 820, "minWidth": 640, "minHeight": 480, "backgroundColor": "#ffffff", "dragDropEnabled": false, "titleBarStyle": "Overlay", "hiddenTitle": true, "trafficLightPosition": { "x": 24, "y": 26 } }]
+  },
   "bundle": {
     "targets": ["dmg"],
     "macOS": {

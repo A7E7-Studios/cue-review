@@ -1,4 +1,6 @@
 //! Native Windows capture and portable FFmpeg/device capture. Failed captures retain their original tracks for recovery.
+#[cfg(any(windows, test))]
+use crate::cursor;
 use crate::{
     deps,
     models::{CaptureConfig, CaptureSource, Microphone},
@@ -117,6 +119,20 @@ pub fn sources() -> Result<Vec<CaptureSource>, String> {
         }
     }
     Ok(result)
+}
+
+/// What a `window:HWND` or `monitor:N` source is right now: the window's
+/// title, process image name and class, or the display's device name and
+/// bounds, resolved as capture resolves the id. `None` when the source is
+/// gone, for every other kind of source, and on macOS and Linux.
+#[cfg(windows)]
+pub fn source_identity(id: &str) -> Option<crate::models::SourceIdentity> {
+    identity::read(id)
+}
+/// Sources on macOS and Linux have no identity to check.
+#[cfg(not(windows))]
+pub fn source_identity(_id: &str) -> Option<crate::models::SourceIdentity> {
+    None
 }
 
 fn unavailable_source() -> String {
@@ -405,6 +421,8 @@ struct NativeCapture {
     flags: NativeFlags,
     encoder: Option<PacedEncoder>,
     first_frame: Option<f64>,
+    /// The first frame's size, which every later frame is cropped or padded to.
+    canvas: Option<(u32, u32)>,
     ready_sent: bool,
 }
 #[cfg(windows)]
@@ -513,6 +531,7 @@ impl GraphicsCaptureApiHandler for NativeCapture {
             flags: ctx.flags,
             encoder: None,
             first_frame: None,
+            canvas: None,
             ready_sent: false,
         })
     }
@@ -567,6 +586,7 @@ impl GraphicsCaptureApiHandler for NativeCapture {
                     )
                     .map_err(|e| e.to_string())?;
                     let encoder_origin = Instant::now();
+                    self.canvas = Some((width, height));
                     self.first_frame = Some(
                         encoder_origin
                             .duration_since(self.flags.epoch)
@@ -698,6 +718,510 @@ pub fn stream_preview(
         "Preview timed out. Restore the selected window and try again.".to_string()
     })??;
     Ok(preview)
+}
+
+/// A rectangle in physical screen pixels, laid out like Win32 `RECT`.
+#[cfg(any(windows, test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ScreenRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+#[cfg(any(windows, test))]
+impl ScreenRect {
+    fn contains(self, (x, y): (i32, i32)) -> bool {
+        (self.left..self.right).contains(&x) && (self.top..self.bottom).contains(&y)
+    }
+}
+
+/// What the cursor sampler read about its source in one poll, in physical pixels.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug)]
+enum SourceReading {
+    /// The monitor bounds from `GetMonitorInfoW`; `None` once the monitor is gone.
+    Display(Option<ScreenRect>),
+    /// The DWM extended frame bounds, `None` for a closed or minimized window,
+    /// and whether the root window under the pointer is the source.
+    Window {
+        bounds: Option<ScreenRect>,
+        over_source: bool,
+    },
+}
+
+/// The pointer on the source canvas, whose top-left corner is the source's:
+/// `(x, y, over_source)`, or `None` for a gap. WGC frames and these readings
+/// are all physical pixels, so this is a plain offset at any DPI scale.
+#[cfg(any(windows, test))]
+fn locate(cursor: Option<(i32, i32)>, reading: SourceReading) -> Option<(i32, i32, bool)> {
+    let cursor = cursor?;
+    let (origin, over_source) = match reading {
+        SourceReading::Display(bounds) => {
+            let bounds = bounds?;
+            (bounds, bounds.contains(cursor))
+        }
+        SourceReading::Window {
+            bounds,
+            over_source,
+        } => (bounds?, over_source),
+    };
+    Some((cursor.0 - origin.left, cursor.1 - origin.top, over_source))
+}
+
+/// The successive states of the left, right and middle buttons
+/// ([`cursor::LEFT`], [`cursor::RIGHT`], [`cursor::MIDDLE`]) since the poll
+/// that saw `previous`, from their `GetAsyncKeyState` values: bit 15 is "held
+/// now" and bit 0 "pressed since the last call". A press and release between
+/// two polls becomes two states. The last state is the current one.
+#[cfg(any(windows, test))]
+fn button_steps(previous: u8, readings: [i16; 3]) -> Vec<u8> {
+    let bits = [cursor::LEFT, cursor::RIGHT, cursor::MIDDLE];
+    let sequences: Vec<&[bool]> = bits
+        .iter()
+        .zip(readings)
+        .map(
+            |(bit, reading)| match (previous & bit != 0, reading < 0, reading & 1 != 0) {
+                (false, false, true) => &[true, false][..],
+                (true, true, true) => &[false, true][..],
+                (true, false, true) => &[false, true, false][..],
+                (_, true, _) => &[true][..],
+                (_, false, _) => &[false][..],
+            },
+        )
+        .collect();
+    let steps = sequences
+        .iter()
+        .map(|states| states.len())
+        .max()
+        .unwrap_or(1);
+    let mut result: Vec<u8> = Vec::new();
+    for step in 0..steps {
+        let state = bits
+            .iter()
+            .zip(&sequences)
+            .filter(|(_, states)| states[step.min(states.len() - 1)])
+            .fold(0, |state, (bit, _)| state | bit);
+        if result.last() != Some(&state) {
+            result.push(state);
+        }
+    }
+    result
+}
+
+/// Reads what a window or display source is, for [`source_identity`].
+#[cfg(windows)]
+mod identity {
+    use super::pointer::monitor_bounds;
+    use crate::models::SourceIdentity;
+    use std::ffi::c_void;
+    use windows_capture::{monitor::Monitor, window::Window};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetClassNameW(window: *mut c_void, name: *mut u16, length: i32) -> i32;
+        fn SetThreadDpiAwarenessContext(context: *mut c_void) -> *mut c_void;
+        fn GetWindowThreadProcessId(window: *mut c_void, process_id: *mut u32) -> u32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut c_void;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
+    const PER_MONITOR_AWARE_V2: isize = -4;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    /// 1970-01-01 as a `FILETIME`: 100 ns intervals since 1601-01-01.
+    const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
+
+    /// Runs `read` with physical-pixel coordinates on this thread, then
+    /// restores the thread's DPI awareness, so the app and `cue.exe` (which
+    /// declares none) read the same bounds.
+    fn in_physical_pixels<T>(read: impl FnOnce() -> T) -> T {
+        let previous = unsafe { SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2 as *mut c_void) };
+        let value = read();
+        if !previous.is_null() {
+            unsafe { SetThreadDpiAwarenessContext(previous) };
+        }
+        value
+    }
+
+    fn class_name(window: *mut c_void) -> String {
+        let mut name = [0u16; 256];
+        let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+        String::from_utf16_lossy(&name[..length.clamp(0, name.len() as i32) as usize])
+    }
+
+    /// The process that owns `window`: its id, and when it was created in ms
+    /// since the Unix epoch (`None` when the process cannot be opened).
+    fn owner(window: *mut c_void) -> (Option<u32>, Option<u64>) {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, &mut pid) };
+        if pid == 0 {
+            return (None, None);
+        }
+        (Some(pid), process_created_ms(pid))
+    }
+    fn process_created_ms(pid: u32) -> Option<u64> {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return None;
+        }
+        let [mut creation, mut exit, mut kernel, mut user] = [FileTime::default(); 4];
+        let read =
+            unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
+        unsafe { CloseHandle(process) };
+        if read == 0 {
+            return None;
+        }
+        let FileTime { low, high } = creation;
+        let ticks = (u64::from(high) << 32) | u64::from(low);
+        Some(ticks.checked_sub(UNIX_EPOCH_FILETIME)? / 10_000)
+    }
+
+    pub(super) fn read(id: &str) -> Option<SourceIdentity> {
+        if let Some(index) = id.strip_prefix("monitor:") {
+            // The display `native_start` would capture for this id.
+            let monitor = Monitor::from_index(index.parse().ok()?).ok()?;
+            let device = monitor.device_name().ok()?;
+            let bounds = in_physical_pixels(|| monitor_bounds(monitor.as_raw_hmonitor() as usize))?;
+            return Some(SourceIdentity::Display {
+                device,
+                left: bounds.left,
+                top: bounds.top,
+                right: bounds.right,
+                bottom: bounds.bottom,
+            });
+        }
+        let handle: usize = id.strip_prefix("window:")?.parse().ok()?;
+        // Only a window capture would accept: visible, top-level, not a tool window.
+        let window = Window::enumerate()
+            .ok()?
+            .into_iter()
+            .find(|window| window.as_raw_hwnd() as usize == handle)?;
+        let (pid, process_created_ms) = owner(window.as_raw_hwnd());
+        Some(SourceIdentity::Window {
+            title: window.title().unwrap_or_default(),
+            process: window.process_name().unwrap_or_default(),
+            class: class_name(window.as_raw_hwnd()),
+            pid,
+            process_created_ms,
+        })
+    }
+}
+
+/// The Windows cursor sampler. [`crate::cursor`] documents what it records.
+#[cfg(windows)]
+mod pointer {
+    use super::{button_steps, locate, ScreenRect, SourceReading};
+    use crate::cursor::{self, CursorWriter, Header, Position, Sample};
+    use std::{
+        ffi::c_void,
+        fs::File,
+        io::BufWriter,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread::{self, JoinHandle},
+        time::{Duration, Instant},
+    };
+    use windows_capture::monitor::Monitor;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: ScreenRect,
+        work: ScreenRect,
+        flags: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(point: *mut Point) -> i32;
+        fn GetAsyncKeyState(key: i32) -> i16;
+        fn GetSystemMetrics(index: i32) -> i32;
+        fn SetThreadDpiAwarenessContext(context: *mut c_void) -> *mut c_void;
+        fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
+        fn WindowFromPoint(point: Point) -> *mut c_void;
+        fn GetAncestor(window: *mut c_void, flags: u32) -> *mut c_void;
+        fn IsWindow(window: *mut c_void) -> i32;
+        fn IsIconic(window: *mut c_void) -> i32;
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            window: *mut c_void,
+            attribute: u32,
+            value: *mut c_void,
+            size: u32,
+        ) -> i32;
+    }
+    /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
+    const PER_MONITOR_AWARE_V2: isize = -4;
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+    const GA_ROOT: u32 = 2;
+    const SM_SWAPBUTTON: i32 = 23;
+    const VK_LBUTTON: i32 = 0x01;
+    const VK_RBUTTON: i32 = 0x02;
+    const VK_MBUTTON: i32 = 0x04;
+
+    /// Makes the calling thread per-monitor-v2 DPI aware, so window, monitor
+    /// and pointer coordinates are physical pixels like the WGC frames,
+    /// whatever the process's own awareness (`cue.exe` declares none).
+    pub(super) fn physical_pixels() -> bool {
+        !unsafe { SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2 as *mut c_void) }.is_null()
+    }
+
+    pub(super) fn monitor_bounds(monitor: usize) -> Option<ScreenRect> {
+        let mut info = MonitorInfo {
+            size: size_of::<MonitorInfo>() as u32,
+            monitor: ScreenRect::default(),
+            work: ScreenRect::default(),
+            flags: 0,
+        };
+        (unsafe { GetMonitorInfoW(monitor as *mut c_void, &mut info) } != 0).then_some(info.monitor)
+    }
+
+    /// The visible bounds WGC captures, without the invisible resize borders
+    /// of `GetWindowRect`. `None` for a closed or minimized window.
+    fn window_bounds(window: *mut c_void) -> Option<ScreenRect> {
+        let mut bounds = ScreenRect::default();
+        let found = unsafe {
+            IsWindow(window) != 0
+                && IsIconic(window) == 0
+                && DwmGetWindowAttribute(
+                    window,
+                    DWMWA_EXTENDED_FRAME_BOUNDS,
+                    (&mut bounds as *mut ScreenRect).cast(),
+                    size_of::<ScreenRect>() as u32,
+                ) >= 0
+        };
+        found.then_some(bounds)
+    }
+
+    /// The logical left, right and middle buttons. `GetAsyncKeyState` reports
+    /// physical buttons, so swapped buttons are swapped back.
+    fn read_buttons() -> [i16; 3] {
+        unsafe {
+            let (left, right) = if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+                (VK_RBUTTON, VK_LBUTTON)
+            } else {
+                (VK_LBUTTON, VK_RBUTTON)
+            };
+            [
+                GetAsyncKeyState(left),
+                GetAsyncKeyState(right),
+                GetAsyncKeyState(VK_MBUTTON),
+            ]
+        }
+    }
+
+    /// A native capture source, as raw `HMONITOR` or `HWND` values.
+    #[derive(Clone, Copy, Debug)]
+    pub(super) enum Source {
+        Display(usize),
+        Window(usize),
+    }
+    impl Source {
+        /// The source behind a `monitor:N` or `window:HWND` id, resolved
+        /// exactly like `native_start`.
+        fn from_id(id: &str) -> Option<Self> {
+            if let Some(index) = id.strip_prefix("monitor:") {
+                let monitor = Monitor::from_index(index.parse().ok()?).ok()?;
+                return Some(Self::Display(monitor.as_raw_hmonitor() as usize));
+            }
+            id.strip_prefix("window:")?.parse().ok().map(Self::Window)
+        }
+        fn kind(self) -> &'static str {
+            match self {
+                Self::Display(_) => "display",
+                Self::Window(_) => "window",
+            }
+        }
+        fn read(self) -> Option<(i32, i32, bool)> {
+            let mut point = Point::default();
+            let cursor = (unsafe { GetCursorPos(&mut point) } != 0).then_some(point);
+            let reading = match self {
+                Self::Display(monitor) => SourceReading::Display(monitor_bounds(monitor)),
+                Self::Window(window) => {
+                    let window = window as *mut c_void;
+                    let over_source = cursor.is_some_and(|point| unsafe {
+                        let hit = WindowFromPoint(point);
+                        !hit.is_null() && GetAncestor(hit, GA_ROOT) == window
+                    });
+                    SourceReading::Window {
+                        bounds: window_bounds(window),
+                        over_source,
+                    }
+                }
+            };
+            locate(cursor.map(|point| (point.x, point.y)), reading)
+        }
+    }
+
+    /// The sampler thread of one take.
+    pub(super) struct Sampler {
+        stop: Arc<AtomicBool>,
+        join: Option<JoinHandle<Result<u64, String>>>,
+        error: Option<String>,
+    }
+    impl Sampler {
+        /// Samples a native source into `folder`'s `cursor.jsonl`. `canvas` is
+        /// the first frame's size.
+        pub(super) fn start(
+            source_id: &str,
+            folder: &Path,
+            epoch: Instant,
+            canvas: Option<(u32, u32)>,
+        ) -> Self {
+            match Source::from_id(source_id) {
+                Some(source) => Self::spawn(source, folder.join(cursor::FILE_NAME), epoch, canvas),
+                None => Self {
+                    stop: Arc::default(),
+                    join: None,
+                    error: Some(format!("Cursor tracking found no source for {source_id}")),
+                },
+            }
+        }
+        pub(super) fn spawn(
+            source: Source,
+            path: PathBuf,
+            epoch: Instant,
+            canvas: Option<(u32, u32)>,
+        ) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let spawned = thread::Builder::new()
+                .name("cursor-sampler".into())
+                .spawn(move || run(source, &path, epoch, canvas, &flag));
+            let (join, error) = match spawned {
+                Ok(join) => (Some(join), None),
+                Err(e) => (None, Some(format!("Cursor tracking could not start: {e}"))),
+            };
+            Self { stop, join, error }
+        }
+        /// Stops and joins the thread, returning the lines it wrote.
+        pub(super) fn stop(mut self) -> Result<u64, String> {
+            self.stop.store(true, Ordering::Release);
+            match self.join.take() {
+                Some(join) => join
+                    .join()
+                    .map_err(|_| "Cursor sampler panicked".to_string())?,
+                None => Err(self.error.take().unwrap_or_default()),
+            }
+        }
+    }
+    impl Drop for Sampler {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+        }
+    }
+
+    fn run(
+        source: Source,
+        path: &Path,
+        epoch: Instant,
+        canvas: Option<(u32, u32)>,
+        stop: &AtomicBool,
+    ) -> Result<u64, String> {
+        if !physical_pixels() {
+            return Err("Cursor tracking could not use per-monitor DPI awareness".into());
+        }
+        let failed = |e: std::io::Error| format!("Write {}: {e}", path.display());
+        let file = File::create(path).map_err(failed)?;
+        let mut writer =
+            CursorWriter::new(BufWriter::new(file), &Header::new(source.kind(), canvas))
+                .map_err(failed)?;
+        // Buttons already held are the starting state, not presses. Reading
+        // them also clears "pressed since the last call".
+        let mut held = button_steps(0, read_buttons().map(|reading| reading & !1))
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let interval = Duration::from_secs(1) / cursor::SAMPLE_HZ;
+        let started = Instant::now();
+        let mut flushed = started;
+        let mut tick = 0u32;
+        while !stop.load(Ordering::Acquire) {
+            let t_ms = epoch.elapsed().as_millis() as u64;
+            // Buttons are polled during gaps too, so a press there is not
+            // reported once the pointer is back.
+            let steps = button_steps(held, read_buttons());
+            held = steps.last().copied().unwrap_or(held);
+            match source.read() {
+                Some((x, y, over_source)) => {
+                    for buttons in steps {
+                        let at = Position {
+                            x,
+                            y,
+                            over_source,
+                            buttons,
+                        };
+                        writer
+                            .record(Sample { t_ms, at: Some(at) })
+                            .map_err(failed)?;
+                    }
+                }
+                None => writer.record(Sample { t_ms, at: None }).map_err(failed)?,
+            }
+            if flushed.elapsed() >= Duration::from_secs(1) {
+                writer.flush().map_err(failed)?;
+                flushed = Instant::now();
+            }
+            // A fixed schedule. Ticks missed while descheduled are skipped.
+            tick += 1;
+            let now = Instant::now();
+            if started + interval * tick <= now {
+                tick = (now.duration_since(started).as_nanos() / interval.as_nanos()) as u32 + 1;
+            }
+            thread::sleep((started + interval * tick).saturating_duration_since(now));
+        }
+        writer.flush().map_err(failed)?;
+        Ok(writer.lines())
+    }
+}
+
+/// Keys `finalize` adds to `capture-timing.json` for cursor tracking.
+fn timing_extra(
+    canvas: Option<(u32, u32)>,
+    cursor: Option<Result<u64, String>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut extra = serde_json::Map::new();
+    if let Some((width, height)) = canvas {
+        extra.insert("canvasWidth".into(), width.into());
+        extra.insert("canvasHeight".into(), height.into());
+    }
+    match cursor {
+        Some(Ok(lines)) => {
+            extra.insert("cursorLines".into(), lines.into());
+        }
+        Some(Err(error)) => {
+            extra.insert("cursorError".into(), error.into());
+        }
+        None => (),
+    }
+    extra
 }
 
 fn preview_url(bytes: &[u8]) -> String {
@@ -1154,6 +1678,9 @@ pub struct ActiveCapture {
     error: SharedError,
     fps: u32,
     device_audio: bool,
+    /// The cursor sampler of a native display or window capture.
+    #[cfg(windows)]
+    cursor: Option<pointer::Sampler>,
 }
 pub fn start(config: CaptureConfig, folder: &Path) -> Result<ActiveCapture, String> {
     start_muted(config, folder, false)
@@ -1183,6 +1710,8 @@ pub fn start_muted(
         error: Arc::default(),
         fps: config.fps,
         device_audio: config.system_audio && config.source_id.starts_with("android:"),
+        #[cfg(windows)]
+        cursor: None,
     };
     capture.audio = Some(AudioWorker::start(
         &config,
@@ -1292,6 +1821,17 @@ pub fn start_muted(
     })();
     match result {
         Ok(video) => {
+            // The pointer is sampled once video is ready, on the same epoch.
+            #[cfg(windows)]
+            if let VideoCapture::Native(control) = &video {
+                let canvas = control.callback().lock().canvas;
+                capture.cursor = Some(pointer::Sampler::start(
+                    &config.source_id,
+                    folder,
+                    capture.epoch,
+                    canvas,
+                ));
+            }
             capture.video = Some(video);
             Ok(capture)
         }
@@ -1353,6 +1893,11 @@ impl ActiveCapture {
         if self.stopped.is_some() {
             return self.error().map_or(Ok(()), Err);
         }
+        // Stop the pointer first, so every sample precedes the recorded duration.
+        #[cfg(windows)]
+        let cursor = self.cursor.take().map(pointer::Sampler::stop);
+        #[cfg(not(windows))]
+        let cursor = None;
         let duration = self.epoch.elapsed();
         self.stopped = Some(duration);
         let mut failures = Vec::new();
@@ -1363,7 +1908,7 @@ impl ActiveCapture {
                 failures.push(e);
             }
         }
-        let input = match self.video.take() {
+        let (input, canvas) = match self.video.take() {
             #[cfg(windows)]
             Some(VideoCapture::Native(control)) => {
                 let handler = control.callback();
@@ -1375,7 +1920,7 @@ impl ActiveCapture {
                 if let Err(e) = handler.finish() {
                     failures.push(e);
                 }
-                self.folder.join("native-video.mp4")
+                (self.folder.join("native-video.mp4"), handler.canvas)
             }
             Some(VideoCapture::Process {
                 child,
@@ -1441,9 +1986,9 @@ impl ActiveCapture {
                         }
                     }
                 }
-                input
+                (input, None)
             }
-            None => self.folder.join("native-video.mp4"),
+            None => (self.folder.join("native-video.mp4"), None),
         };
         if let Err(e) = finalize(
             &self.folder,
@@ -1453,6 +1998,7 @@ impl ActiveCapture {
             self.fps,
             self.device_audio,
             device_capture,
+            timing_extra(canvas, cursor),
         ) {
             failures.push(e);
         }
@@ -1482,6 +2028,10 @@ impl Drop for ActiveCapture {
             } else if let Some(mut audio) = self.audio.take() {
                 let _ = audio.stop(self.epoch.elapsed());
             }
+        }
+        #[cfg(windows)]
+        if let Some(cursor) = self.cursor.take() {
+            let _ = cursor.stop();
         }
     }
 }
@@ -1764,6 +2314,8 @@ fn metadata_device_end(info: &serde_json::Value, video_host_start: f64, fps: u32
     let end = video_host_start + start + duration - video_start + 1.0 / fps as f64;
     end.is_finite().then_some(end)
 }
+/// `timing_extra` holds additional `capture-timing.json` keys.
+#[allow(clippy::too_many_arguments)]
 fn finalize(
     folder: &Path,
     input: &Path,
@@ -1772,11 +2324,15 @@ fn finalize(
     fps: u32,
     device_audio: bool,
     device_capture: bool,
+    timing_extra: serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
     let mic = folder.join("mic.wav");
     let system = folder.join("system.wav");
     let audio = folder.join("audio.wav");
     let mut timing = serde_json::json!({"videoHostStartMs":delay * 1000.0,"recordingStopMs":duration.as_secs_f64() * 1000.0});
+    if let Some(timing) = timing.as_object_mut() {
+        timing.extend(timing_extra);
+    }
     let mut output_end = duration.as_secs_f64();
     let native_timing = if device_capture {
         let mut probe = deps::command("ffprobe")?;
@@ -2011,6 +2567,70 @@ fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String>
 mod tests {
     use super::*;
     #[test]
+    fn source_identity_names_only_windows_and_displays_that_exist() {
+        for id in [
+            "window:1",
+            "window:x",
+            "monitor:0",
+            "monitor:99",
+            "dshow:Camera",
+            "android:R3CN90",
+        ] {
+            assert_eq!(source_identity(id), None, "{id}");
+        }
+        #[cfg(windows)]
+        {
+            use crate::models::SourceIdentity;
+            // Whatever this machine has attached; nothing is recorded.
+            if let Ok(monitor) = Monitor::from_index(1) {
+                let Some(SourceIdentity::Display {
+                    device,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                }) = source_identity("monitor:1")
+                else {
+                    panic!("display 1 has no identity");
+                };
+                assert_eq!(device, monitor.device_name().unwrap());
+                assert!(right > left && bottom > top);
+                assert_eq!(source_identity("monitor:1"), source_identity("monitor:1"));
+            }
+            if let Some(window) = Window::enumerate().unwrap().first() {
+                let id = format!("window:{}", window.as_raw_hwnd() as usize);
+                if let Some(SourceIdentity::Window {
+                    process,
+                    class,
+                    pid,
+                    process_created_ms,
+                    ..
+                }) = source_identity(&id)
+                {
+                    assert!(!class.is_empty());
+                    assert_eq!(process, window.process_name().unwrap_or_default());
+                    assert_eq!(pid, window.process_id().ok());
+                    // Read again, the same process has the same creation time,
+                    // which lies between 2020 and now.
+                    if let Some(SourceIdentity::Window {
+                        process_created_ms: again,
+                        ..
+                    }) = source_identity(&id)
+                    {
+                        assert_eq!(again, process_created_ms);
+                    }
+                    if let Some(created) = process_created_ms {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        assert!((1_577_836_800_000..=now).contains(&created), "{created}");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn avfoundation_listing_keeps_video_indices_and_excludes_audio() {
         let sources = avfoundation_sources("[AVFoundation indev @ 123] AVFoundation video devices:\n[AVFoundation indev @ 123] [0] FaceTime HD Camera\n[AVFoundation indev @ 123] [1] Capture screen 0\n[AVFoundation indev @ 123] AVFoundation audio devices:\n[AVFoundation indev @ 123] [0] MacBook Microphone\n");
         assert_eq!(sources.len(), 2);
@@ -2040,6 +2660,386 @@ mod tests {
         assert!(configure_video_input(&mut command, "desktop:unavailable", 30, "32M").is_err());
         assert_eq!(command.get_args().count(), 0);
     }
+    #[test]
+    fn cursor_origins_are_physical_offsets_for_displays_and_windows() {
+        // A 3840x2160 monitor at 150% left of and above the primary display.
+        // In a per-monitor-v2 thread GetMonitorInfoW and GetCursorPos both
+        // report physical pixels, like the WGC frame of that monitor.
+        let monitor = ScreenRect {
+            left: -3840,
+            top: -200,
+            right: 0,
+            bottom: 1960,
+        };
+        let display = SourceReading::Display(Some(monitor));
+        assert_eq!(
+            locate(Some((-1920, 880)), display),
+            Some((1920, 1080, true))
+        );
+        assert_eq!(locate(Some((-3840, -200)), display), Some((0, 0, true)));
+        // On the primary display: outside this source.
+        assert_eq!(locate(Some((100, 100)), display), Some((3940, 300, false)));
+        assert_eq!(locate(Some((0, 0)), SourceReading::Display(None)), None);
+        assert_eq!(locate(None, display), None);
+
+        // A window on that monitor whose GetWindowRect starts at x = -3000:
+        // its canvas starts 7 px further right, at the DWM extended frame
+        // bounds, without the invisible resize border.
+        let bounds = ScreenRect {
+            left: -2993,
+            top: 100,
+            right: -2993 + 1281,
+            bottom: 100 + 721,
+        };
+        let window = |over_source| SourceReading::Window {
+            bounds: Some(bounds),
+            over_source,
+        };
+        let (x, y, over_source) = locate(Some((-2993 + 640, 460)), window(true)).unwrap();
+        assert_eq!((x, y, over_source), (640, 360, true));
+        // Pixel centers land on the same pixel of the even-sized video.
+        let canvas = (1281, 721);
+        let point = cursor::video_point(
+            0,
+            cursor::Position {
+                x,
+                y,
+                over_source,
+                buttons: 0,
+            },
+            canvas,
+            cursor::video_size(canvas),
+        );
+        assert_eq!((point.x, point.y, point.px, point.py), (0.5, 0.5, 640, 360));
+        // Covered by another window, or above the window's top edge.
+        assert_eq!(
+            locate(Some((-2993, 100)), window(false)),
+            Some((0, 0, false))
+        );
+        assert_eq!(
+            locate(Some((-2900, 90)), window(false)),
+            Some((93, -10, false))
+        );
+        // A minimized or closed window has no bounds: a gap.
+        let gone = SourceReading::Window {
+            bounds: None,
+            over_source: false,
+        };
+        assert_eq!(locate(Some((0, 0)), gone), None);
+    }
+
+    #[test]
+    fn button_polls_keep_presses_shorter_than_a_poll() {
+        use cursor::{LEFT, MIDDLE, RIGHT};
+        const HELD: i16 = i16::MIN;
+        const PRESSED: i16 = 1;
+        assert_eq!(button_steps(0, [0, 0, 0]), [0]);
+        assert_eq!(button_steps(0, [HELD | PRESSED, 0, 0]), [LEFT]);
+        assert_eq!(button_steps(LEFT, [HELD, 0, 0]), [LEFT]);
+        assert_eq!(button_steps(LEFT, [0, 0, 0]), [0]);
+        assert_eq!(button_steps(0, [0, HELD, 0]), [RIGHT]);
+        // Pressed and released between two polls.
+        assert_eq!(button_steps(0, [PRESSED, 0, 0]), [LEFT, 0]);
+        // Released and pressed again.
+        assert_eq!(button_steps(LEFT, [HELD | PRESSED, 0, 0]), [0, LEFT]);
+        // Released, pressed and released.
+        assert_eq!(button_steps(LEFT, [PRESSED, 0, 0]), [0, LEFT, 0]);
+        // Buttons combine step by step.
+        assert_eq!(
+            button_steps(MIDDLE, [PRESSED, HELD | PRESSED, HELD]),
+            [LEFT | RIGHT | MIDDLE, RIGHT | MIDDLE]
+        );
+    }
+
+    #[test]
+    fn capture_timing_gains_canvas_and_cursor_keys() {
+        assert_eq!(
+            serde_json::Value::Object(timing_extra(Some((1281, 721)), Some(Ok(42)))),
+            serde_json::json!({"canvasWidth":1281,"canvasHeight":721,"cursorLines":42})
+        );
+        assert_eq!(
+            serde_json::Value::Object(timing_extra(None, Some(Err("denied".into())))),
+            serde_json::json!({"cursorError":"denied"})
+        );
+        assert!(timing_extra(None, None).is_empty());
+    }
+
+    #[test]
+    #[ignore = "Moves the real pointer and clicks an owned topmost window; attended runs only, records nothing"]
+    #[cfg(windows)]
+    fn actual_cursor_sampler_follows_the_pointer_over_an_owned_window() {
+        use crate::{cursor::MouseButton, store::Store};
+        use std::ffi::c_void;
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        #[repr(C)]
+        struct Message {
+            hwnd: *mut c_void,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+            time: u32,
+            x: i32,
+            y: i32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn CreateWindowExW(
+                ex: u32,
+                class: *const u16,
+                title: *const u16,
+                style: u32,
+                x: i32,
+                y: i32,
+                width: i32,
+                height: i32,
+                parent: *mut c_void,
+                menu: *mut c_void,
+                instance: *mut c_void,
+                param: *mut c_void,
+            ) -> *mut c_void;
+            fn DestroyWindow(window: *mut c_void) -> i32;
+            fn SetCursorPos(x: i32, y: i32) -> i32;
+            fn GetCursorPos(point: *mut Point) -> i32;
+            fn WindowFromPoint(point: Point) -> *mut c_void;
+            fn GetAncestor(window: *mut c_void, flags: u32) -> *mut c_void;
+            fn MonitorFromWindow(window: *mut c_void, flags: u32) -> *mut c_void;
+            fn mouse_event(flags: u32, dx: i32, dy: i32, data: u32, extra: usize);
+            fn PeekMessageW(
+                message: *mut Message,
+                window: *mut c_void,
+                min: u32,
+                max: u32,
+                remove: u32,
+            ) -> i32;
+            fn TranslateMessage(message: *const Message) -> i32;
+            fn DispatchMessageW(message: *const Message) -> isize;
+        }
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmGetWindowAttribute(
+                window: *mut c_void,
+                attribute: u32,
+                value: *mut c_void,
+                size: u32,
+            ) -> i32;
+        }
+        struct Owned(*mut c_void);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                unsafe {
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+        struct Restore(Point);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    SetCursorPos(self.0.x, self.0.y);
+                }
+            }
+        }
+        let pump = |duration: Duration| {
+            let until = Instant::now() + duration;
+            let mut message: Message = unsafe { std::mem::zeroed() };
+            while Instant::now() < until {
+                unsafe {
+                    while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, 1) != 0 {
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let root_at = |x: i32, y: i32| unsafe { GetAncestor(WindowFromPoint(Point { x, y }), 2) };
+
+        // Physical pixels for the window, SetCursorPos and the expectations.
+        assert!(pointer::physical_pixels());
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let title: Vec<u16> = "CueReview cursor verification\0".encode_utf16().collect();
+        // WS_EX_TOPMOST | WS_EX_TOOLWINDOW; WS_POPUP | WS_VISIBLE | SS_NOTIFY |
+        // SS_BLACKRECT. Without SS_NOTIFY a static answers WM_NCHITTEST with
+        // HTTRANSPARENT, which only its own thread asks: `root_at` here saw
+        // through the window while the sampler's thread saw it.
+        let window = Owned(unsafe {
+            CreateWindowExW(
+                0x88,
+                class.as_ptr(),
+                title.as_ptr(),
+                0x90000104,
+                240,
+                180,
+                480,
+                320,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        });
+        assert!(!window.0.is_null());
+        pump(Duration::from_millis(300));
+        let mut original = Point::default();
+        assert_ne!(unsafe { GetCursorPos(&mut original) }, 0);
+        let _restore = Restore(original);
+        let mut bounds = ScreenRect::default();
+        assert!(
+            unsafe {
+                DwmGetWindowAttribute(
+                    window.0,
+                    9,
+                    (&mut bounds as *mut ScreenRect).cast(),
+                    size_of::<ScreenRect>() as u32,
+                )
+            } >= 0
+        );
+        let canvas = (
+            (bounds.right - bounds.left) as u32,
+            (bounds.bottom - bounds.top) as u32,
+        );
+        let monitor = unsafe { MonitorFromWindow(window.0, 2) } as usize;
+        let screen = pointer::monitor_bounds(monitor).unwrap();
+        let screen_canvas = (
+            (screen.right - screen.left) as u32,
+            (screen.bottom - screen.top) as u32,
+        );
+
+        let data = tempfile::tempdir().unwrap();
+        let store = Store::open(data.path().into()).unwrap();
+        let session = |source_id: String| {
+            store
+                .create_session(
+                    None,
+                    None,
+                    &CaptureConfig {
+                        source_id,
+                        microphone_id: None,
+                        system_audio: false,
+                        fps: 30,
+                    },
+                )
+                .unwrap()
+                .id
+        };
+        let window_id = session(format!("window:{}", window.0 as usize));
+        let display_id = session("monitor:1".into());
+        let file = |id: &str| store.session_dir(id).unwrap().join(cursor::FILE_NAME);
+        let epoch = Instant::now();
+        let window_sampler = pointer::Sampler::spawn(
+            pointer::Source::Window(window.0 as usize),
+            file(&window_id),
+            epoch,
+            Some(canvas),
+        );
+        let display_sampler = pointer::Sampler::spawn(
+            pointer::Source::Display(monitor),
+            file(&display_id),
+            epoch,
+            Some(screen_canvas),
+        );
+        pump(Duration::from_millis(200));
+        let mut expected = Vec::new();
+        for (x, y) in [
+            (bounds.left + 40, bounds.top + 30),
+            (bounds.left + 300, bounds.top + 200),
+            (bounds.right - 2, bounds.bottom - 2),
+            (bounds.left - 60, bounds.top + 20),
+        ] {
+            let before = epoch.elapsed().as_millis() as u64;
+            assert_ne!(unsafe { SetCursorPos(x, y) }, 0);
+            let moved = epoch.elapsed().as_millis() as u64;
+            pump(Duration::from_millis(150));
+            let over = root_at(x, y) == window.0;
+            expected.push(((before, moved), x, y, over));
+            pump(Duration::from_millis(100));
+        }
+        // Click the owned window, but only when it is the window under the pointer.
+        let (x, y) = (bounds.left + 100, bounds.top + 100);
+        assert_ne!(unsafe { SetCursorPos(x, y) }, 0);
+        pump(Duration::from_millis(150));
+        let clickable = root_at(x, y) == window.0;
+        let click_from = epoch.elapsed().as_millis() as u64;
+        if clickable {
+            unsafe { mouse_event(0x0002, 0, 0, 0, 0) };
+            pump(Duration::from_millis(80));
+            unsafe { mouse_event(0x0004, 0, 0, 0, 0) };
+        }
+        pump(Duration::from_millis(150));
+        let click_to = epoch.elapsed().as_millis() as u64;
+        assert!(window_sampler.stop().unwrap() >= 5);
+        assert!(display_sampler.stop().unwrap() >= 5);
+        drop(window);
+
+        let window_track = cursor::load(&store, &window_id).expect("window track");
+        let display_track = cursor::load(&store, &display_id).expect("display track");
+        let pixel = |offset: i32, canvas: u32| {
+            let video = cursor::video_size((canvas, canvas)).0;
+            ((f64::from(offset) + 0.5) / f64::from(canvas) * f64::from(video)).floor() as i32
+        };
+        // Within 1 px, for jitter and rounding.
+        let near = |point: &cursor::CursorPoint, (px, py): (i32, i32)| {
+            (point.px - px).abs() <= 1 && (point.py - py).abs() <= 1
+        };
+        // The sample of the move itself: the first one near the new position
+        // in a short window around `SetCursorPos`, before a hand resting on the
+        // mouse has had time to nudge it. Lines are only written when the
+        // pointer moves (and as heartbeats), and the sampler stamps the time
+        // before it reads the pointer, so the move can be stamped a little
+        // before `SetCursorPos` returned. `Err` lists the samples seen.
+        let sample_of_move =
+            |track: &cursor::CursorTrack, (before, moved): (u64, u64), want: (i32, i32)| {
+                let from = before.saturating_sub(50);
+                let mut seen: Vec<cursor::CursorPoint> = Vec::new();
+                for t in from..=moved + 100 {
+                    if let Some(point) = track.at(t).filter(|point| point.t_ms >= from) {
+                        if seen.last().is_none_or(|last| last.t_ms != point.t_ms) {
+                            seen.push(point);
+                        }
+                    }
+                }
+                seen.iter()
+                    .copied()
+                    .find(|point| near(point, want))
+                    .ok_or(seen)
+            };
+        for (move_ms, x, y, over) in expected {
+            let want = (
+                pixel(x - bounds.left, canvas.0),
+                pixel(y - bounds.top, canvas.1),
+            );
+            let point = sample_of_move(&window_track, move_ms, want).unwrap_or_else(|seen| {
+                panic!("window at {x},{y}: no sample within 1 px of {want:?} around the move at {move_ms:?} ms: {seen:?}")
+            });
+            assert_eq!(point.in_video, over, "window at {x},{y}: {point:?}");
+            let want = (
+                pixel(x - screen.left, screen_canvas.0),
+                pixel(y - screen.top, screen_canvas.1),
+            );
+            let point = sample_of_move(&display_track, move_ms, want).unwrap_or_else(|seen| {
+                panic!("display at {x},{y}: no sample within 1 px of {want:?} around the move at {move_ms:?} ms: {seen:?}")
+            });
+            assert!(point.in_video, "display at {x},{y}: {point:?}");
+        }
+        if clickable {
+            let clicks = window_track.clicks(click_from, click_to);
+            assert_eq!(clicks.len(), 1, "{clicks:?}");
+            assert_eq!(clicks[0].button, MouseButton::Left);
+            assert!(clicks[0].at.in_video);
+            assert!(
+                near(&clicks[0].at, (pixel(100, canvas.0), pixel(100, canvas.1))),
+                "{clicks:?}"
+            );
+        } else {
+            eprintln!("Skipped the click: the owned window was not under the pointer");
+        }
+    }
+
     #[test]
     fn native_cleanup_is_limited_to_the_owned_intermediate() {
         let root = tempfile::tempdir().unwrap();
@@ -2149,7 +3149,17 @@ mod tests {
             Duration::from_secs_f64(timing["recordingStopMs"].as_f64().unwrap() / 1000.0);
         let delay = timing["videoHostStartMs"].as_f64().unwrap() / 1000.0;
         let started = Instant::now();
-        finalize(&folder, &input, duration, delay, 30, false, true).unwrap();
+        finalize(
+            &folder,
+            &input,
+            duration,
+            delay,
+            30,
+            false,
+            true,
+            serde_json::Map::new(),
+        )
+        .unwrap();
         let encode_seconds = started.elapsed().as_secs_f64();
         let final_video = folder.join("video.mp4");
         let mut decode = deps::command("ffmpeg").unwrap();
@@ -2160,7 +3170,37 @@ mod tests {
         ffmpeg(decode).unwrap();
         let new_timing: serde_json::Value =
             serde_json::from_slice(&fs::read(folder.join("capture-timing.json")).unwrap()).unwrap();
-        assert_eq!(new_timing["outputEndMs"], timing["outputEndMs"]);
+        // The output end is reproduced exactly when it comes from the same
+        // native extent. A fixture finalized before the container-metadata
+        // fast path (no `nativeExtentSource`, or `packetTimestamps`) ends where
+        // its last packet does, while the fast path adds one output frame as a
+        // guard to the container's extent, which can also count the last AAC
+        // packet the packet scan left out: a difference of about 42 ms at 30 fps.
+        let (old_end, new_end) = (
+            timing["outputEndMs"].as_f64().unwrap(),
+            new_timing["outputEndMs"].as_f64().unwrap(),
+        );
+        let (old_source, new_source) = (
+            &timing["nativeExtentSource"],
+            &new_timing["nativeExtentSource"],
+        );
+        let output_end_tolerance_ms = if old_source == new_source {
+            assert_eq!(new_timing["outputEndMs"], timing["outputEndMs"]);
+            0.0
+        } else {
+            let frame_ms = 1000.0 / 30.0;
+            let aac_packet_ms = 1024.0 * 1000.0 / 48_000.0;
+            let tolerance = frame_ms + aac_packet_ms;
+            assert!(
+                (new_end - old_end).abs() <= tolerance,
+                "The fixture's output end ({old_end} ms, native extent {old_source}) and the new one ({new_end} ms, native extent {new_source}) differ by more than one frame and one AAC packet ({tolerance:.3} ms)"
+            );
+            println!(
+                "The fixture's native extent is {old_source} and the new one {new_source}: output end {old_end} ms vs {new_end} ms ({:+.3} ms, within {tolerance:.3} ms)",
+                new_end - old_end
+            );
+            tolerance
+        };
         assert_eq!(new_timing["videoHostStartMs"], timing["videoHostStartMs"]);
         let source_mix = hound::WavReader::open(source.join("audio.wav")).unwrap();
         let new_mix = hound::WavReader::open(folder.join("audio.wav")).unwrap();
@@ -2224,11 +3264,16 @@ mod tests {
         let old_video = source.join("video.mp4").metadata().unwrap().len();
         let new_video = final_video.metadata().unwrap().len();
         let actual_total = sum_files(&folder);
+        // Finalizing rewrites capture-timing.json, which for an older fixture
+        // gains `nativeExtentSource`; every other file is the same size.
+        let old_timing = source.join("capture-timing.json").metadata().unwrap().len();
+        let new_timing_bytes = folder.join("capture-timing.json").metadata().unwrap().len();
         assert_eq!(
             actual_total,
-            source_total - old_video - original_bytes.len() as u64 + new_video
+            source_total - old_video - original_bytes.len() as u64 + new_video - old_timing
+                + new_timing_bytes
         );
-        let report = serde_json::json!({"output":folder,"sourceTotalBytes":source_total,"oldVideoBytes":old_video,"nativeVideoBytes":original_bytes.len(),"newVideoBytes":new_video,"actualTotalBytesAfterCleanup":actual_total,"videoReductionPercent":100.0 * (1.0 - new_video as f64 / old_video as f64),"folderReductionPercent":100.0 * (1.0 - actual_total as f64 / source_total as f64),"finalizeSeconds":encode_seconds,"sampledSsimAgainstPreviousOutput":ssim,"timelineUnchanged":true,"fullDecodePassed":true,"audioBytesUnchanged":true,"originalUntouched":true});
+        let report = serde_json::json!({"output":folder,"sourceTotalBytes":source_total,"oldVideoBytes":old_video,"nativeVideoBytes":original_bytes.len(),"newVideoBytes":new_video,"actualTotalBytesAfterCleanup":actual_total,"videoReductionPercent":100.0 * (1.0 - new_video as f64 / old_video as f64),"folderReductionPercent":100.0 * (1.0 - actual_total as f64 / source_total as f64),"finalizeSeconds":encode_seconds,"sampledSsimAgainstPreviousOutput":ssim,"timelineUnchanged":true,"fixtureNativeExtentSource":old_source,"nativeExtentSource":new_source,"fixtureOutputEndMs":old_end,"outputEndMs":new_end,"outputEndToleranceMs":output_end_tolerance_ms,"fullDecodePassed":true,"audioBytesUnchanged":true,"originalUntouched":true});
         fs::write(
             folder.join("verification.json"),
             serde_json::to_vec_pretty(&report).unwrap(),
@@ -3443,6 +4488,7 @@ mod tests {
             error,
             fps: 30,
             device_audio: false,
+            cursor: None,
         };
         let began = Instant::now();
         let stopped = early.stop();

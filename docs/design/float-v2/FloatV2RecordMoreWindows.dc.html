@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Float v2 · Recording take 2 · Windows</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#ECEEF2}
+a{color:#4A4AC4}a:hover{color:#3A3AA8}
+input::placeholder{color:#66666F}
+@media (max-width: 760px){.cr-root{height:auto !important;min-height:100vh}}
+.kbd-hint{opacity:0;white-space:nowrap;transition:opacity 120ms cubic-bezier(.2,.8,.2,1)}
+.has-kbd:hover .kbd-hint,.has-kbd:focus-visible .kbd-hint,.has-kbd:focus-within .kbd-hint{opacity:1}
+@media (prefers-reduced-motion: reduce){.kbd-hint{transition:none}}
+</style>
+</helmet>
+<div class="cr-root" style="height: 100vh; display: flex; flex-direction: column; overflow: hidden; background: #ECEEF2; color: #18181B; font-family: '{{font}}', system-ui, sans-serif; font-size: 13.5px; line-height: 1.45; font-variant-numeric: tabular-nums;">
+
+  <header aria-label="Title bar" style="height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding-left: 14px;">
+    <span style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; white-space: nowrap;"><span aria-hidden="true" style="width: 18px; height: 18px; display: grid; place-items: center; border-radius: 5px; background: {{accent}};"><span style="width: 9px; height: 9px; box-sizing: border-box; border-radius: 50%; border: 2px solid #FFFFFF;"></span></span>CueReview</span>
+    <button type="button" aria-label="Hide sidebar" style="width: 34px; height: 28px; margin-left: 6px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #52525B; cursor: pointer;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.panel}}"></path></svg></button>
+    <div style="flex: 1; min-width: 0; display: flex; justify-content: center; padding: 0 12px;">
+      <div class="has-kbd" style="width: 100%; max-width: 420px; height: 28px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 6px; background: #FFFFFF; box-shadow: 0 0 0 1px #DCDFE5; color: #66666F;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.search}}"></path></svg>
+        <input type="search" aria-label="Search recordings" placeholder="Search recordings" style="flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; color: #18181B; font: inherit; font-size: 12.5px; outline: none;">
+        <kbd class="kbd-hint" style="font-family: inherit; font-size: 11px; color: #66666F;">Ctrl+K</kbd>
+      </div>
+    </div>
+    <button type="button" aria-label="Settings" style="width: 34px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #52525B; cursor: pointer;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.sliders}}"></path></svg></button>
+    <div style="align-self: stretch; display: flex; margin-left: 6px;">
+      <button type="button" aria-label="Minimize" style="width: 46px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #18181B; cursor: pointer;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="{{ic.minimize}}"></path></svg></button>
+      <button type="button" aria-label="Maximize" style="width: 46px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #18181B; cursor: pointer;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="{{ic.maximize}}"></path></svg></button>
+      <button type="button" aria-label="Close" style="width: 46px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #18181B; cursor: pointer;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="{{ic.close}}"></path></svg></button>
+    </div>
+  </header>
+
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap;">
+    <nav aria-label="Recordings" style="flex: 1 1 232px; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; gap: 18px; padding: 6px 10px 14px 10px;">
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <button type="button" disabled style="flex: 1; min-width: 0; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 12px; border: 0; border-radius: 8px; background: #E4E6EB; color: #66666F; font: inherit; font-weight: 600;"><span style="width: 9px; height: 9px; flex-shrink: 0; border-radius: 50%; background: #C9A3A6;"></span><span style="flex: 1; text-align: left; white-space: nowrap;">New recording</span><kbd class="kbd-hint" style="font-family: inherit; font-size: 11px; font-weight: 400; color: #66666F;">Ctrl+N</kbd></button>
+        <button type="button" aria-label="New section" title="New section" style="width: 36px; height: 36px; flex-shrink: 0; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #52525B; cursor: pointer;"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.folderPlus}}"></path></svg></button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div role="group" aria-label="Interface" style="display: flex; flex-direction: column; gap: 1px;">
+          <p style="margin: 0; padding: 0 10px 4px; font-size: 12px; font-weight: 600; color: #66666F;">Interface</p>
+          <button type="button" aria-current="true" style="height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 0; border-radius: 7px; background: #FFFFFF; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.07); color: #18181B; font: inherit; font-weight: 600; text-align: left; cursor: pointer;"><span style="width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: #E5484D;"></span><span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Library selection and details</span></button>
+          <button type="button" style="height: 32px; display: flex; align-items: center; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: #27272A; font: inherit; text-align: left; cursor: pointer;"><span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Empty states</span></button>
+        </div>
+        <div role="group" aria-label="Headset testing" style="display: flex; flex-direction: column; gap: 1px;">
+          <p style="margin: 0; padding: 0 10px 4px; font-size: 12px; font-weight: 600; color: #66666F;">Headset testing</p>
+          <button type="button" style="height: 32px; display: flex; align-items: center; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: #27272A; font: inherit; text-align: left; cursor: pointer;"><span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Quest navigation</span></button>
+        </div>
+        <div role="group" aria-label="Recents" style="display: flex; flex-direction: column; gap: 1px;">
+          <p style="margin: 0; padding: 0 10px 4px; font-size: 12px; font-weight: 600; color: #66666F;">Recents</p>
+          <button type="button" style="height: 32px; display: flex; align-items: center; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: #27272A; font: inherit; text-align: left; cursor: pointer;"><span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">A small adjustment to the toolbar</span></button>
+          <button type="button" style="height: 32px; display: flex; align-items: center; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: #27272A; font: inherit; text-align: left; cursor: pointer;"><span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Onboarding copy pass</span></button>
+          <button type="button" style="height: 32px; display: flex; align-items: center; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: #27272A; font: inherit; text-align: left; cursor: pointer;"><span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Export dialog edge cases</span></button>
+        </div>
+      </div>
+    </nav>
+
+    <div style="flex: 999 1 640px; min-width: 0; min-height: 0; display: flex; flex-wrap: wrap; background: #FFFFFF; border-top: 1px solid #DFE2E7; border-left: 1px solid #DFE2E7; border-top-left-radius: 8px;">
+      <section aria-label="Recording" style="flex: 999 1 460px; min-width: 0; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; padding: 16px 28px 20px;">
+        <div style="flex-shrink: 0; display: flex; align-items: center; gap: 8px;">
+          <h1 style="flex: 1; min-width: 0; margin: 0; font-size: 18px; line-height: 1.3; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Library selection and details</h1>
+          <button type="button" aria-label="Open recording folder" style="width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: #F4F4F7; color: #3F3F46; cursor: pointer;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.folder}}"></path></svg></button>
+          <button type="button" disabled style="height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 16px 0 13px; border: 0; border-radius: 999px; background: #F4F4F7; color: #66666F; font: inherit; font-weight: 600;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.agent}}"></path></svg>Copy for agent</button>
+        </div>
+
+        <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: flex-start; gap: 16px; padding-top: 18px;">
+          <div style="flex: 0 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); place-items: center;">
+            <div style="position: relative; max-width: 100%; max-height: 100%; display: grid;">
+              <img src="/_blob/516938fedfbf3d2170698c09a23c1653" alt="Live preview of Display 1: the Library app" style="display: block; max-width: 100%; max-height: 100%; border-radius: 10px; box-shadow: 0 0 0 2px #E5484D, 0 10px 30px rgba(16, 24, 40, 0.10);">
+              <span style="position: absolute; top: 10px; left: 10px; display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px 0 9px; border-radius: 999px; background: rgba(24, 24, 27, 0.82); color: #FAFAFA; font-size: 12px; font-weight: 600;"><span style="width: 7px; height: 7px; border-radius: 50%; background: #FF6369;"></span>Live · Display 1</span>
+            </div>
+          </div>
+
+          <div role="group" aria-label="Recording controls" style="flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 10px;">
+            <div style="display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px; padding: 6px; border-radius: 999px; background: #18181B; color: #FAFAFA; box-shadow: 0 2px 6px rgba(24, 24, 27, 0.14), 0 10px 24px rgba(24, 24, 27, 0.18);">
+              <p role="timer" aria-label="Take 2 elapsed time" style="margin: 0; height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 14px;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #FF6369;"></span><span style="font-size: 19px; font-weight: 700; letter-spacing: -0.01em;">00:08</span><span style="font-size: 12px; font-weight: 600; color: #A1A1AA;">Take 2</span></p>
+              <span role="meter" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="10" aria-valuenow="6" style="height: 44px; display: flex; align-items: center; gap: 3px; padding: 0 10px 0 6px;"><sc-for list="{{meter}}" as="m" hint-placeholder-count="10"><span style="display: block; width: 3px; height: {{m.h}}px; border-radius: 2px; background: {{m.c}};"></span></sc-for></span>
+              <span aria-hidden="true" style="width: 1px; height: 22px; margin: 0 4px; background: #3F3F46;"></span>
+              <button type="button" disabled style="height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 0; border-radius: 999px; background: transparent; color: #D4D4D8; font: inherit; font-weight: 500;"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.monitor}}"></path></svg>Display 1</button>
+              <button type="button" aria-label="Mute microphone" style="width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #FAFAFA; cursor: pointer;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.mic}}"></path></svg></button>
+              <button type="button" aria-label="Compact recording mode" style="width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #FAFAFA; cursor: pointer;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.compact}}"></path></svg></button>
+              <button type="button" title="Stop recording (Ctrl+R)" style="height: 44px; margin-left: 2px; display: flex; align-items: center; gap: 10px; padding: 0 18px 0 16px; border: 0; border-radius: 999px; background: #D7333A; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;"><span style="width: 11px; height: 11px; border-radius: 3px; background: #FFFFFF;"></span>Stop</button>
+            </div>
+            <p style="margin: 0; font-size: 12.5px; color: #66666F; text-align: center;">Adding to this session. Stop to process take 2 on this device.</p>
+          </div>
+        </div>
+      </section>
+
+      <aside aria-label="Transcript" style="flex: 1 1 320px; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid #EEEFF2;">
+        <div style="height: 52px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 20px;">
+          <h2 style="margin: 0; font-size: 14px; font-weight: 700;">Transcript</h2>
+          <span role="status" style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: #FDECEC; color: #B42318; font-size: 12px; font-weight: 600;"><span style="width: 6px; height: 6px; border-radius: 50%; background: #E5484D;"></span>Recording</span>
+          <span style="flex: 1;"></span>
+        </div>
+        <div style="flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; padding: 0 10px 14px;">
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">0:24</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">Now if I open the filters, the panel covers the first row of results.</p></div>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">0:31</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">I'd expect it to push the grid down instead of overlapping.</p></div>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">0:38</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">The empty state just says “No items”. It should say how to add one.</p></div>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">0:46</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">Scrolling is smooth, but the header loses its shadow when you scroll back up.</p></div>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">0:54</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">Hovering a card shows the preview, which is great.</p></div>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">1:02</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">The preview takes a second to load, so a placeholder would help.</p></div>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-radius: 10px;"><span style="height: 22px; color: #66666F; font-size: 12px; font-weight: 500; line-height: 22px;">1:10</span><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #52525B;">Last thing: the import dialog doesn't remember the folder I used.</p></div>
+          <p style="margin: 6px 10px; display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; color: #B42318;"><span style="flex: 1; height: 1px; background: #F6CFD1;"></span>Take 2 · recording<span style="flex: 1; height: 1px; background: #F6CFD1;"></span></p>
+          <div style="display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; padding: 10px 10px; border-radius: 12px; background: #F7F7F9;"><span style="height: 22px; color: #B42318; font-size: 12px; font-weight: 700; line-height: 22px;">1:20</span><div style="display: flex; flex-direction: column; gap: 4px;"><p style="margin: 0; font-size: 14px; line-height: 1.55; color: #66666F;">Picking this up again: the export dialog needs<span aria-hidden="true" style="display: inline-block; width: 2px; height: 16px; margin-left: 3px; vertical-align: -3px; border-radius: 1px; background: #E5484D;"></span></p><span style="font-size: 12px; color: #66666F;">Live words may change until you stop.</span></div></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#5B5BD6","options":["#5B5BD6","#0D74CE","#0E7C70","#C2298A"]},"font":{"editor":"enum","default":"Figtree","options":["Figtree","Inter"]},"$preview":{"width":1280,"height":820}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#5B5BD6';
+    const font = this.props.font ?? 'Figtree';
+    const meter = [];
+    const heights = [8, 12, 16, 20, 15, 22, 12, 9, 6, 4];
+    for (let j = 0; j < heights.length; j++) {
+      const lit = j < 6;
+      meter.push({ h: heights[j], c: lit ? (j < 5 ? '#4ADE80' : '#FACC15') : '#3F3F46' });
+    }
+    const ic = {
+      panel: 'M3 4.5h18v15H3zM9 4.5v15',
+      search: 'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.8-4.8',
+      sliders: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4',
+      minimize: 'M4 12h16',
+      maximize: 'M5 5h14v14H5z',
+      close: 'm5 5 14 14M19 5 5 19',
+      folderPlus: 'M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 10.5v5M9.5 13h5',
+      folder: 'M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+      agent: 'M4 5h16v14H4zM8 10l3 2-3 2M13 14h3',
+      monitor: 'M3 5h18v11H3zM8 20h8M12 16v4',
+      mic: 'M12 3.5a3 3 0 0 0-3 3V12a3 3 0 0 0 6 0V6.5a3 3 0 0 0-3-3zM5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3',
+      compact: 'M3 5h18v14H3zM12.5 12h6v4.5h-6z'
+    };
+    return { accent: accent, font: font, meter: meter, ic: ic };
+  }
+}
+</script>
+</body>
+</html>

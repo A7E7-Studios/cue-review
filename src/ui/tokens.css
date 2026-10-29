@@ -1,0 +1,292 @@
+/* Shared foundation for compact desktop tools. Values describe roles, not screens. */
+:root {
+  /* Figtree (OFL) is bundled through @fontsource-variable/figtree; nothing loads from the network. */
+  --font-family: 'Figtree Variable', system-ui, 'Segoe UI', sans-serif;
+  --font-body: 13px;
+  --font-control: 12px;
+  --font-meta: 11px;
+  --font-title: 16px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-dialog: 10px;
+  --control-height: 30px;
+  --icon-hit-area: 28px;
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-slow: 220ms;
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --bg: #ffffff;
+  --side: #f7f8fa;
+  --surface: #f3f4f6;
+  --hover: #eceef2;
+  --line: #e2e5eb;
+  --text: #292d35;
+  --muted: #5f6774;
+  --faint: #626a78;
+  --accent: #505da8;
+  --active: #e9ecf5;
+  --red: #b83e4c;
+  --on-red: #ffffff;
+  --shadow: 0 12px 32px #1d263b16, 0 2px 6px #1d263b0a;
+  color-scheme: light;
+
+  /* Float v2 (docs/design/float-v2, plan "Tokens"). The roles above stay for the current UI. */
+  /* Type */
+  --font-size-body: 13.5px;
+  --line-height-body: 1.45;
+  --font-size-title: 18px;
+  --font-weight-title: 700;
+  --line-height-title: 1.3;
+  --font-size-pane-title: 14px;
+  --font-size-transcript: 14px;
+  --line-height-transcript: 1.55;
+  --font-size-meta: 12px;
+  --font-size-control: 12.5px;
+  --font-size-kbd: 11px;
+  --font-size-timer: 19px;
+  --font-weight-strong: 600;
+  --font-numeric: tabular-nums;
+
+  /* Radii. :root[data-platform='macos'] below switches to the macOS values. */
+  --radius-window: 8px;
+  --radius-sidebar-panel: 16px;
+  --radius-button: 8px;
+  --radius-field: 6px;
+  --radius-row: 7px;
+  --radius-pill: 999px;
+  --radius-video: 10px;
+  --radius-transcript-row: 10px;
+  --radius-current-row: 12px;
+
+  /* Sizes */
+  --size-titlebar: 40px;
+  --size-window-control: 46px;
+  --size-toolbar: 52px;
+  --size-traffic-lights-width: 78px;
+  --size-traffic-lights-height: 28px;
+  --size-sidebar: 232px;
+  --size-transcript: 320px;
+  --size-transcript-min: 280px;
+  --size-pane-header: 52px;
+  --size-row: 32px;
+  --size-new-recording: 36px;
+  --size-icon-button: 34px;
+  --size-play: 40px;
+  --size-pill: 32px;
+  --size-pill-large: 36px;
+  --size-dock-control: 44px;
+  /* Transcript words: the gap added to each space, the spoken pill's reach into it, and Figtree's text box (ascent + descent). */
+  --size-transcript-word-gap: 0.18em;
+  --size-spoken-pill-x: 4px;
+  --size-transcript-text-box: 1.2143em;
+
+  /* Surfaces */
+  --color-ground: #ECEEF2;
+  --color-sheet: #FFFFFF;
+  --color-sheet-edge: #DFE2E7;
+  --color-divider: #EEEFF2;
+  --color-control-divider: #E4E4E9;
+  --color-panel: #EEF0F4;
+  --shadow-panel: inset 0 0 0 1px rgba(255, 255, 255, .7), 0 0 0 1px rgba(24, 24, 27, .06), 0 6px 18px rgba(16, 24, 40, .06);
+  --color-pill: #F4F4F7;
+  --color-pill-text: #3F3F46;
+
+  /* Text */
+  --color-text: #18181B;
+  --color-text-secondary: #52525B;
+  --color-text-tertiary: #66666F;
+  --color-row-text: #27272A;
+  --color-transcript: #3F3F46;
+  --color-transcript-past: #52525B;
+
+  /* Accent: fills carry white text; --color-accent-text is the accent used as text. */
+  --color-accent: #5B5BD6;
+  --color-on-accent: #FFFFFF;
+  --color-accent-text: #5B5BD6;
+  --color-current-row: #F2F2FC; /* 8% accent over the sheet */
+  /* Opaque, because a wrapped word's own background and its pill overlap. */
+  --color-word-hover: color-mix(in srgb, var(--color-accent) 12%, var(--color-sheet));
+  --color-word-found: color-mix(in srgb, var(--color-meter-high) 45%, var(--color-sheet));
+  --color-link: #4A4AC4;
+  --color-link-hover: #3A3AA8;
+  --color-focus: #5B5BD6;
+
+  /* Sidebar rows and buttons */
+  --color-row-hover: #E2E5EA;
+  --color-row-selected: #FFFFFF;
+  --shadow-row-selected: 0 1px 2px rgba(16, 24, 40, .07);
+  --color-panel-row-selected: #D9DBF0; /* macOS: 14% accent over the panel */
+  /* Tertiary text on that row: #66666F is only 4.15:1 there; this is 4.6:1. */
+  --color-text-tertiary-on-selected: #5E5E68;
+  --color-button: #FFFFFF;
+  --color-control-ring: #DCDFE5;
+  --shadow-button: 0 0 0 1px var(--color-control-ring), 0 1px 2px rgba(16, 24, 40, .06);
+  --shadow-new-recording: var(--shadow-button);
+  /* The macOS toolbar's search field. */
+  --color-toolbar-search: var(--color-pill);
+  --color-button-disabled: #E4E6EB;
+  --color-record-disabled: #C9A3A6;
+
+  /* Window controls (Windows) */
+  --color-window-control-hover: rgba(24, 24, 27, .06);
+  --color-window-close-hover: #C42B1C;
+  --color-on-window-close: #FFFFFF;
+
+  /* Media */
+  --shadow-video: 0 0 0 1px rgba(24, 24, 27, .08), 0 10px 30px rgba(16, 24, 40, .10);
+  --shadow-video-live: 0 0 0 2px var(--color-record), 0 10px 30px rgba(16, 24, 40, .10);
+  --color-badge: rgba(24, 24, 27, .82);
+  --color-on-badge: #FAFAFA;
+
+  /* Scrubber */
+  --color-scrubber-track: #F0F0F4;
+  --color-scrubber-speech: #DCDCE5;
+  --color-scrubber-played: var(--color-accent);
+  /* Take ticks are 3.7:1 on the track and 3.1:1 on speech (#A1A1AA was 2.25:1 on the track). */
+  --color-scrubber-tick: #7A7A84;
+  --color-scrubber-knob: #FFFFFF;
+  --shadow-scrubber-knob: 0 0 0 1px rgba(16, 24, 40, .10), 0 2px 6px rgba(16, 24, 40, .22);
+
+  /* Recording */
+  --color-record: #E5484D;
+  --color-stop: #D7333A;
+  --color-on-stop: #FFFFFF;
+  --color-live: #FF6369;
+  --color-status-recording: #FDECEC;
+  --color-status-recording-text: #B42318;
+  --color-live-divider: #F6CFD1;
+  --color-live-tail: #F7F7F9;
+
+  /* Recording dock and the Record more pill */
+  --color-dock: #18181B;
+  --color-dock-divider: #3F3F46;
+  --color-dock-text: #FAFAFA;
+  --color-dock-text-secondary: #A1A1AA;
+  --color-dock-source: #D4D4D8;
+  --shadow-dock: 0 2px 6px rgba(24, 24, 27, .14), 0 10px 24px rgba(24, 24, 27, .18);
+  --color-meter-low: #4ADE80;
+  --color-meter-high: #FACC15;
+  --color-meter-off: #3F3F46;
+}
+
+:root[data-platform='macos'] {
+  --radius-window: 16px;
+  --radius-button: 10px;
+  --radius-field: 7px;
+  --radius-row: 8px;
+  --radius-video: 12px;
+  /* FloatV2ReviewMac: a lighter ring on New recording and a cooler search field. */
+  --shadow-new-recording: 0 0 0 1px rgba(24, 24, 27, .07), 0 1px 2px rgba(16, 24, 40, .06);
+  --color-toolbar-search: #F2F3F6;
+}
+
+:root[data-theme='dark'] {
+  --bg: #17191e;
+  --side: #13151a;
+  --surface: #20232a;
+  --hover: #2a2e37;
+  --line: #30353f;
+  --text: #e7e9ef;
+  --muted: #a4abba;
+  --faint: #9aa3b4;
+  --accent: #a0aaff;
+  --active: #292f43;
+  --red: #f18c97;
+  --on-red: #17191e;
+  --shadow: 0 12px 32px #0004, 0 2px 6px #0003;
+  color-scheme: dark;
+
+  /*
+   * Float v2 dark, derived from the light roles (not yet designed; needs review):
+   * - Neutrals stay on the light theme's zinc scale. Elevation reads lighter, so the
+   *   ground is darkest (#121215), the sheet one step up (#1A1A1E) and rows, pills
+   *   and buttons step up from there.
+   * - Text keeps its three levels. Every text colour is at least 4.5:1 on each
+   *   surface it sits on: tertiary #9393A0 is 4.5:1 on the lightest of them (the
+   *   macOS selected row) and 5.7:1 on the sheet; secondary 6.8:1, body 11.7:1.
+   * - Accent fills keep #5B5BD6, so white labels stay 5.4:1. Accent used as text
+   *   is lifted to #A3A3F5 (7.5:1 on the sheet, 6.4:1 on the current row).
+   * - The current row is 17% accent over the sheet (the light theme uses 8%).
+   * - Reds keep their hues. Status text lifts to #FF9592 (7.3:1 on its chip), and
+   *   the dock lifts off the sheet to #2A2A2F with the same text colours.
+   */
+  --color-ground: #121215;
+  --color-sheet: #1A1A1E;
+  --color-sheet-edge: #2C2C32;
+  --color-divider: #26262B;
+  --color-control-divider: #34343B;
+  --color-panel: #202025;
+  --shadow-panel: inset 0 0 0 1px rgba(255, 255, 255, .04), 0 0 0 1px rgba(0, 0, 0, .4), 0 6px 18px rgba(0, 0, 0, .3);
+  --color-pill: #28282E;
+  --color-pill-text: #D4D4D8;
+
+  --color-text: #F4F4F5;
+  --color-text-secondary: #A1A1AA;
+  --color-text-tertiary: #9393A0;
+  --color-row-text: #E4E4E7;
+  --color-transcript: #D4D4D8;
+  --color-transcript-past: #A1A1AA;
+
+  --color-accent: #5B5BD6;
+  --color-on-accent: #FFFFFF;
+  --color-accent-text: #A3A3F5;
+  --color-current-row: #25253D;
+  --color-link: #A3A3F5;
+  --color-link-hover: #C3C3F9;
+  --color-focus: #A3A3F5;
+
+  --color-row-hover: #232328;
+  --color-row-selected: #2B2B31;
+  --shadow-row-selected: 0 1px 2px rgba(0, 0, 0, .35);
+  --color-panel-row-selected: #2B2B45;
+  --color-text-tertiary-on-selected: #9393A0;
+  --color-button: #232328;
+  --color-control-ring: #34343B;
+  --shadow-new-recording: var(--shadow-button);
+  --color-toolbar-search: var(--color-pill);
+  --color-button-disabled: #232328;
+  --color-record-disabled: #6B4446;
+
+  --color-window-control-hover: rgba(255, 255, 255, .08);
+
+  --shadow-video: 0 0 0 1px rgba(255, 255, 255, .08), 0 10px 30px rgba(0, 0, 0, .35);
+  --shadow-video-live: 0 0 0 2px var(--color-record), 0 10px 30px rgba(0, 0, 0, .35);
+  --color-badge: rgba(9, 9, 11, .82);
+
+  --color-scrubber-track: #28282E;
+  --color-scrubber-speech: #4A4A52;
+  --color-scrubber-played: #8282EE;
+  --color-scrubber-tick: #8E8E99;
+  --color-scrubber-knob: #F4F4F5;
+  --shadow-scrubber-knob: 0 0 0 1px rgba(0, 0, 0, .4), 0 2px 6px rgba(0, 0, 0, .5);
+
+  --color-status-recording: #3B1C1E;
+  --color-status-recording-text: #FF9592;
+  --color-live-divider: #5A2A2D;
+  --color-live-tail: #222227;
+
+  --color-dock: #2A2A2F;
+  --color-dock-divider: #3F3F46;
+  --shadow-dock: 0 0 0 1px rgba(255, 255, 255, .06), 0 10px 24px rgba(0, 0, 0, .4);
+  --color-meter-off: #4A4A52;
+}
+
+:root[data-motion='reduced'] {
+  --motion-fast: 0ms;
+  --motion-normal: 0ms;
+  --motion-slow: 0ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) {
+    --motion-fast: 0ms;
+    --motion-normal: 0ms;
+    --motion-slow: 0ms;
+  }
+}

@@ -1,7 +1,9 @@
 use crate::{
     deps,
-    models::{Segment, Transcript, Word},
+    models::{Segment, TakeStatus, Transcript, Word},
+    settings,
     store::{atomic_write, Store},
+    takes,
 };
 use serde_json::Value;
 use std::{
@@ -12,11 +14,10 @@ use std::{
     time::Duration,
 };
 
-// Avoid carrying mistaken text into later windows or retrying noise at higher temperatures.
-// This reduces silence hallucinations, but is not a replacement for speech activity detection.
-const DECODING_OPTIONS: &[&str] = &[
-    "-l", "auto", "-ojf", "-ng", "-mc", "0", "-nf", "-nth", "0.3",
-];
+// The options live in settings.rs so the saved vocabulary can shape them.
+fn decoding_options(root: &Path) -> Vec<String> {
+    settings::decoding_args(&settings::load(root))
+}
 fn dtw_preset(custom_model: bool, requested: Option<&str>) -> Result<Option<String>, String> {
     let preset = if custom_model {
         requested
@@ -111,6 +112,7 @@ pub fn parse_whisper(value: &Value) -> Result<Transcript, String> {
         language: value["result"]["language"].as_str().map(str::to_owned),
         status: Some("complete".into()),
         error: None,
+        takes: Vec::new(),
     })
 }
 fn run_logged(mut command: std::process::Command, log: &Path) -> Result<(), String> {
@@ -245,7 +247,9 @@ fn accept_whisper_output(prefix: &Path, folder: &Path) -> Result<Transcript, Str
     Ok(transcript)
 }
 /// Only scratch files are written here; final session transcript files are untouched.
+/// `root` is the data root whose settings choose the decoding options.
 pub fn transcribe_snapshot(
+    root: &Path,
     source: &Path,
     folder: &Path,
     cancel: &AtomicBool,
@@ -269,7 +273,7 @@ pub fn transcribe_snapshot(
         .arg(deps::model_path())
         .arg("-f")
         .arg(&speech)
-        .args(DECODING_OPTIONS)
+        .args(decoding_options(root))
         .args(["-t", "2", "-of"])
         .arg(&prefix);
     run_live(whisper, &folder.join("transcription.log"), cancel)?;
@@ -353,18 +357,148 @@ pub fn merge_live(
         language: update.language.or_else(|| previous.language.clone()),
         status: Some("provisional".into()),
         error: None,
+        takes: Vec::new(),
     }
 }
+/// Transcribes one folder's media, as [`transcribe_media`] does for the data
+/// root: the folder, how much of the media to read and whether it recorded
+/// audio. Tests pass fakes, so the take logic runs without Whisper.
+pub(crate) type Transcriber<'a> = &'a dyn Fn(&Path, u64, bool) -> Result<Transcript, String>;
+
+/// Transcribes the session and saves its transcript. A session recorded
+/// before takes existed is transcribed as one recording, as in v0.1. A
+/// session with takes transcribes every take on the timeline and records each
+/// take's outcome; it refuses while a take still waits to join the video.
 pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
-    let folder = store.session_dir(id)?;
+    let root = store.root.clone();
+    transcribe_with(store, id, &|folder, duration_ms, has_audio| {
+        transcribe_media(&root, folder, duration_ms, has_audio)
+    })
+}
+/// [`transcribe`] with each folder's media transcribed by `media`.
+pub(crate) fn transcribe_with(
+    store: &Store,
+    id: &str,
+    media: Transcriber<'_>,
+) -> Result<Transcript, String> {
     let session = store.session(id)?;
-    if session.microphone_id.is_none() && !session.system_audio {
-        let t = Transcript {
+    if session.takes.is_empty() {
+        let transcript = media(
+            &store.session_dir(id)?,
+            session.duration_ms,
+            session.microphone_id.is_some() || session.system_audio,
+        )?;
+        store.save_transcript(id, &transcript)?;
+        return Ok(transcript);
+    }
+    let all = takes::list(&session);
+    if let Some(take) = all.iter().find(|take| take.status == TakeStatus::Swapping) {
+        return Err(format!(
+            "Take {index} has not been added to the recording yet. Open CueReview and choose Retry to finish it, or drop it with cue discard-take {id} {index}.",
+            index = take.index
+        ));
+    }
+    let dir = store.session_dir(id)?;
+    let mut transcript = store.transcript(id)?;
+    let mut outcomes = Vec::new();
+    let mut failure = None;
+    for take in all.iter().filter(|take| takes::on_timeline(take.status)) {
+        let folder = takes::take_dir(&dir, take.index);
+        match media(&folder, take.duration_ms, takes::records_audio(take)) {
+            Ok(update) => {
+                transcript = takes::merge_take(
+                    &transcript,
+                    update,
+                    take.index,
+                    take.offset_ms,
+                    takes::marks(&all),
+                );
+                outcomes.push((take.index, TakeStatus::Ready));
+            }
+            Err(error) => {
+                failure.get_or_insert(error);
+                outcomes.push((take.index, TakeStatus::Error));
+            }
+        }
+    }
+    transcript.takes = takes::marks(&all);
+    store.save_transcript(id, &transcript)?;
+    store.update_session(id, |session| {
+        for (index, status) in &outcomes {
+            if let Ok(take) = takes::take_mut(session, *index) {
+                take.status = *status;
+            }
+        }
+        Ok(())
+    })?;
+    failure.map_or(Ok(transcript), Err)
+}
+/// Transcribes only take `index` of a session with takes, shifted by its
+/// offset, and replaces that take's segments in the saved transcript. The
+/// take dividers are brought up to date even when transcription fails, so a
+/// take without a transcript still shows where it starts.
+pub fn transcribe_take(store: &Store, id: &str, index: u32) -> Result<Transcript, String> {
+    let root = store.root.clone();
+    transcribe_take_with(store, id, index, &|folder, duration_ms, has_audio| {
+        transcribe_media(&root, folder, duration_ms, has_audio)
+    })
+}
+fn transcribe_take_with(
+    store: &Store,
+    id: &str,
+    index: u32,
+    media: Transcriber<'_>,
+) -> Result<Transcript, String> {
+    let session = store.session(id)?;
+    let take = takes::list(&session)
+        .into_iter()
+        .find(|take| take.index == index)
+        .ok_or_else(|| format!("Take {index} is not part of this recording."))?;
+    if !takes::on_timeline(take.status) {
+        return Err(format!("Take {index} is not part of the recording yet."));
+    }
+    let folder = takes::take_dir(&store.session_dir(id)?, index);
+    let result = media(&folder, take.duration_ms, takes::records_audio(&take));
+    // Merge into a fresh read so concurrent writes to other takes are kept.
+    let _lock = store.lock_session(id)?;
+    let marks = takes::marks(&takes::list(&store.session(id)?));
+    let existing = store.transcript(id)?;
+    match result {
+        Ok(update) => {
+            let merged = takes::merge_take(&existing, update, index, take.offset_ms, marks);
+            store.save_transcript(id, &merged)?;
+            Ok(merged)
+        }
+        Err(error) => {
+            if existing.takes != marks {
+                store.save_transcript(
+                    id,
+                    &Transcript {
+                        takes: marks,
+                        ..existing
+                    },
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+/// Transcribes one folder's media: `mic.wav`, else `audio.wav`, else
+/// `video.mp4`, limited to `duration_ms`. Times are relative to that media.
+/// Scratch files and the raw Whisper output stay in `folder`; nothing is
+/// saved to the session. `root` is the data root whose settings choose the
+/// decoding options.
+pub fn transcribe_media(
+    root: &Path,
+    folder: &Path,
+    duration_ms: u64,
+    has_audio: bool,
+) -> Result<Transcript, String> {
+    if !has_audio {
+        return Ok(Transcript {
             status: Some("complete".into()),
             ..Default::default()
-        };
-        store.save_transcript(id, &t)?;
-        return Ok(t);
+        });
     }
     let mic = folder.join("mic.wav");
     let mix = folder.join("audio.wav");
@@ -388,7 +522,7 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         .arg(source)
         .args([
             "-t",
-            &format!("{:.3}", session.duration_ms as f64 / 1000.),
+            &format!("{:.3}", duration_ms as f64 / 1000.),
             "-vn",
             "-ac",
             "1",
@@ -399,10 +533,8 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         ])
         .arg(&speech);
     run_logged(ffmpeg, &folder.join("transcode.log"))?;
-    if !has_speech(&speech, &folder, &AtomicBool::new(false))? {
-        let transcript = empty_transcript();
-        store.save_transcript(id, &transcript)?;
-        return Ok(transcript);
+    if !has_speech(&speech, folder, &AtomicBool::new(false))? {
+        return Ok(empty_transcript());
     }
     let mut whisper = deps::command("whisper-cli")?;
     alignment_options(&mut whisper)?;
@@ -412,13 +544,11 @@ pub fn transcribe(store: &Store, id: &str) -> Result<Transcript, String> {
         .arg(deps::model_path())
         .arg("-f")
         .arg(speech)
-        .args(DECODING_OPTIONS)
+        .args(decoding_options(root))
         .arg("-of")
         .arg(&prefix);
     run_logged(whisper, &folder.join("transcription.log"))?;
-    let transcript = accept_whisper_output(&prefix, &folder)?;
-    store.save_transcript(id, &transcript)?;
-    Ok(transcript)
+    accept_whisper_output(&prefix, folder)
 }
 #[cfg(test)]
 mod tests {
@@ -653,6 +783,186 @@ mod tests {
         assert_eq!(merged.segments[0].words.len(), 1);
         assert_eq!(merged.segments[0].words[0].end_ms, 11000);
     }
+    fn take(
+        index: u32,
+        offset_ms: u64,
+        duration_ms: u64,
+        status: TakeStatus,
+        audio: bool,
+    ) -> crate::models::Take {
+        crate::models::Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: audio.then(|| "mic:Studio".into()),
+            system_audio: false,
+        }
+    }
+    /// A session in error whose takes are `takes`, in a fresh store.
+    fn take_session(takes: Vec<crate::models::Take>) -> (tempfile::TempDir, Store, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().into()).unwrap();
+        let mut session = store
+            .create_session(
+                None,
+                Some("Takes"),
+                &crate::models::CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: Some("mic:Studio".into()),
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        session.status = "error".into();
+        session.duration_ms = takes
+            .iter()
+            .map(|t| t.offset_ms + t.duration_ms)
+            .max()
+            .unwrap();
+        session.takes = takes;
+        store.save_session(&session).unwrap();
+        (temp, store, session.id)
+    }
+    /// What a take's own transcript looks like: one segment 100 ms in.
+    fn spoken(text: &str) -> Transcript {
+        let mut transcript = sample_transcript(&[(text, 100, 900)]);
+        transcript.segments[0].id = "segment-0".into();
+        transcript
+    }
+    fn mark(index: u32, start_ms: u64) -> crate::models::TakeMark {
+        crate::models::TakeMark { index, start_ms }
+    }
+
+    #[test]
+    fn a_session_with_takes_is_transcribed_take_by_take_on_its_timeline() {
+        let (_temp, store, id) = take_session(vec![
+            take(1, 0, 2000, TakeStatus::Ready, true),
+            take(2, 2000, 1500, TakeStatus::Error, true),
+            take(3, 3500, 400, TakeStatus::Interrupted, true),
+            take(4, 3500, 1000, TakeStatus::Ready, false),
+        ]);
+        let dir = store.session_dir(&id).unwrap();
+        let calls = std::sync::Mutex::new(Vec::new());
+        let second_fails = |fail: bool| {
+            let calls = &calls;
+            let dir = dir.clone();
+            move |folder: &Path, duration_ms: u64, has_audio: bool| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((folder.to_owned(), duration_ms, has_audio));
+                if !has_audio {
+                    return Ok(empty_transcript());
+                }
+                if folder == takes::take_dir(&dir, 2) {
+                    if fail {
+                        return Err("Install the local speech model.".to_string());
+                    }
+                    return Ok(spoken("second"));
+                }
+                Ok(spoken("first"))
+            }
+        };
+        let error = transcribe_with(&store, &id, &second_fails(true)).unwrap_err();
+        assert_eq!(error, "Install the local speech model.");
+        // Every take on the timeline, from its own folder, for its own length.
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                (dir.clone(), 2000, true),
+                (takes::take_dir(&dir, 2), 1500, true),
+                (takes::take_dir(&dir, 4), 1000, false),
+            ]
+        );
+        let session = store.session(&id).unwrap();
+        let statuses: Vec<_> = session.takes.iter().map(|t| (t.index, t.status)).collect();
+        assert_eq!(
+            statuses,
+            [
+                (1, TakeStatus::Ready),
+                (2, TakeStatus::Error),
+                (3, TakeStatus::Interrupted),
+                (4, TakeStatus::Ready)
+            ]
+        );
+        let saved = store.transcript(&id).unwrap();
+        assert_eq!(saved.segments.len(), 1);
+        assert_eq!(saved.segments[0].text, "first");
+        assert_eq!(saved.takes, [mark(1, 0), mark(2, 2000), mark(4, 3500)]);
+
+        // Once take 2 succeeds, its words land at its offset with its prefix.
+        let transcript = transcribe_with(&store, &id, &second_fails(false)).unwrap();
+        let placed: Vec<_> = transcript
+            .segments
+            .iter()
+            .map(|s| (s.id.as_str(), s.start_ms, s.words[0].start_ms))
+            .collect();
+        assert_eq!(
+            placed,
+            [("segment-0", 100, 100), ("t2-segment-0", 2100, 2100)]
+        );
+        assert_eq!(
+            store.session(&id).unwrap().takes[1].status,
+            TakeStatus::Ready
+        );
+        assert_eq!(
+            serde_json::to_value(store.transcript(&id).unwrap()).unwrap(),
+            serde_json::to_value(&transcript).unwrap()
+        );
+
+        // A take still waiting to join the video stops it, with a way out.
+        store
+            .update_session(&id, |s| {
+                s.takes.push(take(5, 4500, 800, TakeStatus::Swapping, true));
+                Ok(())
+            })
+            .unwrap();
+        let error = transcribe_with(&store, &id, &|_, _, _| panic!("transcribed")).unwrap_err();
+        assert!(
+            error.contains(&format!("cue discard-take {id} 5")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_take_that_fails_to_transcribe_still_gets_its_divider() {
+        let (_temp, store, id) = take_session(vec![
+            take(1, 0, 2000, TakeStatus::Ready, true),
+            take(2, 2000, 1500, TakeStatus::Transcribing, true),
+        ]);
+        let first = spoken("first");
+        store.save_transcript(&id, &first).unwrap();
+        let missing = |_: &Path, _: u64, _: bool| {
+            Err::<Transcript, _>("Install the local speech model.".to_string())
+        };
+        assert!(transcribe_take_with(&store, &id, 2, &missing).is_err());
+        let saved = store.transcript(&id).unwrap();
+        assert_eq!(saved.takes, [mark(1, 0), mark(2, 2000)]);
+        assert_eq!(saved.segments.len(), 1);
+        assert_eq!(saved.segments[0].text, "first");
+        // A later success adds the take's words beside the same dividers.
+        let merged = transcribe_take_with(&store, &id, 2, &|_, _, _| Ok(spoken("second"))).unwrap();
+        assert_eq!(merged.segments[1].id, "t2-segment-0");
+        assert_eq!(merged.segments[1].start_ms, 2100);
+        assert_eq!(merged.takes, saved.takes);
+        // Takes off the timeline are refused before anything runs.
+        store
+            .update_session(&id, |s| {
+                s.takes[1].status = TakeStatus::Swapping;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            transcribe_take_with(&store, &id, 2, &|_, _, _| panic!("ran"))
+                .unwrap_err()
+                .contains("not part of the recording yet")
+        );
+    }
+
     #[test]
     #[ignore = "Requires FFmpeg; verifies live subprocess cancellation"]
     fn cancelling_live_job_terminates_its_media_process() {
@@ -693,7 +1003,8 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let wav = hound::WavReader::open(&source).unwrap();
         let duration_ms = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
-        let update = transcribe_snapshot(&source, &folder, &AtomicBool::new(false)).unwrap();
+        let update =
+            transcribe_snapshot(&folder, &source, &folder, &AtomicBool::new(false)).unwrap();
         let transcript = merge_live(&Transcript::default(), update, 30000, 30000 + duration_ms);
         let phrases = crate::agent::find(&transcript, "click here").unwrap();
         assert!(!phrases.is_empty());
@@ -718,7 +1029,7 @@ mod tests {
             signal.store(true, Ordering::Release);
         });
         let began = std::time::Instant::now();
-        let result = transcribe_snapshot(&source, &cancel_dir, &cancelled);
+        let result = transcribe_snapshot(&cancel_dir, &source, &cancel_dir, &cancelled);
         trigger.join().unwrap();
         assert!(result.unwrap_err().contains("cancelled"));
         assert!(began.elapsed() < Duration::from_secs(5));
@@ -730,7 +1041,7 @@ mod tests {
         let noise = root.join("test-results/silence-check/quiet-noise.wav");
         let output = root.join("test-results/silence-check/regression");
         fs::create_dir_all(&output).unwrap();
-        let quiet = transcribe_snapshot(&noise, &output, &AtomicBool::new(false)).unwrap();
+        let quiet = transcribe_snapshot(&output, &noise, &output, &AtomicBool::new(false)).unwrap();
         assert!(
             quiet.segments.is_empty(),
             "The known quiet microphone snapshot should not generate text"
@@ -753,7 +1064,8 @@ mod tests {
             ])
             .arg(&attenuated);
         run_logged(ffmpeg, &output.join("attenuate.log")).unwrap();
-        let spoken = transcribe_snapshot(&attenuated, &output, &AtomicBool::new(false)).unwrap();
+        let spoken =
+            transcribe_snapshot(&output, &attenuated, &output, &AtomicBool::new(false)).unwrap();
         for phrase in ["open the library", "click here", "top toolbar"] {
             assert!(
                 !crate::agent::find(&spoken, phrase).unwrap().is_empty(),
@@ -790,9 +1102,13 @@ mod tests {
         .contains("cancelled"));
 
         // The gate must not compress silence or rewrite raw ASR word timing.
-        let gated =
-            transcribe_snapshot(&fixture.join("delayed-speech.wav"), output.path(), &cancel)
-                .unwrap();
+        let gated = transcribe_snapshot(
+            output.path(),
+            &fixture.join("delayed-speech.wav"),
+            output.path(),
+            &cancel,
+        )
+        .unwrap();
         let mut baseline = deps::command("whisper-cli").unwrap();
         alignment_options(&mut baseline).unwrap();
         baseline
@@ -800,7 +1116,7 @@ mod tests {
             .arg(deps::model_path())
             .arg("-f")
             .arg(output.path().join("speech.wav"))
-            .args(DECODING_OPTIONS)
+            .args(decoding_options(output.path()))
             .args(["-t", "2", "-of"])
             .arg(output.path().join("baseline"));
         run_logged(baseline, &output.path().join("baseline.log")).unwrap();
@@ -856,6 +1172,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(false);
         let delayed = transcribe_snapshot(
+            output.path(),
             &root.join("test-results/vad-experiment/delayed-speech.wav"),
             output.path(),
             &cancel,
@@ -890,10 +1207,130 @@ mod tests {
             let source = root.join(fixture);
             let wav = hound::WavReader::open(&source).unwrap();
             let duration = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
-            let transcript = transcribe_snapshot(&source, output.path(), &cancel).unwrap();
+            let transcript =
+                transcribe_snapshot(output.path(), &source, output.path(), &cancel).unwrap();
             let found = crate::agent::find(&transcript, phrase).unwrap();
             assert!(!found.is_empty(), "Lost {phrase}");
             assert!(found[0].seek_ms.unwrap() < duration);
         }
+    }
+    #[test]
+    #[ignore = "Requires installed Whisper/model and test-results/speech/reference.wav; transcribes it as take 2"]
+    fn actual_whisper_take_two_keeps_session_offsets() {
+        use crate::models::{CaptureConfig, Take, TakeMark};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let reference = root.join("test-results/speech/reference.wav");
+        let wav = hound::WavReader::open(&reference).unwrap();
+        let duration = wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("data")).unwrap();
+        let mut session = store
+            .create_session(
+                None,
+                Some("Two takes"),
+                &CaptureConfig {
+                    source_id: "fixture".into(),
+                    microphone_id: Some("fixture".into()),
+                    system_audio: false,
+                    fps: 30,
+                },
+            )
+            .unwrap();
+        let offset = 61_000;
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: Some("fixture".into()),
+            system_audio: false,
+        };
+        session.status = "processing".into();
+        session.duration_ms = offset + duration;
+        session.takes = vec![
+            take(1, 0, offset, TakeStatus::Ready),
+            take(2, offset, duration, TakeStatus::Transcribing),
+        ];
+        store.save_session(&session).unwrap();
+        // Take 1's saved transcript must survive untouched.
+        let earlier = Segment {
+            id: "segment-0".into(),
+            start_ms: 1000,
+            end_ms: 2000,
+            text: "Earlier take.".into(),
+            words: vec![Word {
+                text: "Earlier".into(),
+                start_ms: 1000,
+                end_ms: 2000,
+                seek_ms: Some(1200),
+            }],
+        };
+        store
+            .save_transcript(
+                &session.id,
+                &Transcript {
+                    segments: vec![earlier.clone()],
+                    language: Some("en".into()),
+                    status: Some("complete".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let folder = takes::take_dir(&store.session_dir(&session.id).unwrap(), 2);
+        fs::create_dir_all(&folder).unwrap();
+        fs::copy(&reference, folder.join("mic.wav")).unwrap();
+
+        let merged = transcribe_take(&store, &session.id, 2).unwrap();
+        // The take's own raw output, timed from the take's first sample.
+        let raw: Value = read_json(&folder.join("whisper.json")).unwrap();
+        let local = parse_whisper(&raw).unwrap();
+        assert!(!local.segments.is_empty());
+        assert_eq!(merged.segments[0].id, earlier.id);
+        assert_eq!(merged.segments[0].start_ms, earlier.start_ms);
+        let shifted = &merged.segments[1..];
+        assert_eq!(shifted.len(), local.segments.len());
+        for (placed, own) in shifted.iter().zip(&local.segments) {
+            assert_eq!(placed.id, format!("t2-{}", own.id));
+            assert_eq!(placed.text, own.text);
+            assert_eq!(
+                (placed.start_ms, placed.end_ms),
+                (own.start_ms + offset, own.end_ms + offset)
+            );
+            for (word, own) in placed.words.iter().zip(&own.words) {
+                assert_eq!(word.start_ms, own.start_ms + offset);
+                assert_eq!(word.seek_ms, own.seek_ms.map(|seek| seek + offset));
+                assert!(word.start_ms >= offset && word.end_ms <= offset + duration);
+            }
+        }
+        let phrase = crate::agent::find(&merged, "click here").unwrap();
+        let own = crate::agent::find(&local, "click here").unwrap();
+        assert_eq!(phrase[0].start_ms, own[0].start_ms + offset);
+        assert!(phrase[0].start_ms > offset);
+        assert_eq!(
+            merged.takes,
+            [
+                TakeMark {
+                    index: 1,
+                    start_ms: 0
+                },
+                TakeMark {
+                    index: 2,
+                    start_ms: offset
+                }
+            ]
+        );
+        assert_eq!(merged.language.as_deref(), Some("en"));
+        let saved = store.transcript(&session.id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(&merged).unwrap()
+        );
+        fs::write(
+            root.join("test-results/take-offset-transcript.json"),
+            serde_json::to_vec_pretty(&merged).unwrap(),
+        )
+        .unwrap();
     }
 }

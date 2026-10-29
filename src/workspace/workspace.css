@@ -1,0 +1,337 @@
+/*
+ * Float v2 workspace: session header, media stage, playback bar, scrubber,
+ * recording dock and capture controls (docs/design/float-v2, plan "Tokens").
+ * Everything is set explicitly so it doesn't depend on the legacy styles.css.
+ */
+
+/* Layout for the app: the centre column holds the header, then the stage. */
+.cr-center {
+  flex: 1 1 auto; min-width: 0; min-height: 0; box-sizing: border-box;
+  display: flex; flex-direction: column; padding: 16px 28px 20px;
+  color: var(--color-text); font-family: var(--font-family); font-size: var(--font-size-body);
+  line-height: var(--line-height-body); font-variant-numeric: var(--font-numeric);
+}
+
+/* Buttons. Variants set --cr-bg/--cr-fg and their hover and disabled values. */
+.cr-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; flex-shrink: 0;
+  box-sizing: border-box; margin: 0; padding: 0; border: 0;
+  background: var(--cr-bg, transparent); color: var(--cr-fg, inherit);
+  font: inherit; line-height: 1.2; white-space: nowrap; cursor: pointer; opacity: 1;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.cr-btn:hover:not(:disabled) { background: var(--cr-bg-hover, var(--cr-bg, transparent)); color: var(--cr-fg-hover, var(--cr-fg, inherit)); }
+.cr-btn:disabled { background: var(--cr-bg-disabled, var(--cr-bg, transparent)); color: var(--cr-fg-disabled, var(--cr-fg, inherit)); opacity: 1; cursor: default; }
+/* Busy for a moment (another action is under way): looks disabled but keeps keyboard focus. */
+.cr-btn[aria-disabled='true'], .cr-btn[aria-disabled='true']:hover { background: var(--cr-bg-disabled, var(--cr-bg, transparent)); color: var(--cr-fg-disabled, var(--cr-fg, inherit)); cursor: default; }
+.cr-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.cr-btn svg { width: 16px; height: 16px; flex-shrink: 0; pointer-events: none; }
+.cr-spacer { flex: 1; }
+
+.cr-round-button {
+  --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
+  --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text));
+  width: var(--size-pill-large); height: var(--size-pill-large); border-radius: 50%;
+}
+.cr-round-button.cr-ghost {
+  --cr-bg: transparent; --cr-fg: var(--color-text-secondary); --cr-bg-hover: var(--color-pill); --cr-fg-hover: var(--color-text);
+  width: var(--size-icon-button); height: var(--size-icon-button);
+}
+.cr-round-button[aria-expanded='true'] { --cr-bg: var(--color-pill); --cr-fg: var(--color-text); }
+.cr-accent-pill {
+  --cr-bg: var(--color-accent); --cr-fg: var(--color-on-accent);
+  --cr-bg-hover: color-mix(in srgb, var(--color-accent) 88%, #000);
+  --cr-bg-disabled: var(--color-pill); --cr-fg-disabled: var(--color-text-tertiary);
+  height: var(--size-pill-large); padding: 0 16px 0 13px; border-radius: var(--radius-pill); font-weight: var(--font-weight-strong);
+}
+.cr-pill {
+  --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
+  --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text)); --cr-fg-disabled: var(--color-text-tertiary);
+  height: var(--size-pill); padding: 0 14px 0 12px; border-radius: var(--radius-pill);
+  font-size: var(--font-size-control); font-weight: var(--font-weight-strong);
+}
+.cr-dark-pill {
+  --cr-bg: var(--color-dock); --cr-fg: var(--color-dock-text);
+  --cr-bg-hover: color-mix(in srgb, var(--color-dock) 84%, #fff);
+  --cr-bg-disabled: var(--color-button-disabled); --cr-fg-disabled: var(--color-text-tertiary);
+  height: var(--size-pill-large); gap: 9px; padding: 0 14px 0 12px; border-radius: var(--radius-pill); font-weight: var(--font-weight-strong);
+}
+.cr-record-dot { width: 9px; height: 9px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
+.cr-dark-pill:disabled .cr-record-dot { background: var(--color-record-disabled); }
+
+/* Session header (decision 3) */
+.cr-session-header { flex-shrink: 0; min-width: 0; min-height: var(--size-pill-large); display: flex; align-items: center; gap: 8px; }
+.cr-session-title {
+  flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--color-text); font-size: var(--font-size-title); line-height: var(--line-height-title);
+  font-weight: var(--font-weight-title); letter-spacing: -0.01em;
+}
+.cr-rename {
+  display: block; max-width: calc(100% + 12px); box-sizing: border-box; margin: -2px -6px; padding: 2px 6px; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; font: inherit; letter-spacing: inherit; line-height: inherit; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.cr-rename:hover:not(:disabled) { background: var(--color-pill); color: inherit; }
+.cr-rename:disabled { background: transparent; color: inherit; opacity: 1; cursor: default; }
+.cr-rename:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 0; }
+.cr-session-actions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+
+/* Media stage (decision 1). The stage fills the space under the title; the media
+   box is sized by mediaFit.ts and the controls slot sits directly under it. */
+.cr-stage { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding-top: 18px; }
+.cr-media {
+  position: relative; flex: none; align-self: center; box-sizing: border-box;
+  width: 100%; max-width: 100%; max-height: 100%; aspect-ratio: var(--cr-media-aspect, 16 / 9);
+  overflow: hidden; border-radius: var(--radius-video);
+  /* The one border: a 1px ring drawn with the shadow. Unused space shows the neutral surface. */
+  background: var(--color-pill); box-shadow: var(--shadow-video);
+}
+.cr-media[data-fitted] { aspect-ratio: auto; max-height: none; }
+.cr-media[data-live] { box-shadow: var(--shadow-video-live); }
+.cr-media > video, .cr-media > .preview-image {
+  position: absolute; inset: 0; display: block; width: 100%; height: 100%;
+  object-fit: contain; background: transparent; border: 0; border-radius: 0;
+}
+.cr-media > video { cursor: pointer; }
+.cr-media > video:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.cr-media-empty {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 16px 24px; overflow: hidden; text-align: center; color: var(--color-text-secondary);
+}
+.cr-media-empty svg { width: 28px; height: 28px; flex-shrink: 0; color: var(--color-text-tertiary); }
+.cr-media-empty h2 { margin: 0; color: var(--color-text); font-size: 16px; font-weight: var(--font-weight-strong); letter-spacing: -0.01em; }
+.cr-media-empty p { margin: 0; max-width: 340px; font-size: var(--font-size-meta); line-height: 1.5; }
+.cr-preview-error {
+  position: absolute; left: 10px; right: 10px; bottom: 10px; margin: 0; padding: 8px 12px; border-radius: 8px;
+  display: flex; align-items: center; gap: 12px;
+  background: var(--color-sheet); box-shadow: 0 0 0 1px var(--color-control-ring);
+  color: var(--color-status-recording-text); font-size: var(--font-size-meta); line-height: 1.4; overflow-wrap: anywhere;
+}
+.cr-preview-error > span { flex: 1; min-width: 0; }
+.cr-preview-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); box-shadow: var(--shadow-button); }
+.cr-live-badge {
+  position: absolute; top: 10px; left: 10px; max-width: calc(100% - 20px); height: 26px; box-sizing: border-box;
+  display: inline-flex; align-items: center; gap: 7px; padding: 0 11px 0 9px; border-radius: var(--radius-pill);
+  background: var(--color-badge); color: var(--color-on-badge); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cr-live-badge > i { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
+.cr-stage-controls { flex: none; min-width: 0; }
+.cr-stage-controls:empty { display: none; }
+
+/* Playback bar (decision 6, review) */
+.cr-playback { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.cr-playback-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.cr-play {
+  --cr-bg: var(--color-accent); --cr-fg: var(--color-on-accent);
+  --cr-bg-hover: color-mix(in srgb, var(--color-accent) 88%, #000);
+  --cr-bg-disabled: var(--color-button-disabled); --cr-fg-disabled: var(--color-text-tertiary);
+  width: var(--size-play); height: var(--size-play); border-radius: 50%;
+}
+.cr-play[data-playing='false'] svg { margin-left: 2px; }
+.cr-time { margin: 0 0 0 4px; white-space: nowrap; color: var(--color-text); font-size: 14px; font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums; }
+.cr-time > span { color: var(--color-text-tertiary); font-weight: 400; }
+.cr-speed {
+  --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
+  --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text));
+  height: var(--size-pill); padding: 0 12px; border-radius: var(--radius-pill);
+  font-size: var(--font-size-control); font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums;
+}
+.cr-control-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-control-divider); }
+/* Why Record more failed, right under the pill, with the way forward (New recording) beside it. */
+.cr-record-more-error {
+  align-self: flex-end; max-width: min(100%, 620px); box-sizing: border-box;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 6px 6px 12px; border-radius: var(--radius-transcript-row);
+  background: var(--color-status-recording); color: var(--color-status-recording-text); font-size: var(--font-size-control); line-height: 1.45;
+}
+.cr-record-more-error > svg { width: 16px; height: 16px; align-self: flex-start; margin-top: 6px; }
+/* The message takes the row; on a narrow window the actions wrap under it. */
+.cr-record-more-error > p { flex: 1 1 240px; min-width: 0; margin: 0; padding: 4px 0; overflow-wrap: anywhere; }
+.cr-record-more-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); margin-left: auto; box-shadow: var(--shadow-button); }
+.cr-record-more-error .cr-record-more-dismiss { --cr-fg: currentColor; --cr-fg-hover: currentColor; --cr-bg-hover: color-mix(in srgb, currentColor 12%, transparent); }
+.cr-record-more-error .cr-record-more-dismiss svg { width: 14px; height: 14px; }
+
+/* Scrubber: a visually hidden range with speech, take ticks and the knob drawn over it. */
+.cr-scrubber { position: relative; height: 18px; touch-action: none; cursor: pointer; user-select: none; }
+.cr-scrubber::before { content: ''; position: absolute; inset: -7px -4px; }
+.cr-scrubber[data-disabled] { cursor: default; }
+.cr-scrubber-input {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.cr-scrubber-track { position: absolute; left: 0; right: 0; top: 5px; height: 8px; border-radius: var(--radius-pill); background: var(--color-scrubber-track); }
+.cr-scrubber-speech { position: absolute; top: 0; height: 8px; min-width: 2px; border-radius: var(--radius-pill); background: var(--color-scrubber-speech); }
+.cr-scrubber-speech[data-played] { background: var(--color-scrubber-played); }
+.cr-scrubber-tick { position: absolute; top: 0; width: 2px; height: 18px; margin-left: -1px; border-radius: 1px; background: var(--color-scrubber-tick); pointer-events: none; }
+.cr-scrubber-knob {
+  position: absolute; top: 0; width: 18px; height: 18px; margin-left: -9px; box-sizing: border-box; border-radius: 50%;
+  background: var(--color-scrubber-knob); box-shadow: var(--shadow-scrubber-knob); pointer-events: none;
+}
+.cr-scrubber-input:focus-visible ~ .cr-scrubber-knob { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.cr-scrubber[data-disabled] .cr-scrubber-knob { box-shadow: 0 0 0 1px var(--color-control-ring); }
+
+/* Recording dock (decision 6, recording). No progress bar. It keeps to one row: a long source
+   name truncates first, then the container queries below compact it step by step. */
+.cr-dock-slot { container: cr-dock / inline-size; display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 0; }
+.cr-dock {
+  max-width: 100%; box-sizing: border-box; display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 2px;
+  padding: 6px; border-radius: calc(var(--size-dock-control) / 2 + 6px);
+  background: var(--color-dock); color: var(--color-dock-text); box-shadow: var(--shadow-dock);
+}
+/* Engines without container queries keep the old fallback of wrapping onto a second row. */
+@supports not (container-type: inline-size) { .cr-dock { flex-wrap: wrap; } }
+.cr-dock .cr-btn:focus-visible { outline-color: var(--color-dock-text); }
+.cr-dock-timer { margin: 0; height: var(--size-dock-control); display: flex; align-items: center; gap: 10px; padding: 0 8px 0 14px; white-space: nowrap; }
+.cr-dock-live { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
+.cr-dock-clock { font-size: var(--font-size-timer); font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.cr-dock-take { color: var(--color-dock-text-secondary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
+.cr-meter { height: var(--size-dock-control); display: flex; align-items: center; gap: 3px; padding: 0 10px 0 6px; }
+.cr-meter > span { display: block; width: 3px; border-radius: 2px; background: var(--color-meter-off); }
+.cr-meter > span[data-level='low'] { background: var(--color-meter-low); }
+.cr-meter > span[data-level='high'] { background: var(--color-meter-high); }
+.cr-dock-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-dock-divider); }
+.cr-dock-source {
+  --cr-fg: var(--color-dock-source);
+  height: var(--size-dock-control); max-width: 200px; padding: 0 12px; border-radius: var(--radius-pill); font-weight: 500;
+  flex-shrink: 1; min-width: var(--size-dock-control); overflow: hidden;
+}
+.cr-dock-source > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cr-dock-source svg { width: 17px; height: 17px; }
+.cr-dock-button { --cr-fg: var(--color-dock-text); --cr-bg-hover: rgba(255, 255, 255, .08); width: var(--size-dock-control); height: var(--size-dock-control); border-radius: 50%; }
+.cr-dock-button svg { width: 18px; height: 18px; }
+.cr-dock-button[aria-pressed='true'] { --cr-bg: rgba(255, 255, 255, .12); --cr-bg-hover: rgba(255, 255, 255, .16); --cr-fg: var(--color-live); }
+.cr-stop {
+  --cr-bg: var(--color-stop); --cr-fg: var(--color-on-stop);
+  --cr-bg-hover: color-mix(in srgb, var(--color-stop) 88%, #000);
+  --cr-bg-disabled: color-mix(in srgb, var(--color-stop) 45%, var(--color-dock)); --cr-fg-disabled: rgba(255, 255, 255, .72);
+  height: var(--size-dock-control); margin-left: 2px; gap: 10px; padding: 0 18px 0 16px; border-radius: var(--radius-pill);
+  font-size: 14px; font-weight: 700;
+}
+.cr-stop-square { width: 11px; height: 11px; flex-shrink: 0; border-radius: 3px; background: currentColor; }
+.cr-dock-caption { margin: 0; color: var(--color-text-tertiary); font-size: var(--font-size-control); text-align: center; }
+.cr-dock-slot[data-compact] { --size-dock-control: 36px; gap: 6px; }
+.cr-dock-slot[data-compact] .cr-dock { padding: 4px; }
+.cr-dock-slot[data-compact] .cr-dock-clock { font-size: 16px; }
+.cr-dock-slot[data-compact] .cr-dock-timer { padding: 0 6px 0 10px; gap: 8px; }
+.cr-dock-slot[data-compact] .cr-dock-source { max-width: 132px; padding: 0 8px; }
+.cr-dock-slot[data-compact] .cr-stop { padding: 0 14px 0 12px; }
+.cr-dock-slot[data-compact] .cr-dock-caption { font-size: var(--font-size-meta); }
+
+/* Progressive compaction, measured on the take-2 dock with a microphone (the widest): it needs
+   527px with 44px controls and 469px in compact mode. Each step applies just below the width the
+   previous one needs: the source drops to an icon, then the "Take N" label goes, then Stop drops
+   to an icon (and the divider goes), then the meter goes. Hidden labels stay as visually hidden
+   text, so every control keeps its accessible name; the timer is named "Take N elapsed time". */
+.cr-dock-source, .cr-stop { position: relative; }
+@container cr-dock (max-width: 526.5px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-source { width: var(--size-dock-control); flex-shrink: 0; padding: 0; gap: 0; justify-content: center; border-radius: 50%; }
+  .cr-dock-slot:not([data-compact]) .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+@container cr-dock (max-width: 465.5px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-take { display: none; }
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-timer { padding-right: 4px; }
+}
+@container cr-dock (max-width: 416px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-stop { width: var(--size-dock-control); padding: 0; gap: 0; justify-content: center; }
+  .cr-dock-slot:not([data-compact]) .cr-stop > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-divider { display: none; }
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-meter { padding: 0 4px; }
+}
+@container cr-dock (max-width: 355.5px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-meter { display: none; }
+}
+/* The same steps for the compact recorder's 36px controls. */
+@container cr-dock (max-width: 468.5px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-source { width: var(--size-dock-control); flex-shrink: 0; padding: 0; gap: 0; justify-content: center; border-radius: 50%; }
+  .cr-dock-slot[data-compact] .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+@container cr-dock (max-width: 410.5px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-take { display: none; }
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-timer { padding-right: 4px; }
+}
+@container cr-dock (max-width: 364px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-stop { width: var(--size-dock-control); padding: 0; gap: 0; justify-content: center; }
+  .cr-dock-slot[data-compact] .cr-stop > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .cr-dock-slot[data-compact] .cr-dock .cr-dock-divider { display: none; }
+  .cr-dock-slot[data-compact] .cr-dock .cr-meter { padding: 0 4px; }
+}
+@container cr-dock (max-width: 310px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-meter { display: none; }
+}
+
+/* Capture controls (draft) */
+.cr-capture { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.cr-capture-field { position: relative; display: flex; min-width: 0; }
+.cr-capture-trigger {
+  --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
+  --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text)); --cr-fg-disabled: var(--color-text-tertiary);
+  height: var(--size-pill-large); min-width: 0; max-width: 240px; padding: 0 10px 0 12px; border-radius: var(--radius-pill); flex-shrink: 1; font-weight: 500;
+}
+.cr-capture-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cr-capture-trigger > svg:last-child { width: 12px; height: 12px; color: var(--color-text-tertiary); transform: rotate(90deg); }
+.cr-capture-trigger[aria-expanded='true'] { --cr-bg: color-mix(in srgb, var(--color-pill) 88%, var(--color-text)); }
+.cr-record .cr-record-dot { background: var(--color-record); }
+.cr-record:disabled .cr-record-dot { background: var(--color-record-disabled); }
+
+.cr-popover {
+  position: fixed; z-index: 30; left: 0; top: 0; box-sizing: border-box; display: flex; flex-direction: column;
+  width: 300px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 6px;
+  border-radius: 12px; background: var(--color-sheet); color: var(--color-text);
+  box-shadow: 0 0 0 1px var(--color-control-ring), 0 12px 32px rgba(16, 24, 40, .16), 0 2px 6px rgba(16, 24, 40, .06);
+  font-size: var(--font-size-body); line-height: 1.4;
+  animation: cr-popover-in var(--motion-fast) var(--ease-out) both;
+}
+:root[data-theme='dark'] .cr-popover { box-shadow: 0 0 0 1px var(--color-control-ring), 0 12px 32px rgba(0, 0, 0, .5); }
+@keyframes cr-popover-in { from { opacity: 0; } to { opacity: 1; } }
+.cr-popover-title {
+  flex-shrink: 0; min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px 2px 10px;
+  color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong);
+}
+.cr-popover-refresh { --cr-fg: var(--color-text-secondary); --cr-bg-hover: var(--color-pill); width: 28px; height: 28px; border-radius: 7px; }
+.cr-popover-refresh svg { width: 15px; height: 15px; }
+.cr-option-list { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 1px; scrollbar-width: thin; }
+.cr-option {
+  --cr-fg: var(--color-row-text); --cr-bg-hover: var(--color-row-hover);
+  width: 100%; min-height: 34px; justify-content: space-between; gap: 10px; padding: 6px 10px;
+  border-radius: var(--radius-row); text-align: left; white-space: normal;
+}
+.cr-option > span { min-width: 0; overflow-wrap: anywhere; }
+.cr-option small { display: block; color: var(--color-text-tertiary); font-size: var(--font-size-meta); }
+.cr-option[aria-pressed='true'] { --cr-bg: var(--color-current-row); --cr-bg-hover: var(--color-current-row); --cr-fg: var(--color-text); font-weight: 500; }
+.cr-option svg { width: 14px; height: 14px; color: var(--color-accent-text); }
+.cr-option:focus-visible { outline-offset: -2px; }
+.cr-popover-note { flex-shrink: 0; margin: 6px 10px 2px; color: var(--color-text-tertiary); font-size: var(--font-size-meta); overflow-wrap: anywhere; }
+.cr-popover-check {
+  flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin: 6px 0 0; padding: 10px 10px 6px;
+  border-top: 1px solid var(--color-divider); color: var(--color-text); cursor: pointer;
+}
+.cr-popover-check input { margin: 0; accent-color: var(--color-accent); }
+.cr-popover-check input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+/* Smaller windows (900×650) and the compact recorder (520×320). */
+@media (max-width: 760px) {
+  .cr-center { padding: 12px 16px 14px; }
+  .cr-stage { padding-top: 12px; gap: 12px; }
+}
+@media (max-height: 560px) {
+  .cr-center { padding-top: 10px; padding-bottom: 12px; }
+  .cr-stage { padding-top: 10px; gap: 10px; }
+  .cr-playback { gap: 8px; }
+  .cr-session-header { --size-pill-large: 32px; }
+  .cr-session-title { font-size: 15px; }
+}
+@media (max-height: 420px) {
+  .cr-dock-slot { --size-dock-control: 36px; gap: 6px; }
+  .cr-dock { padding: 4px; }
+  .cr-dock-clock { font-size: 16px; }
+  .cr-dock-caption { font-size: var(--font-size-meta); }
+  .cr-playback-row { gap: 6px; }
+  .cr-playback { --size-play: 34px; --size-pill-large: 32px; --size-pill: 28px; }
+  .cr-capture { --size-pill-large: 32px; }
+}
+@media (max-width: 560px) {
+  .cr-center { padding-left: 12px; padding-right: 12px; }
+  .cr-capture-trigger { max-width: 150px; }
+  .cr-dock-source { max-width: 120px; }
+}

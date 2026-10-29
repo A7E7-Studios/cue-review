@@ -5,5 +5,7 @@ src-tauri/gen/
 .local/
 test-results/
 playwright-report/
+storybook-static/
 *.log
 *.tsbuildinfo
+.claude/worktrees/

@@ -1,10 +1,12 @@
 //! Continuous preview transport. Frames are pushed over one loopback MJPEG
 //! connection; only the newest frame is retained when the viewer falls behind.
+//! A viewer that goes away is reported with its `view` label, and reconnecting
+//! to the same URL resumes the stream.
 use crate::{capture, deps};
 use serde::Serialize;
 use std::{
-    io::{Read, Write},
-    net::TcpListener,
+    io::{ErrorKind, Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -17,6 +19,9 @@ use std::{
 
 pub type FrameSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 pub type ErrorSink = Arc<dyn Fn(String) + Send + Sync>;
+/// Called with the `view` label of a viewer connection that ended while the
+/// stream goes on.
+pub type DropSink = Arc<dyn Fn(String) + Send + Sync>;
 pub(crate) fn requires_exclusive_capture(source: &str) -> bool {
     source.starts_with("v4l2:")
 }
@@ -81,6 +86,7 @@ impl Preview {
         id: String,
         source: &str,
         on_error: ErrorSink,
+        on_drop: DropSink,
     ) -> Result<StreamInfo, String> {
         self.active = None;
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -109,7 +115,19 @@ impl Preview {
         }
         let stream_frames = frames.clone();
         let worker = thread::spawn(move || {
-            serve(listener, &token, &stream_frames, &capture, &on_error);
+            let failure = || {
+                capture
+                    .error()
+                    .or_else(|| stream_frames.error.lock().ok()?.clone())
+            };
+            serve(
+                listener,
+                &token,
+                &stream_frames,
+                failure,
+                &on_error,
+                &on_drop,
+            );
             stream_frames.stopped.store(true, Ordering::Relaxed);
             drop(capture);
         });
@@ -126,76 +144,206 @@ impl Preview {
         }
     }
 }
-fn serve(listener: TcpListener, token: &str, frames: &Frames, source: &Source, error: &ErrorSink) {
+/// How long a viewer may take to send its request head.
+const REQUEST_WAIT: Duration = Duration::from_secs(2);
+/// The largest request head a viewer may send.
+const REQUEST_LIMIT: usize = 8192;
+/// A viewer that accepts no data for this long is dropped (and reported, so it
+/// reconnects).
+const VIEWER_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// The longest `view` label a request may carry.
+const VIEW_LABEL_LIMIT: usize = 32;
+const STREAM_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=cuereview\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+
+/// Makes an accepted viewer connection blocking, with a write timeout. The
+/// listener is non-blocking so its accept loop notices a stop, and on Windows
+/// an accepted socket inherits that: a full send buffer then fails at once
+/// with `WouldBlock` (os error 10035), which looked like a disconnect and froze
+/// the preview, and the read and write timeouts did nothing.
+fn prepare_viewer(socket: &TcpStream) -> std::io::Result<()> {
+    socket.set_nonblocking(false)?;
+    socket.set_write_timeout(Some(VIEWER_WRITE_TIMEOUT))?;
+    socket.set_nodelay(true)
+}
+
+/// Reads a request head through its blank line within `wait`, however the
+/// viewer splits it. `None` when it ends early, is too large or too slow, or
+/// the stream stops meanwhile.
+fn read_request(socket: &mut TcpStream, wait: Duration, stopped: &AtomicBool) -> Option<Vec<u8>> {
+    let deadline = Instant::now() + wait;
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+        if request.len() > REQUEST_LIMIT || stopped.load(Ordering::Relaxed) {
+            return None;
+        }
+        // Short slices keep a stop prompt while a viewer is slow.
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())?;
+        socket
+            .set_read_timeout(Some(left.min(Duration::from_millis(100))))
+            .ok()?;
+        match socket.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(length) => request.extend_from_slice(&chunk[..length]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return None,
+        }
+    }
+    Some(request)
+}
+
+/// The `view` label of a `GET /{token}` request (empty when it has none), or
+/// `None` when the request is not for this stream. The frontend numbers its
+/// connections with `?view=N` so it can tell which one dropped.
+fn authorized_view(request: &[u8], token: &str) -> Option<String> {
+    let line = request.split(|&byte| byte == b'\n').next()?;
+    let line = std::str::from_utf8(line).ok()?.trim_end_matches('\r');
+    let mut parts = line.split(' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    if method != "GET" || !version.starts_with("HTTP/1.") || parts.next().is_some() {
+        return None;
+    }
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path.strip_prefix('/')? != token {
+        return None;
+    }
+    let view = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("view="))
+        .filter(|view| {
+            view.len() <= VIEW_LABEL_LIMIT
+                && view
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        })
+        .unwrap_or_default();
+    Some(view.to_owned())
+}
+
+/// How streaming to one viewer ended.
+#[derive(Debug, PartialEq)]
+enum Streamed {
+    /// The stream was stopped.
+    Stopped,
+    /// The source failed.
+    Failed(String),
+    /// The viewer closed the connection or stopped reading.
+    ViewerGone,
+}
+
+/// Sends the newest frame whenever there is one, skipping the frames a slow
+/// viewer missed.
+fn stream_frames(
+    socket: &mut impl Write,
+    frames: &Frames,
+    failure: &impl Fn() -> Option<String>,
+) -> Streamed {
+    if socket.write_all(STREAM_HEAD).is_err() {
+        return Streamed::ViewerGone;
+    }
+    let mut sequence = 0;
+    loop {
+        if frames.stopped.load(Ordering::Relaxed) {
+            return Streamed::Stopped;
+        }
+        if let Some(message) = failure() {
+            return Streamed::Failed(message);
+        }
+        let Ok(latest) = frames.latest.lock() else {
+            return Streamed::Stopped;
+        };
+        let Ok((latest, _)) =
+            frames
+                .available
+                .wait_timeout_while(latest, Duration::from_millis(100), |latest| {
+                    latest.0 == sequence && !frames.stopped.load(Ordering::Relaxed)
+                })
+        else {
+            return Streamed::Stopped;
+        };
+        if latest.0 == sequence {
+            continue;
+        }
+        let (next, image) = (latest.0, latest.1.clone());
+        drop(latest);
+        let header = format!(
+            "--cuereview\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+            image.len()
+        );
+        if socket
+            .write_all(header.as_bytes())
+            .and_then(|_| socket.write_all(&image))
+            .and_then(|_| socket.write_all(b"\r\n"))
+            .is_err()
+        {
+            return Streamed::ViewerGone;
+        }
+        sequence = next;
+    }
+}
+
+/// Serves one viewer at a time until the stream stops or `failure` reports a
+/// problem. A viewer that goes away while the stream goes on is reported
+/// through `dropped` with its `view` label; its next connection resumes.
+fn serve(
+    listener: TcpListener,
+    token: &str,
+    frames: &Frames,
+    failure: impl Fn() -> Option<String>,
+    error: &ErrorSink,
+    dropped: &DropSink,
+) {
     let mut connected = false;
     let began = Instant::now();
     while !frames.stopped.load(Ordering::Relaxed) {
-        if let Some(message) = source.error().or_else(|| frames.error.lock().ok()?.clone()) {
+        if let Some(message) = failure() {
             error(message);
             return;
         }
         match listener.accept() {
             Ok((mut socket, _)) => {
-                let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
-                let _ = socket.set_write_timeout(Some(Duration::from_secs(1)));
-                let _ = socket.set_nodelay(true);
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                while request.len() < 4096 && !request.ends_with(b"\r\n\r\n") {
-                    if socket.read_exact(&mut byte).is_err() {
-                        break;
-                    }
-                    request.push(byte[0]);
+                if prepare_viewer(&socket).is_err() {
+                    continue;
                 }
-                if !request.starts_with(format!("GET /{token} HTTP/1.").as_bytes()) {
+                let Some(request) = read_request(&mut socket, REQUEST_WAIT, &frames.stopped) else {
+                    let _ = socket.write_all(
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                };
+                let Some(view) = authorized_view(&request, token) else {
                     let _ = socket.write_all(
                         b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     );
                     continue;
-                }
+                };
                 connected = true;
-                if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=cuereview\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n").is_err() { continue; }
-                let mut sequence = 0;
-                while !frames.stopped.load(Ordering::Relaxed) {
-                    if let Some(message) =
-                        source.error().or_else(|| frames.error.lock().ok()?.clone())
-                    {
+                match stream_frames(&mut socket, frames, &failure) {
+                    Streamed::Stopped => return,
+                    Streamed::Failed(message) => {
                         error(message);
                         return;
                     }
-                    let latest = frames.latest.lock().unwrap();
-                    let (latest, _) = frames
-                        .available
-                        .wait_timeout_while(latest, Duration::from_millis(100), |latest| {
-                            latest.0 == sequence && !frames.stopped.load(Ordering::Relaxed)
-                        })
-                        .unwrap();
-                    if latest.0 == sequence {
-                        continue;
+                    Streamed::ViewerGone => {
+                        if !view.is_empty() && !frames.stopped.load(Ordering::Relaxed) {
+                            dropped(view);
+                        }
                     }
-                    let (next, image) = (latest.0, latest.1.clone());
-                    drop(latest);
-                    let header = format!(
-                        "--cuereview\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-                        image.len()
-                    );
-                    if socket
-                        .write_all(header.as_bytes())
-                        .and_then(|_| socket.write_all(&image))
-                        .and_then(|_| socket.write_all(b"\r\n"))
-                        .is_err()
-                    {
-                        break;
-                    }
-                    sequence = next;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if !connected && began.elapsed() > Duration::from_secs(15) {
                     return;
                 }
                 thread::sleep(Duration::from_millis(20));
             }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(e) => {
                 error(format!("Preview transport failed: {e}"));
                 return;
@@ -546,10 +694,7 @@ mod tests {
         );
         assert!(scrcpy_server_path(&executable, Some(root.path().join("missing"))).is_err());
     }
-    #[cfg(windows)]
     use std::io::{BufRead, BufReader};
-    #[cfg(windows)]
-    use std::net::TcpStream;
     #[cfg(windows)]
     struct AnimatedWindow {
         handle: usize,
@@ -680,6 +825,8 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let errors = Arc::new(Mutex::new(Vec::new()));
         let reported = errors.clone();
+        let drops = Arc::new(Mutex::new(Vec::<String>::new()));
+        let dropped = drops.clone();
         let mut preview = Preview::default();
         let began = Instant::now();
         let info = preview
@@ -687,6 +834,7 @@ mod tests {
                 "owned-preview-test".into(),
                 &source,
                 Arc::new(move |error| reported.lock().unwrap().push(error)),
+                Arc::new(move |view| dropped.lock().unwrap().push(view)),
             )
             .unwrap();
         let startup = began.elapsed().as_secs_f64();
@@ -706,25 +854,31 @@ mod tests {
         let mut denial = String::new();
         forbidden.read_to_string(&mut denial).unwrap();
         assert!(denial.contains("403 Forbidden"));
-        let mut socket = TcpStream::connect(address).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
+        // Connects as viewer `view` and reads the response head.
+        let view = |view: u32| {
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write!(
+                socket,
+                "GET /{token}?view={view} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
             .unwrap();
-        write!(socket, "GET /{token} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-        let mut reader = BufReader::new(socket);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
             }
-        }
-        let started = Instant::now();
-        let mut count = 0;
-        let mut dimensions = (0, 0);
-        let mut bytes = 0;
-        while started.elapsed() < Duration::from_secs(5) {
+            reader
+        };
+        // Reads the next frame of a viewer.
+        let frame = |reader: &mut BufReader<TcpStream>| {
+            let mut line = String::new();
             let mut length = 0;
             loop {
                 line.clear();
@@ -738,6 +892,16 @@ mod tests {
             }
             let mut image = vec![0; length];
             reader.read_exact(&mut image).unwrap();
+            image
+        };
+        let mut reader = view(1);
+        let started = Instant::now();
+        let mut count = 0;
+        let mut dimensions = (0, 0);
+        let mut bytes = 0;
+        while started.elapsed() < Duration::from_secs(5) {
+            let image = frame(&mut reader);
+            let length = image.len();
             if count == 0 {
                 let decoded = image::load_from_memory(&image).unwrap();
                 dimensions = (decoded.width(), decoded.height());
@@ -751,11 +915,21 @@ mod tests {
             count >= 20,
             "Preview was not continuous: {count} frames in {seconds}s"
         );
+        assert!(
+            drops.lock().unwrap().is_empty(),
+            "A reading viewer was dropped: {:?}",
+            drops.lock().unwrap()
+        );
         preview.stop("stale-id");
         assert!(
             preview.active.is_some(),
             "Stale teardown stopped the current stream"
         );
+        // A viewer that goes away is reported, and the next one resumes the stream.
+        drop(reader);
+        let mut reader = view(2);
+        frame(&mut reader);
+        assert_eq!(*drops.lock().unwrap(), ["1"]);
         drop(reader);
         preview.stop(&info.id);
         assert!(preview.active.is_none());
@@ -767,8 +941,189 @@ mod tests {
         );
         std::fs::write(directory.join("verification.json"), serde_json::to_vec_pretty(&serde_json::json!({
             "passed":true,"source":source,"startupSeconds":startup,"frames":count,"seconds":seconds,"fps":count as f64 / seconds,
-            "dimensions":dimensions,"bytes":bytes,"invalidTokenRejected":true,"staleStopIgnored":true,"streamClosed":true
+            "dimensions":dimensions,"bytes":bytes,"invalidTokenRejected":true,"staleStopIgnored":true,"droppedViewerReported":true,"viewerReconnected":true,"streamClosed":true
         })).unwrap()).unwrap();
+    }
+    /// A loopback listener set up like `Preview::start`'s, and a viewer connected to it.
+    fn viewer_pair() -> (TcpListener, TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let began = Instant::now();
+        let server = loop {
+            match listener.accept() {
+                Ok((server, _)) => break server,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    assert!(began.elapsed() < Duration::from_secs(5));
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        };
+        (listener, client, server)
+    }
+    #[test]
+    fn a_viewer_that_reads_late_still_receives_every_frame_sent_meanwhile() {
+        let (_listener, mut client, mut server) = viewer_pair();
+        prepare_viewer(&server).unwrap();
+        let frame = vec![7u8; 1024 * 1024];
+        let count = 16;
+        let reader = thread::spawn(move || {
+            // The send buffer fills while the viewer is busy.
+            thread::sleep(Duration::from_millis(300));
+            let mut received = Vec::new();
+            client.read_to_end(&mut received).unwrap();
+            received.len()
+        });
+        for _ in 0..count {
+            server
+                .write_all(&frame)
+                .expect("a full send buffer is not a disconnect");
+        }
+        drop(server);
+        assert_eq!(reader.join().unwrap(), count * frame.len());
+    }
+    #[test]
+    fn requests_split_across_packets_are_read_whole_and_checked() {
+        let (_listener, mut client, mut server) = viewer_pair();
+        prepare_viewer(&server).unwrap();
+        let stopped = AtomicBool::new(false);
+        let writer = thread::spawn(move || {
+            client.write_all(b"GET /tok").unwrap();
+            thread::sleep(Duration::from_millis(250));
+            client
+                .write_all(b"en?x=1&view=3 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .unwrap();
+            client
+        });
+        let request = read_request(&mut server, REQUEST_WAIT, &stopped).unwrap();
+        assert_eq!(authorized_view(&request, "token"), Some("3".into()));
+        drop(writer.join().unwrap());
+        // A viewer that sends nothing, or stops early, is not waited on forever.
+        let (_listener, _silent, mut server) = viewer_pair();
+        prepare_viewer(&server).unwrap();
+        let began = Instant::now();
+        assert!(read_request(&mut server, Duration::from_millis(300), &stopped).is_none());
+        assert!(began.elapsed() < Duration::from_secs(2));
+        let (_listener, mut early, mut server) = viewer_pair();
+        prepare_viewer(&server).unwrap();
+        early.write_all(b"GET /token HTTP/1.1\r\n").unwrap();
+        drop(early);
+        assert!(read_request(&mut server, REQUEST_WAIT, &stopped).is_none());
+        for (request, view) in [
+            ("GET /token HTTP/1.1\r\n\r\n", Some("")),
+            ("GET /token?view=12 HTTP/1.0\r\n\r\n", Some("12")),
+            ("GET /token?view=bad%20label HTTP/1.1\r\n\r\n", Some("")),
+            ("GET /wrong-token HTTP/1.1\r\n\r\n", None),
+            ("GET /token/extra HTTP/1.1\r\n\r\n", None),
+            ("GET /tokenx HTTP/1.1\r\n\r\n", None),
+            ("POST /token HTTP/1.1\r\n\r\n", None),
+            ("GET /token\r\n\r\n", None),
+        ] {
+            assert_eq!(
+                authorized_view(request.as_bytes(), "token").as_deref(),
+                view,
+                "{request}"
+            );
+        }
+        assert_eq!(
+            authorized_view(b"\xff\xfe /token HTTP/1.1\r\n\r\n", "token"),
+            None
+        );
+    }
+    #[test]
+    fn serve_resumes_for_a_reconnecting_viewer_and_reports_the_one_that_left() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let frames = Arc::new(Frames::default());
+        let drops = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (served, dropped, failed) = (frames.clone(), drops.clone(), errors.clone());
+        let server = thread::spawn(move || {
+            serve(
+                listener,
+                "token",
+                &served,
+                || None,
+                &(Arc::new(move |error| failed.lock().unwrap().push(error)) as ErrorSink),
+                &(Arc::new(move |view| dropped.lock().unwrap().push(view)) as DropSink),
+            )
+        });
+        // Large frames, so a viewer that reads slowly fills the send buffer.
+        let producing = Arc::new(AtomicBool::new(true));
+        let producer = {
+            let (frames, producing) = (frames.clone(), producing.clone());
+            thread::spawn(move || {
+                let mut n = 0u8;
+                while producing.load(Ordering::Relaxed) {
+                    n = n.wrapping_add(1);
+                    let mut frame = vec![n; 2 * 1024 * 1024];
+                    frame[..2].copy_from_slice(&[0xff, 0xd8]);
+                    frames.send(frame);
+                    thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+        let connect = |request: &str| {
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket.write_all(request.as_bytes()).unwrap();
+            socket
+        };
+        let mut denied = String::new();
+        connect("GET /wrong HTTP/1.1\r\n\r\n")
+            .read_to_string(&mut denied)
+            .unwrap();
+        assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+        // Reads the head and `count` frames, pausing between them like a busy viewer.
+        let watch = |socket: TcpStream, count: usize, pause: Duration| {
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+            for _ in 0..count {
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0, "stream ended");
+                    if let Some(value) = line.strip_prefix("Content-Length: ") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" && length > 0 {
+                        break;
+                    }
+                }
+                let mut image = vec![0; length];
+                reader.read_exact(&mut image).unwrap();
+                assert_eq!(&image[..2], [0xff, 0xd8]);
+                thread::sleep(pause);
+            }
+            reader
+        };
+        let first = watch(
+            connect("GET /token?view=1 HTTP/1.1\r\n\r\n"),
+            4,
+            Duration::from_millis(150),
+        );
+        assert!(drops.lock().unwrap().is_empty());
+        drop(first);
+        let second = watch(
+            connect("GET /token?view=2 HTTP/1.1\r\n\r\n"),
+            2,
+            Duration::ZERO,
+        );
+        assert_eq!(*drops.lock().unwrap(), ["1"]);
+        frames.stopped.store(true, Ordering::Relaxed);
+        frames.available.notify_all();
+        server.join().unwrap();
+        producing.store(false, Ordering::Relaxed);
+        producer.join().unwrap();
+        drop(second);
+        assert_eq!(*drops.lock().unwrap(), ["1"], "a stop is not a drop");
+        assert!(errors.lock().unwrap().is_empty());
     }
     #[test]
     fn split_jpeg_frames_are_delivered_without_backlog() {

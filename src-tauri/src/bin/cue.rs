@@ -1,25 +1,12 @@
 use cuereview_lib::{
-    agent, capture, deps,
+    agent, capture,
+    cli::{self, Command, TranscriptFormat},
+    cursor, deps,
     models::CaptureConfig,
     store::{data_root, Store},
-    transcribe,
+    takes, transcribe,
 };
-use std::{path::Path, time::Duration};
-const HELP:&str="CueReview — local agent access\n\ncue projects\ncue sessions [PROJECT_ID]\ncue info SESSION_ID\ncue transcript SESSION_ID [--json]\ncue find SESSION_ID --phrase TEXT\ncue frame SESSION_ID (--at-ms N | --phrase TEXT [--occurrence N]) [--output PATH]\ncue clip SESSION_ID --start-ms N --end-ms N [--output PATH]\ncue transcribe SESSION_ID\ncue setup [--install]\ncue sources\ncue microphones\ncue record [--project ID] --source ID --seconds N [--mic ID] [--system-audio] [--name TEXT]\n\nAll times are milliseconds. Frame/clip output is JSON with a local path.\nCUEREVIEW_DATA_DIR overrides the shared local storage root.\nNo network access is used except explicit setup --install.\n";
-fn option<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|a| a == key)
-        .and_then(|i| args.get(i + 1))
-        .map(String::as_str)
-}
-fn required<'a>(args: &'a [String], key: &str) -> Result<&'a str, String> {
-    option(args, key).ok_or_else(|| format!("Missing {key}"))
-}
-fn number(args: &[String], key: &str) -> Result<u64, String> {
-    required(args, key)?
-        .parse()
-        .map_err(|_| format!("{key} must be a non-negative integer."))
-}
+use std::time::Duration;
 fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
     println!(
         "{}",
@@ -29,105 +16,121 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
 }
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first().map(String::as_str) else {
-        print!("{HELP}");
-        return Ok(());
-    };
-    if matches!(cmd, "help" | "--help" | "-h") {
-        print!("{HELP}");
-        return Ok(());
+    // Help and argument errors come first: they never open the store or take the lock.
+    let help = cli::dispatch(
+        &args,
+        || Store::open(data_root()),
+        Store::acquire_ownership,
+        execute,
+    )?;
+    if let Some(text) = help {
+        print!("{text}");
     }
-    let store = Store::open(data_root())?;
-    let _ownership = if matches!(cmd, "record" | "transcribe")
-        || (cmd == "setup" && args.iter().any(|arg| arg == "--install"))
-    {
-        Some(store.acquire_ownership()?)
-    } else {
-        None
-    };
-    let id = args.get(1).map(String::as_str).unwrap_or("");
-    match cmd {
-        "projects" => print_json(&store.projects()?),
-        "sessions" => print_json(&store.sessions((!id.is_empty()).then_some(id))?),
-        "info" => print_json(&store.session(id)?),
-        "transcript" => {
-            let t = store.transcript(id)?;
-            if args.iter().any(|a| a == "--json") {
-                print_json(&t)
-            } else {
-                for s in t.segments {
-                    println!("{}", s.text);
+    Ok(())
+}
+fn execute(store: &Store, command: Command) -> Result<(), String> {
+    match command {
+        Command::Projects => print_json(&store.projects()?),
+        Command::Sessions { project } => print_json(&store.sessions(project.as_deref())?),
+        Command::Info { id } => print_json(&store.session(&id)?),
+        Command::Transcript { id, format } => {
+            let t = store.transcript(&id)?;
+            match format {
+                TranscriptFormat::Text => {
+                    for s in t.segments {
+                        println!("{}", s.text);
+                    }
+                    Ok(())
                 }
-                Ok(())
+                TranscriptFormat::Segments => {
+                    if t.segments.is_empty() {
+                        eprintln!(
+                            "No transcript segments (status: {}).",
+                            t.status.as_deref().unwrap_or("none")
+                        );
+                    }
+                    print!("{}", cli::format_segments(&t));
+                    Ok(())
+                }
+                TranscriptFormat::Json => match cursor::load(store, &id) {
+                    Some(track) => print_json(&agent::transcript_with_cursor(&t, &track)),
+                    None => print_json(&t),
+                },
             }
         }
-        "find" => print_json(&agent::find(
-            &store.transcript(id)?,
-            required(&args, "--phrase")?,
+        Command::Find { id, phrase } => print_json(&agent::find_with_cursor(store, &id, &phrase)?),
+        Command::Frame {
+            id,
+            at,
+            output,
+            style,
+        } => print_json(&agent::frame_at(store, &id, &at, output.as_deref(), style)?),
+        Command::Frames {
+            id,
+            times,
+            output_dir,
+            style,
+        } => print_json(&agent::frames(
+            store,
+            &id,
+            &times,
+            output_dir.as_deref(),
+            style,
         )?),
-        "frame" => {
-            let at = if let Some(phrase) = option(&args, "--phrase") {
-                let matches = agent::find(&store.transcript(id)?, phrase)?;
-                let occurrence = option(&args, "--occurrence")
-                    .unwrap_or("1")
-                    .parse::<usize>()
-                    .map_err(|_| "Occurrence must be a positive integer.")?;
-                let matched = matches
-                    .iter()
-                    .find(|m| m.occurrence == occurrence)
-                    .ok_or("Phrase occurrence was not found.")?;
-                matched.seek_ms.unwrap_or(matched.start_ms)
-            } else {
-                number(&args, "--at-ms")?
-            };
-            let path = agent::frame(&store, id, at, option(&args, "--output").map(Path::new))?;
-            print_json(&serde_json::json!({"path":path,"timeMs":at}))
-        }
-        "clip" => {
-            let path = agent::clip(
-                &store,
-                id,
-                number(&args, "--start-ms")?,
-                number(&args, "--end-ms")?,
-                option(&args, "--output").map(Path::new),
-            )?;
+        Command::Clip {
+            id,
+            start_ms,
+            end_ms,
+            output,
+        } => {
+            let path = agent::clip(store, &id, start_ms, end_ms, output.as_deref())?;
             print_json(&serde_json::json!({"path":path}))
         }
-        "setup" => print_json(&if args.iter().any(|a| a == "--install") {
+        Command::Rename { id, name } => print_json(&store.rename_session(&id, &name)?),
+        Command::Moments { id, frames, style } => {
+            print_json(&agent::moments(store, &id, frames, style)?)
+        }
+        Command::Setup { install } => print_json(&if install {
             deps::install_transcription()?
         } else {
             deps::setup_status()
         }),
-        "sources" => print_json(&capture::sources()?),
-        "microphones" => print_json(&capture::microphones()?),
-        "transcribe" => print_json(&agent::transcribe_existing(&store, id)?),
-        "record" => {
-            let seconds = number(&args, "--seconds")?;
-            if !(1..=3600).contains(&seconds) {
-                return Err("Use --seconds between 1 and 3600.".into());
-            }
+        Command::Sources => print_json(&capture::sources()?),
+        Command::Microphones => print_json(&capture::microphones()?),
+        Command::Transcribe { id } => print_json(&agent::transcribe_existing(store, &id)?),
+        Command::DiscardTake { id, index } => print_json(&takes::discard(store, &id, index)?),
+        Command::Record {
+            project,
+            source,
+            seconds,
+            mic,
+            system_audio,
+            name,
+        } => {
             let config = CaptureConfig {
-                source_id: required(&args, "--source")?.into(),
-                microphone_id: option(&args, "--mic").map(str::to_owned),
-                system_audio: args.iter().any(|a| a == "--system-audio"),
+                source_id: source,
+                microphone_id: mic,
+                system_audio,
                 fps: 30,
             };
-            let mut session = store.create_session(
-                option(&args, "--project"),
-                option(&args, "--name"),
-                &config,
-            )?;
+            // What the source is now, so a later Record more can check it.
+            let identity = capture::source_identity(&config.source_id);
+            let mut session = store.create_session(project.as_deref(), name.as_deref(), &config)?;
+            if identity.is_some() {
+                session.source_identity = identity;
+                store.save_session(&session)?;
+            }
             let result = (|| {
                 let mut active = capture::start(config, &store.session_dir(&session.id)?)?;
                 std::thread::sleep(Duration::from_secs(seconds));
                 let stopped = active.stop();
                 session.duration_ms = active.elapsed_ms();
                 // Source loss may report an error after successfully finalizing usable video.
-                let video = cuereview_lib::attach_finished_video(&store, &mut session);
+                let video = cuereview_lib::attach_finished_video(store, &mut session);
                 stopped.and(video)?;
                 session.status = "processing".into();
                 store.save_session(&session)?;
-                let transcript = transcribe::transcribe(&store, &session.id)?;
+                let transcript = transcribe::transcribe(store, &session.id)?;
                 Store::apply_auto_title(&mut session, &transcript);
                 Ok::<(), String>(())
             })();
@@ -137,7 +140,6 @@ fn run() -> Result<(), String> {
             print_json(&session)?;
             result
         }
-        _ => Err(format!("Unknown command {cmd}. Run cue --help.")),
     }
 }
 fn main() {
