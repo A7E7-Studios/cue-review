@@ -27,7 +27,7 @@ const longSegments: Segment[] = Array.from({ length: 480 }, (_, index) => {
 const longTranscript: Transcript = { segments: longSegments, takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 800000 }, { index: 3, startMs: 1800000 }] };
 const DURATIONS = { review: 134000, long: longSegments.length * 5000 };
 
-type Scenario = 'review' | 'recording-take-2' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'stuck-take' | 'empty' | 'long';
+type Scenario = 'review' | 'recording-take-2' | 'recording-long' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'stuck-take' | 'empty' | 'long';
 interface Args { scenario: Scenario; playing: boolean }
 
 function Column({ scenario, playing: initiallyPlaying }: Args) {
@@ -46,6 +46,8 @@ function Column({ scenario, playing: initiallyPlaying }: Args) {
     review: { ...base, mode: 'review', transcript: twoTakeTranscript },
     long: { ...base, mode: 'review', transcript: longTranscript },
     'recording-take-2': { mode: 'recording', transcript: { takes: [{ index: 1, startMs: 0 }], segments: [...takeOneSegments, ...takeTwoLiveTranscript.segments] }, timeMs: takeTwoStartMs + 8000, onSeek: setTime, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } },
+    // A long first take, then take 2 recording: enough rows to scroll away from the live words.
+    'recording-long': { mode: 'recording', transcript: { takes: [{ index: 1, startMs: 0 }], segments: [...longSegments.slice(0, 16), ...takeTwoLiveTranscript.segments.map(segment => ({ ...segment, id: `live-${segment.startMs}` }))] }, timeMs: takeTwoStartMs + 8000, onSeek: setTime, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } },
     'recording-take-2-waiting': { mode: 'recording', transcript: { takes: [{ index: 1, startMs: 0 }], segments: takeOneSegments }, timeMs: takeTwoStartMs + 1200, onSeek: setTime, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs }, emptyMessage: 'Listening… transcript updates in short batches.', liveError: 'Live transcription is catching up. Words appear after each short batch.' },
     processing: { ...base, mode: 'review', transcript: { segments: [] }, status: 'processing', emptyMessage: 'Transcribing…' },
     error: { ...base, mode: 'review', transcript: { segments: [] }, error: 'Speech model not found. Install transcription in Settings, then retry.', onRetry: () => setNotice('Retry selected.') },
@@ -125,5 +127,20 @@ export const ReturnToPlayback: Story = {
     const back = await canvas.findByRole('button', { name: 'Return to playback' });
     await userEvent.click(back);
     await waitFor(() => expect(canvas.queryByRole('button', { name: 'Return to playback' })).not.toBeInTheDocument());
+  },
+};
+/** Scrolled up while recording: the button goes back to the newest words, not to playback. */
+export const BackToLive: Story = {
+  args: { scenario: 'recording-long' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const scroller = canvasElement.querySelector<HTMLElement>('.cr-transcript-scroll')!;
+    await waitFor(() => expect(canvas.getByText('Take 2 · recording')).toBeVisible());
+    await new Promise(resolve => setTimeout(resolve, 900));
+    fireEvent.wheel(scroller);
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    await expect(await canvas.findByRole('button', { name: 'Back to live' })).toBeVisible();
+    await expect(canvas.queryByRole('button', { name: 'Return to playback' })).not.toBeInTheDocument();
   },
 };
