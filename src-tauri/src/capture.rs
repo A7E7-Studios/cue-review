@@ -2388,6 +2388,82 @@ fn metadata_device_end(info: &serde_json::Value, video_host_start: f64, fps: u32
     let end = video_host_start + start + duration - video_start + 1.0 / fps as f64;
     end.is_finite().then_some(end)
 }
+/// Where a frame of another size sits on the canvas: scaled to fit without
+/// changing its shape and centered, on black. `(x, y, width, height)` in
+/// canvas pixels, even as yuv420p needs. [`fit_filter`] has FFmpeg place
+/// frames the same way, with the same arithmetic.
+pub(crate) fn letterbox(frame: (u32, u32), canvas: (u32, u32)) -> (u32, u32, u32, u32) {
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    let (cw, ch) = (f64::from(canvas.0), f64::from(canvas.1));
+    let even = |size: f64| 2 * (size / 2.0).trunc() as u32;
+    let (w, h) = if cw / fw <= ch / fh {
+        (canvas.0, even(fh * cw / fw))
+    } else {
+        (even(fw * ch / fh), canvas.1)
+    };
+    let offset = |canvas: u32, size: u32| canvas.saturating_sub(size) / 4 * 2;
+    (offset(canvas.0, w), offset(canvas.1, h), w, h)
+}
+
+/// The FFmpeg filter that puts every frame on a `canvas` (even sizes) as
+/// [`letterbox`] does. It keeps no state, so FFmpeg rebuilding the filter
+/// graph when the frame size changes loses nothing.
+fn fit_filter((width, height): (u32, u32)) -> String {
+    format!(
+        "scale=w='if(lte({width}/iw\\,{height}/ih)\\,{width}\\,2*trunc(iw*{height}/ih/2))'\
+         :h='if(lte({width}/iw\\,{height}/ih)\\,2*trunc(ih*{width}/iw/2)\\,{height})',\
+         pad={width}:{height}:x='2*trunc((ow-iw)/4)':y='2*trunc((oh-ih)/4)',setsar=1"
+    )
+}
+
+/// The distinct frame sizes in `ffprobe … -show_entries frame=width,height
+/// -of csv=p=0` output, in the order they first appear.
+fn parse_frame_sizes(text: &str) -> Vec<(u32, u32)> {
+    let mut sizes = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split(',').map(str::trim);
+        let size = fields
+            .next()
+            .and_then(|w| w.parse().ok())
+            .zip(fields.next().and_then(|h| h.parse().ok()));
+        if let Some(size) = size.filter(|&(w, h): &(u32, u32)| w > 0 && h > 0) {
+            if !sizes.contains(&size) {
+                sizes.push(size);
+            }
+        }
+    }
+    sizes
+}
+
+/// The frame sizes of a device recording. scrcpy restarts its encoder at a
+/// new size when the display turns between portrait and landscape, and every
+/// restart begins with a key frame, so only key frames are decoded.
+fn device_frame_sizes(input: &Path) -> Result<Vec<(u32, u32)>, String> {
+    let mut probe = deps::command("ffprobe")?;
+    probe
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-skip_frame",
+            "nokey",
+            "-show_entries",
+            "frame=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(input);
+    let output = output_with_timeout(probe, Duration::from_secs(120))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Device frame sizes could not be read: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(parse_frame_sizes(&String::from_utf8_lossy(&output.stdout)))
+}
+
 /// `timing_extra` holds additional `capture-timing.json` keys.
 #[allow(clippy::too_many_arguments)]
 fn finalize(
@@ -2463,6 +2539,24 @@ fn finalize(
         None
     };
     timing["outputEndMs"] = serde_json::json!(output_end * 1000.0);
+    // A device that turned between portrait and landscape recorded frames of
+    // more than one size. FFmpeg rebuilds the mux's filters at a size change,
+    // which restarts `STARTPTS` and `tpad` and loses or misplaces the frames
+    // after it, so they are first letterboxed onto the first frame's size.
+    let frame_sizes = match device_capture.then(|| device_frame_sizes(input)) {
+        Some(Ok(sizes)) => sizes,
+        Some(Err(error)) => {
+            timing["frameSizesError"] = serde_json::json!(error);
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+    if frame_sizes.len() > 1 {
+        timing["frameSizes"] = serde_json::json!(frame_sizes
+            .iter()
+            .map(|&(width, height)| [width, height])
+            .collect::<Vec<_>>());
+    }
     let seconds = format!("{:.6}", output_end.max(0.001));
     if device_audio {
         let info = native_timing
@@ -2531,11 +2625,44 @@ fn finalize(
     ])
     .arg(&audio);
     ffmpeg(mix)?;
+    // Timestamps pass through unchanged, so the mux below and the native
+    // timing above still describe the letterboxed video.
+    let letterboxed = folder.join("native-video.letterboxed.mkv");
+    let video_input = if let [(width, height), _, ..] = frame_sizes.as_slice() {
+        let mut fit = deps::command("ffmpeg")?;
+        fit.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(input)
+            .args([
+                "-map",
+                "0:v:0",
+                "-an",
+                "-vf",
+                &fit_filter((width / 2 * 2, height / 2 * 2)),
+                "-fps_mode",
+                "passthrough",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "15",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&letterboxed);
+        if let Err(error) = ffmpeg(fit) {
+            let _ = fs::remove_file(&letterboxed);
+            return Err(error);
+        }
+        letterboxed.as_path()
+    } else {
+        input
+    };
     let mut mux = deps::command("ffmpeg")?;
     // Extend the first/last frame to cover startup and a static desktop's final interval.
     let filter = format!("setpts=PTS-STARTPTS,tpad=start_mode=clone:start_duration={delay:.6}:stop_mode=clone:stop_duration={},scale=trunc(iw/2)*2:trunc(ih/2)*2", duration.as_secs_f64());
     mux.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-        .arg(input)
+        .arg(video_input)
         .arg("-i")
         .arg(&audio)
         .args([
@@ -2567,7 +2694,11 @@ fn finalize(
             "+faststart",
         ])
         .arg(folder.join("video.mp4"));
-    ffmpeg(mux)?;
+    let muxed = ffmpeg(mux);
+    if video_input != input {
+        let _ = fs::remove_file(&letterboxed);
+    }
+    muxed?;
     validate_final_video(&folder.join("video.mp4"), output_end, fps)
 }
 
@@ -3142,6 +3273,140 @@ mod tests {
         remove_native_intermediate(&folder, &native).unwrap();
         assert!(!native.exists());
         assert!(outside.exists() && final_video.exists());
+    }
+
+    #[test]
+    fn device_frame_sizes_and_the_fit_filter() {
+        assert_eq!(
+            parse_frame_sizes("64,128\n128,64\n64,128,\n\n0,0\nwidth,height\n128,64\r\n"),
+            [(64, 128), (128, 64)]
+        );
+        assert!(parse_frame_sizes("").is_empty());
+        let filter = fit_filter((1080, 2400));
+        assert!(
+            filter
+                .starts_with("scale=w='if(lte(1080/iw\\,2400/ih)\\,1080\\,2*trunc(iw*2400/ih/2))'"),
+            "{filter}"
+        );
+        assert!(filter
+            .contains(",pad=1080:2400:x='2*trunc((ow-iw)/4)':y='2*trunc((oh-ih)/4)',setsar=1"));
+    }
+
+    /// The RGB pixels of `video`'s frame at `seconds`.
+    fn frame_rgb(video: &Path, seconds: f64) -> Vec<u8> {
+        let mut command = deps::command("ffmpeg").unwrap();
+        command
+            .args(["-v", "error", "-ss", &format!("{seconds:.3}"), "-i"])
+            .arg(video)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
+        let output = output_with_timeout(command, Duration::from_secs(30)).unwrap();
+        assert!(output.status.success());
+        output.stdout
+    }
+
+    #[test]
+    #[ignore = "Requires FFmpeg; finalizes a synthetic device recording whose frame size changes twice"]
+    fn actual_device_finalize_keeps_frames_after_a_turn() {
+        let folder = tempfile::tempdir().unwrap();
+        // Like scrcpy after two rotations: one H.264 stream, red 64x128, then
+        // blue 128x64, then green 64x128, one second each, with in-band
+        // parameter sets at each size change.
+        let mut stream = Vec::new();
+        for (color, size) in [("red", "64x128"), ("blue", "128x64"), ("green", "64x128")] {
+            let part = folder.path().join(format!("{color}.h264"));
+            let mut command = deps::command("ffmpeg").unwrap();
+            command
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+                .arg(format!("color=c={color}:s={size}:r=30:d=1"))
+                .args([
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
+                .args(["-bf", "0", "-f", "h264"])
+                .arg(&part);
+            ffmpeg(command).unwrap();
+            stream.extend(fs::read(&part).unwrap());
+        }
+        let raw = folder.path().join("turned.h264");
+        fs::write(&raw, stream).unwrap();
+        let input = folder.path().join("native-video.mkv");
+        let mut command = deps::command("ffmpeg").unwrap();
+        command
+            .args(["-y", "-v", "error", "-framerate", "30", "-i"])
+            .arg(&raw)
+            .args(["-c", "copy"])
+            .arg(&input);
+        ffmpeg(command).unwrap();
+        assert_eq!(device_frame_sizes(&input).unwrap(), [(64, 128), (128, 64)]);
+
+        // The first frame arrives 0.5 s after the epoch.
+        finalize(
+            folder.path(),
+            &input,
+            Duration::from_secs_f64(3.5),
+            0.5,
+            30,
+            false,
+            true,
+            serde_json::Map::new(),
+        )
+        .unwrap();
+        let timing: serde_json::Value =
+            serde_json::from_slice(&fs::read(folder.path().join("capture-timing.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            timing["frameSizes"],
+            serde_json::json!([[64, 128], [128, 64]])
+        );
+        assert!(!folder.path().join("native-video.letterboxed.mkv").exists());
+        let video = folder.path().join("video.mp4");
+        let pixel = |frame: &[u8], x: usize, y: usize| {
+            let at = (y * 64 + x) * 3;
+            [frame[at], frame[at + 1], frame[at + 2]]
+        };
+        let is = |[r, g, b]: [u8; 3], want: &str| match want {
+            "red" => r > 200 && g < 60 && b < 60,
+            "green" => g > 90 && r < 60 && b < 60,
+            "blue" => b > 200 && r < 60 && g < 60,
+            _ => r < 30 && g < 30 && b < 30,
+        };
+        // The landscape second keeps its time, 1.5 to 2.5 s after the 0.5 s
+        // start, to the frame, and is letterboxed into rows 48..80
+        // (`letterbox((128, 64), (64, 128))`), with black above and below.
+        // Before, it was lost and green followed red.
+        assert_eq!(letterbox((128, 64), (64, 128)), (0, 48, 64, 32));
+        for (seconds, center) in [
+            (0.2, "red"),
+            (1.45, "red"),
+            (1.55, "blue"),
+            (2.45, "blue"),
+            (2.55, "green"),
+            (3.4, "green"),
+        ] {
+            let frame = frame_rgb(&video, seconds);
+            assert_eq!(frame.len(), 64 * 128 * 3, "{seconds}");
+            assert!(
+                is(pixel(&frame, 32, 64), center),
+                "{seconds}: {:?}",
+                pixel(&frame, 32, 64)
+            );
+            let edges = [pixel(&frame, 32, 40), pixel(&frame, 32, 88)];
+            if center == "blue" {
+                assert!(
+                    edges.iter().all(|&edge| is(edge, "black")),
+                    "{seconds}: {edges:?}"
+                );
+            } else {
+                assert!(
+                    edges.iter().all(|&edge| is(edge, center)),
+                    "{seconds}: {edges:?}"
+                );
+            }
+        }
     }
 
     #[test]

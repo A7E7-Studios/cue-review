@@ -96,12 +96,12 @@
 //! The mapping assumes scrcpy captures display 0 uncropped and unrotated,
 //! which is how [`crate::capture`] runs it. A rotation that keeps the
 //! canvas's shape (portrait to upside-down portrait) maps exactly. One
-//! between portrait and landscape makes scrcpy restart at the new size, and
-//! `finalize` currently loses those frames and shifts the rest of the take
-//! (the native recording still has them). Touches after such a rotation are
-//! still written as fractions of the rotated display over the canvas, which
-//! is right for a video that stretches those frames to the canvas, but the
-//! current video does not show them in place.
+//! between portrait and landscape makes scrcpy restart at the other shape,
+//! the canvas turned on its side, and `finalize` letterboxes those frames
+//! onto the canvas ([`crate::capture::letterbox`]). Step 3 then uses that
+//! letterbox instead of the whole canvas. Which shape is current comes from
+//! the rotation against the one read at the start, when the canvas was
+//! recorded.
 //!
 //! # Clock
 //!
@@ -129,7 +129,7 @@
 //! median.
 
 use crate::{
-    capture::adb,
+    capture::{adb, letterbox},
     cursor::{self, CursorWriter, Header, Position, Sample},
     deps,
 };
@@ -409,6 +409,12 @@ impl Rotation {
             _ => return None,
         })
     }
+
+    /// Whether turning between `self` and `other` swaps portrait and
+    /// landscape.
+    fn transposes(self, other: Self) -> bool {
+        (self as u8 ^ other as u8) & 1 == 1
+    }
 }
 
 /// The rotation of display 0 in `dumpsys input` output: the `orientation=`
@@ -427,11 +433,13 @@ pub fn parse_rotation(dumpsys: &str) -> Option<Rotation> {
     })
 }
 
-/// A raw panel position in canvas pixels; see the module docs. Raw values
-/// outside the axis range land outside the canvas.
+/// A raw panel position in canvas pixels; see the module docs. `start` is
+/// the rotation when the canvas was recorded. Raw values outside the axis
+/// range land outside the picture.
 pub fn place(
     screen: &Touchscreen,
     rotation: Rotation,
+    start: Rotation,
     canvas: (u32, u32),
     (x, y): (i32, i32),
 ) -> (i32, i32) {
@@ -446,9 +454,16 @@ pub fn place(
         Rotation::Deg180 => (1.0 - u, 1.0 - v),
         Rotation::Deg270 => (1.0 - v, u),
     };
+    // Turned between portrait and landscape, scrcpy records the other shape,
+    // which `finalize` letterboxes onto the canvas.
+    let (left, top, width, height) = if rotation.transposes(start) {
+        letterbox((canvas.1, canvas.0), (canvas.0 / 2 * 2, canvas.1 / 2 * 2))
+    } else {
+        (0, 0, canvas.0, canvas.1)
+    };
     (
-        (x * f64::from(canvas.0)).floor() as i32,
-        (y * f64::from(canvas.1)).floor() as i32,
+        left as i32 + (x * f64::from(width)).floor() as i32,
+        top as i32 + (y * f64::from(height)).floor() as i32,
     )
 }
 
@@ -748,6 +763,8 @@ struct Recorder<W: Write> {
     track: Track<W>,
     canvas: (u32, u32),
     rotation: Rotation,
+    /// The rotation when the canvas was recorded.
+    start: Rotation,
     delays: Vec<u32>,
     frames: u64,
 }
@@ -777,6 +794,7 @@ impl<W: Write> Recorder<W> {
             },
             canvas,
             rotation,
+            start: rotation,
             delays: Vec::new(),
             frames: 0,
         })
@@ -833,6 +851,7 @@ impl<W: Write> Recorder<W> {
                 Touch::Down(x, y) | Touch::Move(x, y) => Some(place(
                     &self.screens[index].0,
                     self.rotation,
+                    self.start,
                     self.canvas,
                     (x, y),
                 )),
@@ -1450,7 +1469,7 @@ add device 4: /dev/input/event7
         let place_all = |rotation, canvas| {
             corners
                 .iter()
-                .map(|&at| place(&panel, rotation, canvas, at))
+                .map(|&at| place(&panel, rotation, rotation, canvas, at))
                 .collect::<Vec<_>>()
         };
         // Natural top-left, top-right, bottom-right and bottom-left corners.
@@ -1474,30 +1493,66 @@ add device 4: /dev/input/event7
         );
         // The center, and a quarter of the way along each axis.
         assert_eq!(
-            place(&panel, Rotation::Deg0, portrait, (16384, 16384)),
+            place(
+                &panel,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                portrait,
+                (16384, 16384)
+            ),
             (540, 1200)
         );
         assert_eq!(
-            place(&panel, Rotation::Deg0, portrait, (8192, 24576)),
+            place(
+                &panel,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                portrait,
+                (8192, 24576)
+            ),
             (270, 1800)
         );
         assert_eq!(
-            place(&panel, Rotation::Deg90, landscape, (8192, 24576)),
+            place(
+                &panel,
+                Rotation::Deg90,
+                Rotation::Deg90,
+                landscape,
+                (8192, 24576)
+            ),
             (1800, 809)
         );
         // A panel in display pixels maps 1:1, and onto a scrcpy video
         // rounded to multiples of 8 (1080x2340 is recorded as 1080x2336).
         let pixels = screen(1079, 2339);
         assert_eq!(
-            place(&pixels, Rotation::Deg0, (1080, 2340), (517, 2339)),
+            place(
+                &pixels,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                (1080, 2340),
+                (517, 2339)
+            ),
             (517, 2339)
         );
         assert_eq!(
-            place(&pixels, Rotation::Deg0, (1080, 2336), (517, 2339)),
+            place(
+                &pixels,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                (1080, 2336),
+                (517, 2339)
+            ),
             (517, 2335)
         );
         assert_eq!(
-            place(&pixels, Rotation::Deg0, (1080, 2336), (517, 1170)),
+            place(
+                &pixels,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                (1080, 2336),
+                (517, 1170)
+            ),
             (517, 1168)
         );
         // A nonzero minimum, and raw values outside the range leave the canvas.
@@ -1509,16 +1564,81 @@ add device 4: /dev/input/event7
             ..pixels
         };
         assert_eq!(
-            place(&offset, Rotation::Deg0, (1080, 2340), (100, 0)),
+            place(
+                &offset,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                (1080, 2340),
+                (100, 0)
+            ),
             (0, 0)
         );
         assert_eq!(
-            place(&offset, Rotation::Deg0, (1080, 2340), (99, -1)),
+            place(
+                &offset,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                (1080, 2340),
+                (99, -1)
+            ),
             (-1, -1)
         );
         assert_eq!(
-            place(&offset, Rotation::Deg0, (1080, 2340), (1180, 2340)),
+            place(
+                &offset,
+                Rotation::Deg0,
+                Rotation::Deg0,
+                (1080, 2340),
+                (1180, 2340)
+            ),
             (1080, 2340)
+        );
+    }
+
+    #[test]
+    fn a_turn_between_portrait_and_landscape_places_into_the_letterbox() {
+        // `finalize` fits a 2400x1080 frame onto a 1080x2400 canvas as
+        // 1080x486, 956 px from the top, and the other way round as 486x1080.
+        assert_eq!(letterbox((2400, 1080), (1080, 2400)), (0, 956, 1080, 486));
+        assert_eq!(letterbox((1080, 2400), (2400, 1080)), (956, 0, 486, 1080));
+        assert_eq!(letterbox((1080, 2400), (1080, 2400)), (0, 0, 1080, 2400));
+        // Sizes stay even: 1080 * 1080 / 2336 is 499.3.
+        assert_eq!(letterbox((2336, 1080), (1080, 2336)), (0, 918, 1080, 498));
+        let panel = screen(32767, 32767);
+        let portrait = (1080, 2400);
+        let at = |rotation, start, canvas, raw| place(&panel, rotation, start, canvas, raw);
+        // A take started in portrait, now landscape: natural top-right is the
+        // letterbox's top-left, natural bottom-left its bottom-right.
+        assert_eq!(
+            at(Rotation::Deg90, Rotation::Deg0, portrait, (32767, 0)),
+            (0, 956)
+        );
+        assert_eq!(
+            at(Rotation::Deg90, Rotation::Deg0, portrait, (0, 32767)),
+            (1079, 1441)
+        );
+        assert_eq!(
+            at(Rotation::Deg90, Rotation::Deg0, portrait, (16384, 16384)),
+            (540, 1198)
+        );
+        assert_eq!(
+            at(Rotation::Deg270, Rotation::Deg0, portrait, (0, 0)),
+            (1079, 956)
+        );
+        // Upside down keeps the canvas's shape: no letterbox.
+        assert_eq!(
+            at(Rotation::Deg180, Rotation::Deg0, portrait, (0, 0)),
+            (1079, 2399)
+        );
+        // A take started in landscape, now portrait: pillarboxed.
+        let landscape = (2400, 1080);
+        assert_eq!(
+            at(Rotation::Deg0, Rotation::Deg90, landscape, (0, 0)),
+            (956, 0)
+        );
+        assert_eq!(
+            at(Rotation::Deg0, Rotation::Deg90, landscape, (32767, 32767)),
+            (1441, 1079)
         );
     }
 
