@@ -1238,9 +1238,12 @@ fn preview_url(bytes: &[u8]) -> String {
 
 pub fn preview(source_id: &str) -> Result<String, String> {
     let bytes = if let Some(serial) = source_id.strip_prefix("android:") {
-        let mut cmd = deps::command("adb")?;
-        cmd.args(["-s", serial, "exec-out", "screencap", "-p"]);
-        let out = output_with_timeout(cmd, Duration::from_secs(8))?;
+        let out = adb(
+            serial,
+            &["exec-out", "screencap", "-p"],
+            Duration::from_secs(8),
+            &|| false,
+        )?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).into_owned());
         }
@@ -1731,6 +1734,12 @@ pub fn start_muted(
         capture.level.clone(),
         capture.error.clone(),
     )?);
+    // Touches are read from the start, beside scrcpy, so getevent already
+    // runs when the first frame arrives; the reader learns the canvas then.
+    let reader = config
+        .source_id
+        .strip_prefix("android:")
+        .map(|serial| touch::Reader::start(serial, folder, capture.epoch));
     let result = (|| {
         if let Some(serial) = config.source_id.strip_prefix("android:") {
             let input = folder.join("native-video.mkv");
@@ -1842,15 +1851,14 @@ pub fn start_muted(
                     canvas,
                 ));
             }
-            // Touches are read once scrcpy has decoded its first frame.
-            if let (Some(serial), VideoCapture::Process { canvas, .. }) =
-                (config.source_id.strip_prefix("android:"), &video)
-            {
-                capture.touch = Some(touch::Reader::start(serial, folder, capture.epoch, *canvas));
+            if let (Some(reader), VideoCapture::Process { canvas, .. }) = (reader, &video) {
+                reader.set_canvas(*canvas);
+                capture.touch = Some(reader);
             }
             capture.video = Some(video);
             Ok(capture)
         }
+        // A reader dropped here stops before it writes anything.
         Err(e) => {
             if let Some(mut audio) = capture.audio.take() {
                 let _ = audio.stop(capture.epoch.elapsed());
@@ -2062,8 +2070,18 @@ impl Drop for ActiveCapture {
 }
 
 pub(crate) fn output_with_timeout(
+    command: std::process::Command,
+    timeout: Duration,
+) -> Result<Output, String> {
+    output_until(command, timeout, &|| false)
+}
+
+/// [`output_with_timeout`], killing the command as soon as `cancelled`
+/// returns true (checked every 20 ms).
+pub(crate) fn output_until(
     mut command: std::process::Command,
     timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
     let mut child = command
         .stdin(Stdio::null())
@@ -2083,9 +2101,15 @@ pub(crate) fn output_with_timeout(
     let err = read(Box::new(stderr));
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    let mut stopped = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if cancelled() => {
+                stopped = true;
+                let _ = child.kill();
+                break child.wait().map_err(|e| e.to_string())?;
+            }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             _ => {
                 timed_out = true;
@@ -2108,11 +2132,27 @@ pub(crate) fn output_with_timeout(
             timeout.as_secs()
         ));
     }
+    if stopped {
+        return Err("Capture command was stopped".into());
+    }
     Ok(Output {
         status,
         stdout,
         stderr,
     })
+}
+
+/// `adb -s <serial> <args>`, killed after `timeout` or once `cancelled`
+/// returns true.
+pub(crate) fn adb(
+    serial: &str,
+    args: &[&str],
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Output, String> {
+    let mut command = deps::command("adb")?;
+    command.args(["-s", serial]).args(args);
+    output_until(command, timeout, cancelled)
 }
 fn ffmpeg(command: std::process::Command) -> Result<(), String> {
     let out = output_with_timeout(command, Duration::from_secs(3600))?;
@@ -2139,8 +2179,7 @@ fn ready_process(
     epoch: Instant,
 ) -> Result<VideoCapture, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut decoded_delay = None;
-    let mut canvas = None;
+    let mut decoded = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -2155,18 +2194,20 @@ fn ready_process(
                 return Err(error.to_string());
             }
         }
-        let ready_delay = if window_title.is_some() {
+        // The delay and the canvas, latched together: a later unreadable log
+        // must not lose the canvas while the window is awaited below.
+        let ready = if window_title.is_some() {
             let log = fs::read_to_string(input.with_file_name("capture.log")).unwrap_or_default();
-            canvas = scrcpy_texture(&log);
-            latch_scrcpy_frame(&log, &mut decoded_delay, epoch.elapsed().as_secs_f64())
+            latch_scrcpy_frame(&log, &mut decoded, epoch.elapsed().as_secs_f64())
+                .map(|(delay, canvas)| (delay, Some(canvas)))
         } else {
             input
                 .metadata()
                 .ok()
                 .filter(|m| m.len() >= 512)
-                .map(|_| epoch.elapsed().as_secs_f64())
+                .map(|_| (epoch.elapsed().as_secs_f64(), None))
         };
-        if let Some(delay) = ready_delay {
+        if let Some((delay, canvas)) = ready {
             #[cfg(windows)]
             if let Some(title) = window_title.as_ref() {
                 if let Ok(window) = Window::from_name(title) {
@@ -2217,11 +2258,17 @@ fn scrcpy_texture(log: &str) -> Option<(u32, u32)> {
             Some((positive(width)?, positive(height)?))
         })
 }
-fn latch_scrcpy_frame(log: &str, latched: &mut Option<f64>, now: f64) -> Option<f64> {
+/// When scrcpy's first frame was decoded, and its size: `(now, canvas)` from
+/// the first call whose `log` has the texture line, unchanged after that.
+fn latch_scrcpy_frame(
+    log: &str,
+    latched: &mut Option<(f64, (u32, u32))>,
+    now: f64,
+) -> Option<(f64, (u32, u32))> {
     // v4.1 emits this unbuffered line when uploading its first decoded frame.
     // Window creation and Matroska flush timing do not identify that frame.
-    if latched.is_none() && scrcpy_texture(log).is_some() {
-        *latched = Some(now);
+    if latched.is_none() {
+        *latched = scrcpy_texture(log).map(|canvas| (now, canvas));
     }
     *latched
 }
@@ -3335,6 +3382,32 @@ mod tests {
         );
     }
     #[test]
+    fn a_cancelled_command_is_killed_at_once() {
+        // Five seconds, unless killed.
+        #[cfg(windows)]
+        let command = {
+            let mut command = std::process::Command::new("ping");
+            command.args(["-n", "6", "127.0.0.1"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let command = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("5");
+            command
+        };
+        let started = Instant::now();
+        let cancelled = || started.elapsed() > Duration::from_millis(100);
+        let result = output_until(command, Duration::from_secs(30), &cancelled);
+        assert_eq!(result.err().as_deref(), Some("Capture command was stopped"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn scrcpy_readiness_uses_first_complete_decoded_texture_line() {
         let mut seen = None;
         for log in [
@@ -3349,12 +3422,16 @@ mod tests {
         }
         assert_eq!(
             latch_scrcpy_frame("INFO: Texture: 4128x2208\r\n", &mut seen, 0.6),
-            Some(0.6)
+            Some((0.6, (4128, 2208)))
         );
-        assert_eq!(
-            latch_scrcpy_frame("INFO: Texture: 2208x4128\n", &mut seen, 5.6),
-            Some(0.6)
-        );
+        // Latched with the delay: a later rotation's size, or a log that
+        // could not be read while the window is awaited, changes neither.
+        for log in ["INFO: Texture: 2208x4128\n", ""] {
+            assert_eq!(
+                latch_scrcpy_frame(log, &mut seen, 5.6),
+                Some((0.6, (4128, 2208)))
+            );
+        }
         // The canvas is the first complete line's size, not a later rotation's.
         assert_eq!(
             scrcpy_texture(
