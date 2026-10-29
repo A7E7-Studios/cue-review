@@ -48,7 +48,10 @@
 //! slot does come from `getevent -lp` (`ABS_MT_SLOT`'s value).
 //! `SYN_DROPPED` starts a gap and forgets every contact, so a finger already
 //! down is not followed until it touches again; `BTN_TOUCH` up ends every
-//! contact.
+//! contact. A contact whose tool type is `MT_TOOL_PALM` does not touch, as
+//! InputReader cancels palm pointers, and one that turns into a finger
+//! touches down then. The Pixel 8 flags some deliberate taps near its corners
+//! as palms from start to finish; Android does not deliver those either.
 //!
 //! The primary contact becomes `cursor.jsonl` samples (see [`crate::cursor`]):
 //! touch-down is a sample with no buttons and one with [`cursor::LEFT`] at the
@@ -98,16 +101,17 @@
 //! buffering does, and lie that fastest delivery after the touch on the
 //! epoch. Each frame's delay beyond the fastest one, as the reader saw it, is
 //! recorded as `touchDelayMs` (`frames`, `p50`, `p95`, `max`) in
-//! `capture-timing.json`. A touch-down's rotation read (about 50 ms) delays
+//! `capture-timing.json`. A touch-down's rotation read (50 to 160 ms) delays
 //! the frames queued behind it, but not their times.
 //!
 //! The video itself runs behind the device: scrcpy's first decoded frame
 //! anchors the video at `videoHostStartMs`, after the device captured,
 //! encoded and sent it. A frame exported at a touch's time therefore shows
-//! the screen just before the finger landed. On the Android 15 emulator,
-//! Android's "Show taps" dot appeared in the 30 fps video 89 to 128 ms after
-//! the touch's time (that includes drawing the dot), and `touchDelayMs` was
-//! 0.4 ms at the median.
+//! the screen just before the finger landed. Android's "Show taps" dot
+//! appeared in the 30 fps video a median 99 ms (77 to 128 ms) after the
+//! touch's time on a Pixel 8, and 89 to 128 ms on the Android 15 emulator
+//! (that includes drawing the dot); `touchDelayMs` was 4.0 and 0.4 ms at the
+//! median.
 
 use crate::{
     capture::output_with_timeout,
@@ -137,7 +141,9 @@ const BTN_TOUCH: u16 = 0x14a;
 const ABS_MT_SLOT: u16 = 0x2f;
 const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
+const ABS_MT_TOOL_TYPE: u16 = 0x37;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
+const MT_TOOL_PALM: i32 = 0x02;
 /// Slots beyond this are ignored; panels have about ten.
 const MAX_SLOTS: usize = 64;
 
@@ -181,18 +187,22 @@ fn event_code(token: &str) -> Option<u16> {
         "ABS_MT_SLOT" => ABS_MT_SLOT,
         "ABS_MT_POSITION_X" => ABS_MT_POSITION_X,
         "ABS_MT_POSITION_Y" => ABS_MT_POSITION_Y,
+        "ABS_MT_TOOL_TYPE" => ABS_MT_TOOL_TYPE,
         "ABS_MT_TRACKING_ID" => ABS_MT_TRACKING_ID,
         _ if token.len() == 4 => u16::from_str_radix(token, 16).ok()?,
         _ => return None,
     })
 }
 
-/// A value: a key state label or eight hex digits, as two's complement.
+/// A value: a key state or tool type label, or eight hex digits as two's
+/// complement.
 fn event_value(token: &str) -> Option<i32> {
     Some(match token {
-        "UP" => 0,
-        "DOWN" => 1,
+        "UP" | "MT_TOOL_FINGER" => 0,
+        "DOWN" | "MT_TOOL_PEN" => 1,
         "REPEAT" => 2,
+        "MT_TOOL_PALM" => MT_TOOL_PALM,
+        "MT_TOOL_DIAL" => 0x0a,
         _ if token.len() == 8 => u32::from_str_radix(token, 16).ok()? as i32,
         _ => return None,
     })
@@ -432,22 +442,30 @@ pub enum Touch {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Slot {
-    /// The tracking id at the last `SYN_REPORT`.
+    /// [`Slot::touching`] at the last `SYN_REPORT`.
     reported: Option<i32>,
     /// The tracking id now; `None` when no contact uses the slot.
     id: Option<i32>,
+    /// The tool type is `MT_TOOL_PALM`. Like positions, it is only sent when
+    /// it changes, so it carries over to the slot's next contact.
+    palm: bool,
     x: Option<i32>,
     y: Option<i32>,
 }
 
 impl Slot {
-    /// A contact that was already down at the last frame.
-    fn continuing(&self) -> bool {
-        self.id.is_some() && self.id == self.reported
+    /// The tracking id of a contact that touches: a palm does not, as
+    /// InputReader cancels palm pointers.
+    fn touching(&self) -> Option<i32> {
+        self.id.filter(|_| !self.palm)
     }
-    /// A contact that started since the last frame.
+    /// A contact that was already touching at the last frame.
+    fn continuing(&self) -> bool {
+        self.touching().is_some() && self.touching() == self.reported
+    }
+    /// A contact that started touching since the last frame.
     fn started(&self) -> bool {
-        self.id.is_some() && self.id != self.reported
+        self.touching().is_some() && self.touching() != self.reported
     }
     fn position(&self) -> Option<(i32, i32)> {
         Some((self.x?, self.y?))
@@ -510,6 +528,11 @@ impl Contacts {
                     slot.id = (value >= 0).then_some(value);
                 }
             }
+            (EV_ABS, ABS_MT_TOOL_TYPE) => {
+                if let Some(slot) = self.current() {
+                    slot.palm = value == MT_TOOL_PALM;
+                }
+            }
             (EV_ABS, ABS_MT_POSITION_X) => {
                 if let Some(slot) = self.current() {
                     slot.x = Some(value);
@@ -559,7 +582,7 @@ impl Contacts {
             }
         }
         for slot in &mut self.slots {
-            slot.reported = slot.id;
+            slot.reported = slot.touching();
         }
         touches
     }
@@ -994,6 +1017,13 @@ mod tests {
     /// emulator in portrait, then after `wm user-rotation lock 1`.
     const EMULATOR_PORTRAIT: &str = include_str!("../fixtures/touch/emulator-rotation-0.txt");
     const EMULATOR_LANDSCAPE: &str = include_str!("../fixtures/touch/emulator-rotation-1.txt");
+    /// `getevent -lp` on a Pixel 8 with Android 17.
+    const PIXEL_LISTING: &str = include_str!("../fixtures/touch/pixel8-getevent-lp.txt");
+    /// `getevent -lt /dev/input/event3` on that Pixel 8 while it was tapped
+    /// near its bottom-left corner: a finger, a contact the panel flagged as
+    /// a palm throughout (Android showed no tap for it), a finger, and a
+    /// contact that started as a palm and turned into a finger.
+    const PIXEL_STREAM: &str = include_str!("../fixtures/touch/pixel8-getevent-lt.txt");
 
     fn screen(max_x: i32, max_y: i32) -> Touchscreen {
         Touchscreen {
@@ -1066,6 +1096,21 @@ mod tests {
             parse_event("[ 1.000002] EV_SYN SYN_REPORT 00000000").map(|e| (e.kind, e.code)),
             Some((EV_SYN, SYN_REPORT))
         );
+        // Android 17 labels tool types.
+        assert_eq!(
+            parse_event("[  155120.479000] EV_ABS       ABS_MT_TOOL_TYPE     MT_TOOL_PALM        ")
+                .map(|e| (e.code, e.value)),
+            Some((ABS_MT_TOOL_TYPE, MT_TOOL_PALM))
+        );
+        assert_eq!(
+            parse_event("[ 1.0] EV_ABS ABS_MT_TOOL_TYPE MT_TOOL_FINGER"),
+            None,
+            "a short stamp"
+        );
+        assert_eq!(
+            parse_event("[ 1.000000] EV_ABS ABS_MT_TOOL_TYPE MT_TOOL_FINGER").map(|e| e.value),
+            Some(0)
+        );
         for line in [
             "add device 3: /dev/input/event2",
             "  name:     \"virtio_input_multi_touch_1\"",
@@ -1104,6 +1149,21 @@ mod tests {
                     slot: 0,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn pixel_listing_keeps_only_its_touchscreen() {
+        // Haptics, the fingerprint sensor, proximity and keys are not panels.
+        assert_eq!(
+            touchscreens(PIXEL_LISTING),
+            [Touchscreen {
+                path: "/dev/input/event3".into(),
+                name: "goodix_ts0".into(),
+                x: Axis { min: 0, max: 1079 },
+                y: Axis { min: 0, max: 2399 },
+                slot: 0,
+            }]
         );
     }
 
@@ -1174,6 +1234,11 @@ add device 4: /dev/input/event7
                  Viewport INTERNAL: displayId=0, uniqueId=local:1, port=0, orientation=3, logicalFrame=[0, 0, 2400, 1080]\n"
             ),
             Some(Rotation::Deg270)
+        );
+        // Android 17 on a Pixel 8 adds density fields.
+        assert_eq!(
+            parse_rotation("      Viewport INTERNAL: displayId=0, uniqueId=local:4619826886480892416, port=0, orientation=0, densityDpi=420 xDpi=428.625000, yDpi=426.292999, logicalFrame=[0, 0, 1080, 2400], physicalFrame=[0, 0, 1080, 2400], deviceSize=[1080, 2400], isActive=[1]"),
+            Some(Rotation::Deg0)
         );
         // Android 8: no viewport type.
         assert_eq!(
@@ -1374,6 +1439,37 @@ add device 4: /dev/input/event7
     }
 
     #[test]
+    fn palm_contacts_do_not_touch() {
+        let palm = (EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PALM);
+        let finger = (EV_ABS, ABS_MT_TOOL_TYPE, 0);
+        let mut contacts = Contacts::new(0);
+        // A palm from start to finish.
+        assert!(feed(
+            &mut contacts,
+            &[id(1), palm, x(10), y(20), SYN, x(11), SYN, id(-1), SYN]
+        )
+        .is_empty());
+        // The tool type carries over: the next contact is a palm until it
+        // turns into a finger, and touches down then.
+        assert!(feed(&mut contacts, &[id(2), SYN]).is_empty());
+        assert_eq!(
+            feed(&mut contacts, &[finger, x(12), SYN]),
+            [Touch::Down(12, 20)]
+        );
+        // A finger that becomes a palm is canceled.
+        assert_eq!(feed(&mut contacts, &[palm, SYN]), [Touch::Up]);
+        assert!(feed(&mut contacts, &[id(-1), SYN]).is_empty());
+        // A resting palm does not hold back a finger in another slot.
+        assert_eq!(
+            feed(
+                &mut contacts,
+                &[id(3), slot(1), id(4), finger, x(30), y(40), SYN]
+            ),
+            [Touch::Down(30, 40)]
+        );
+    }
+
+    #[test]
     fn dropped_events_lose_the_contact_until_it_touches_again() {
         let mut contacts = Contacts::new(0);
         assert_eq!(
@@ -1545,6 +1641,36 @@ add device 4: /dev/input/event7
         assert_eq!(at(1215), None);
         assert_eq!(at(1300), None);
         assert_eq!(track.at(1368).unwrap().x, 0.9995);
+    }
+
+    #[test]
+    fn the_pixel_stream_skips_its_palm_and_places_its_taps() {
+        let screens = touchscreens(PIXEL_LISTING);
+        let (text, outcome) = record(
+            PIXEL_STREAM,
+            screens,
+            (1080, 2400),
+            |_| 2_000,
+            &mut || None,
+            3_000,
+        );
+        assert_eq!(outcome.delay.unwrap().frames, 48);
+        let (_root, store, id) = session_with(&text, (1080, 2400));
+        let track = cursor::load(&store, &id).unwrap();
+        let clicks: Vec<(u64, i32, i32)> = track
+            .clicks(0, u64::MAX)
+            .iter()
+            .map(|click| (click.at.t_ms, click.at.px, click.at.py))
+            .collect();
+        // The panel is in display pixels, so canvas pixels are raw values.
+        // The palm-only contact (+387 ms) is not a press, and the last
+        // contact touches down at its first finger frame (+1033.677 ms), not
+        // at the palm frame before it.
+        assert_eq!(
+            clicks,
+            [(1002, 50, 2326), (1672, 58, 2339), (2035, 73, 2332)]
+        );
+        assert_eq!(track.at(1_420), None);
     }
 
     #[test]
