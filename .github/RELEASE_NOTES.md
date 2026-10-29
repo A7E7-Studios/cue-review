@@ -7,9 +7,10 @@ CueReview records visual feedback, transcribes it locally, and makes recordings 
 - **Keyboard shortcuts.** `Ctrl+R` (`⌘R` on macOS) records, records more or stops; `Ctrl+N` starts a new recording; `Ctrl+K` searches recordings by name. Hints appear when you hover over a control.
 - **Vocabulary.** In Settings, list names and terms the transcriber should expect. It is off by default.
 - **Pointer tracking (Windows).** Display and window recordings remember where the pointer was and when you clicked, so agents can see what "this" and "here" referred to.
+- **Touch tracking (Android).** Android device recordings remember where your finger touched, whether CueReview runs on Windows, macOS or Linux, so agents see your taps the same way they see the Windows pointer. It needs no root, follows the screen's rotation and ignores touches Android treats as palms.
 - **Agent CLI.** `cue transcript ID --segments` prints a compact, timestamped transcript; `cue frames` exports many frames in one call, one per segment if you like, scaled with `--max-width` and with the pointer ringed by `--mark-cursor`; `cue moments` lists spoken pointing moments with the pointer and nearby clicks; `cue rename` renames a session while the app is open; every command has `--help`. Copy for agent now suggests this workflow.
 - The transcript follows playback until you scroll away, then offers Return to playback, and you can search inside it. The theme setting moved to Settings → Appearance.
-- **Fixes.** The live preview no longer freezes after a few frames on some displays, and reconnects if its stream drops. Recordings in a copied or moved data folder play again. `Ctrl+R` and `F5` can no longer reload the window.
+- **Fixes.** The live preview no longer freezes after a few frames on some displays, and reconnects if its stream drops. Recordings in a copied or moved data folder play again. An Android recording keeps every frame when the phone turns between portrait and landscape; before, the turned part was lost and the rest played early. `Ctrl+R` and `F5` can no longer reload the window.
 
 ## Removed
 
@@ -18,7 +19,9 @@ CueReview records visual feedback, transcribes it locally, and makes recordings 
 
 ## Known limits
 
-- Pointer tracking works only for Windows display and window recordings, not for macOS, Linux, cameras or Android/Quest devices. Very short clicks (under about 16 ms) can be missed.
+- Pointer tracking works only for Windows display and window recordings, and touch tracking only for Android devices: not for macOS or Linux desktops, cameras or Meta Quest. Very short clicks (under about 16 ms) can be missed.
+- Touch tracking records the first finger of a gesture, not the others. A touch within about a second of turning the phone can be placed as if it had not turned yet.
+- When an Android recording turns between portrait and landscape, the turned part keeps the first part's frame size, with black bars, so it plays smaller.
 - On Windows, hovering the custom maximize button does not show the Snap Layouts menu.
 - The vocabulary takes at most 20 terms (200 characters) of plain ASCII. It makes those spellings more likely, not certain, and only affects transcriptions made after you save it.
 - Adding a take briefly needs about twice the recording's size in free disk space. If another program has the recording open, CueReview finishes adding the take after you close it and choose Retry, or the next time it starts.
