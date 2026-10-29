@@ -306,12 +306,19 @@ mod tests {
         // `store::tests::a_copied_data_folder_uses_its_own_session_files`.)
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path().into()).unwrap();
-        let escaped = serde_json::to_string(&root.path().to_string_lossy()).unwrap();
-        let in_place = LEGACY_SESSION.replace(
-            r"C:\\Users\\me\\AppData\\Local\\CueReview",
-            escaped.trim_matches('"'),
-        );
         let folder = store.session_dir(SESSION_ID).unwrap();
+        // Each stored path is swapped whole, so it uses this platform's
+        // separators and names the folder exactly as the store reads it.
+        let quoted =
+            |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+        let legacy_folder =
+            format!(r"C:\\Users\\me\\AppData\\Local\\CueReview\\sessions\\{SESSION_ID}");
+        let in_place = LEGACY_SESSION
+            .replace(
+                &format!(r#""{legacy_folder}\\video.mp4""#),
+                &quoted(&folder.join("video.mp4")),
+            )
+            .replace(&format!(r#""{legacy_folder}""#), &quoted(&folder));
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("session.json"), &in_place).unwrap();
         std::fs::write(folder.join("transcript.json"), LEGACY_TRANSCRIPT).unwrap();
