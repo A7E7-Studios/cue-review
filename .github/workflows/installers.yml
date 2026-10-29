@@ -1,0 +1,30 @@
+name: Installers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'specs/**'
+      - 'changes/**'
+
+permissions:
+  contents: read
+
+# A pull request packages only with the build-installers label. Runs that will
+# package share one group per ref, so the opened and labeled events of a pull
+# request created with the label build its commit once; any other label event
+# gets a group of its own and cancels nothing.
+concurrency:
+  group: installers-${{ github.ref }}-${{ (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'build-installers') && (github.event.action != 'labeled' || github.event.label.name == 'build-installers'))) && 'package' || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  installers:
+    name: build
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'build-installers') && (github.event.action != 'labeled' || github.event.label.name == 'build-installers'))
+    uses: ./.github/workflows/build.yml
