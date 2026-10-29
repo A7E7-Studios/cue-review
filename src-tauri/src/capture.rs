@@ -4,6 +4,7 @@ use crate::cursor;
 use crate::{
     deps,
     models::{CaptureConfig, CaptureSource, Microphone},
+    touch,
 };
 use base64::Engine;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -341,7 +342,7 @@ fn adb_sources(text: &str) -> Vec<CaptureSource> {
             .find_map(|s| s.strip_prefix("model:"))
             .unwrap_or(fields[0])
             .replace('_', " ");
-        let kind = if model.to_lowercase().contains("quest") {
+        let kind = if touch::is_quest(&model) {
             "quest"
         } else {
             "android"
@@ -1206,6 +1207,7 @@ mod pointer {
 fn timing_extra(
     canvas: Option<(u32, u32)>,
     cursor: Option<Result<u64, String>>,
+    touch_delay: Option<touch::Delay>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut extra = serde_json::Map::new();
     if let Some((width, height)) = canvas {
@@ -1220,6 +1222,9 @@ fn timing_extra(
             extra.insert("cursorError".into(), error.into());
         }
         None => (),
+    }
+    if let Some(delay) = touch_delay.and_then(|delay| serde_json::to_value(delay).ok()) {
+        extra.insert("touchDelayMs".into(), delay);
     }
     extra
 }
@@ -1665,6 +1670,8 @@ enum VideoCapture {
         input: PathBuf,
         window_title: Option<String>,
         delay: f64,
+        /// scrcpy's first decoded frame size; `None` for FFmpeg captures.
+        canvas: Option<(u32, u32)>,
     },
 }
 pub struct ActiveCapture {
@@ -1681,6 +1688,8 @@ pub struct ActiveCapture {
     /// The cursor sampler of a native display or window capture.
     #[cfg(windows)]
     cursor: Option<pointer::Sampler>,
+    /// The touch reader of an Android device capture.
+    touch: Option<touch::Reader>,
 }
 pub fn start(config: CaptureConfig, folder: &Path) -> Result<ActiveCapture, String> {
     start_muted(config, folder, false)
@@ -1712,6 +1721,7 @@ pub fn start_muted(
         device_audio: config.system_audio && config.source_id.starts_with("android:"),
         #[cfg(windows)]
         cursor: None,
+        touch: None,
     };
     capture.audio = Some(AudioWorker::start(
         &config,
@@ -1832,6 +1842,12 @@ pub fn start_muted(
                     canvas,
                 ));
             }
+            // Touches are read once scrcpy has decoded its first frame.
+            if let (Some(serial), VideoCapture::Process { canvas, .. }) =
+                (config.source_id.strip_prefix("android:"), &video)
+            {
+                capture.touch = Some(touch::Reader::start(serial, folder, capture.epoch, *canvas));
+            }
             capture.video = Some(video);
             Ok(capture)
         }
@@ -1898,6 +1914,11 @@ impl ActiveCapture {
         let cursor = self.cursor.take().map(pointer::Sampler::stop);
         #[cfg(not(windows))]
         let cursor = None;
+        let (cursor, touch_delay) = match self.touch.take().and_then(touch::Reader::stop) {
+            Some(Ok(outcome)) => (Some(Ok(outcome.lines)), outcome.delay),
+            Some(Err(error)) => (Some(Err(error)), None),
+            None => (cursor, None),
+        };
         let duration = self.epoch.elapsed();
         self.stopped = Some(duration);
         let mut failures = Vec::new();
@@ -1927,6 +1948,7 @@ impl ActiveCapture {
                 input,
                 window_title,
                 delay: process_delay,
+                canvas,
             }) => {
                 device_capture = window_title.is_some();
                 delay = process_delay;
@@ -1986,7 +2008,7 @@ impl ActiveCapture {
                         }
                     }
                 }
-                (input, None)
+                (input, canvas)
             }
             None => (self.folder.join("native-video.mp4"), None),
         };
@@ -1998,7 +2020,7 @@ impl ActiveCapture {
             self.fps,
             self.device_audio,
             device_capture,
-            timing_extra(canvas, cursor),
+            timing_extra(canvas, cursor, touch_delay),
         ) {
             failures.push(e);
         }
@@ -2032,6 +2054,9 @@ impl Drop for ActiveCapture {
         #[cfg(windows)]
         if let Some(cursor) = self.cursor.take() {
             let _ = cursor.stop();
+        }
+        if let Some(touch) = self.touch.take() {
+            let _ = touch.stop();
         }
     }
 }
@@ -2115,6 +2140,7 @@ fn ready_process(
 ) -> Result<VideoCapture, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut decoded_delay = None;
+    let mut canvas = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -2131,6 +2157,7 @@ fn ready_process(
         }
         let ready_delay = if window_title.is_some() {
             let log = fs::read_to_string(input.with_file_name("capture.log")).unwrap_or_default();
+            canvas = scrcpy_texture(&log);
             latch_scrcpy_frame(&log, &mut decoded_delay, epoch.elapsed().as_secs_f64())
         } else {
             input
@@ -2167,6 +2194,7 @@ fn ready_process(
                 input,
                 window_title,
                 delay,
+                canvas,
             });
         }
         if Instant::now() >= deadline {
@@ -2177,23 +2205,22 @@ fn ready_process(
         thread::sleep(Duration::from_millis(30));
     }
 }
+/// The size of scrcpy's first decoded frame: its first complete
+/// `INFO: Texture: WxH` line. That is the recorded frame size, the canvas.
+fn scrcpy_texture(log: &str) -> Option<(u32, u32)> {
+    log.split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .find_map(|line| {
+            let size = line.trim().strip_prefix("INFO: Texture: ")?;
+            let (width, height) = size.split_once('x')?;
+            let positive = |n: &str| n.parse::<u32>().ok().filter(|n| *n > 0);
+            Some((positive(width)?, positive(height)?))
+        })
+}
 fn latch_scrcpy_frame(log: &str, latched: &mut Option<f64>, now: f64) -> Option<f64> {
     // v4.1 emits this unbuffered line when uploading its first decoded frame.
     // Window creation and Matroska flush timing do not identify that frame.
-    if latched.is_none()
-        && log.split_inclusive('\n').any(|line| {
-            if !line.ends_with('\n') {
-                return false;
-            }
-            let Some(size) = line.trim().strip_prefix("INFO: Texture: ") else {
-                return false;
-            };
-            let Some((width, height)) = size.split_once('x') else {
-                return false;
-            };
-            width.parse::<u32>().is_ok_and(|n| n > 0) && height.parse::<u32>().is_ok_and(|n| n > 0)
-        })
-    {
+    if latched.is_none() && scrcpy_texture(log).is_some() {
         *latched = Some(now);
     }
     *latched
@@ -2754,14 +2781,25 @@ mod tests {
     #[test]
     fn capture_timing_gains_canvas_and_cursor_keys() {
         assert_eq!(
-            serde_json::Value::Object(timing_extra(Some((1281, 721)), Some(Ok(42)))),
+            serde_json::Value::Object(timing_extra(Some((1281, 721)), Some(Ok(42)), None)),
             serde_json::json!({"canvasWidth":1281,"canvasHeight":721,"cursorLines":42})
         );
         assert_eq!(
-            serde_json::Value::Object(timing_extra(None, Some(Err("denied".into())))),
+            serde_json::Value::Object(timing_extra(None, Some(Err("denied".into())), None)),
             serde_json::json!({"cursorError":"denied"})
         );
-        assert!(timing_extra(None, None).is_empty());
+        assert!(timing_extra(None, None, None).is_empty());
+        let delay = touch::Delay {
+            frames: 120,
+            p50: 1.5,
+            p95: 4.0,
+            max: 31.2,
+        };
+        assert_eq!(
+            serde_json::Value::Object(timing_extra(Some((1080, 2400)), Some(Ok(7)), Some(delay))),
+            serde_json::json!({"canvasWidth":1080,"canvasHeight":2400,"cursorLines":7,
+                "touchDelayMs":{"frames":120,"p50":1.5,"p95":4.0,"max":31.2}})
+        );
     }
 
     #[test]
@@ -3317,6 +3355,14 @@ mod tests {
             latch_scrcpy_frame("INFO: Texture: 2208x4128\n", &mut seen, 5.6),
             Some(0.6)
         );
+        // The canvas is the first complete line's size, not a later rotation's.
+        assert_eq!(
+            scrcpy_texture(
+                "INFO: Texture: 0x2208\nINFO: Texture: 1080x2400\r\nINFO: Texture: 2400x1080\n"
+            ),
+            Some((1080, 2400))
+        );
+        assert_eq!(scrcpy_texture("INFO: Texture: 1080x2400"), None);
     }
     #[test]
     fn device_audio_preserves_native_offset_before_host_zero_trimming() {
@@ -4489,6 +4535,7 @@ mod tests {
             fps: 30,
             device_audio: false,
             cursor: None,
+            touch: None,
         };
         let began = Instant::now();
         let stopped = early.stop();

@@ -66,7 +66,7 @@ Before transcription, a local detector checks for speech. An explicit successful
 
 During recording, local transcription updates in short batches from the latest 30 seconds of microphone audio, or Windows system audio when no microphone is selected (roughly every eight seconds plus inference time). These provisional words may change; stopping recomputes the take's authoritative transcript. If local speech setup is missing, the recording remains usable and can be transcribed later. Device audio without a PC microphone is transcribed after stopping. System audio uses WASAPI loopback for Windows sources; supported Android devices use scrcpy's device audio.
 
-On Windows, display and window recordings also record where the pointer was and when buttons were pressed (`cursor.jsonl`). The agent CLI reports it with frames and moments, and can draw a ring at the pointer on exported frames. Nothing is recorded for device sources, cameras, macOS or Linux.
+On Windows, display and window recordings also record where the pointer was and when buttons were pressed (`cursor.jsonl`). Android device recordings record where the screen was touched, on every platform: the first finger of each touch, as a left-button press. The agent CLI reports it with frames and moments, and can draw a ring at the pointer on exported frames. Nothing is recorded for Quest, cameras, or macOS and Linux desktops.
 
 ## Storage
 
@@ -86,7 +86,7 @@ CueReview\
     mic.wav  system.wav    take 1's lossless audio tracks, as recorded
     transcript.json  transcript.txt
     whisper.json  vad.txt  vad.log
-    cursor.jsonl           take 1's pointer track (Windows display and window sources)
+    cursor.jsonl           take 1's pointer track (Windows display and window sources, Android touches)
     capture-timing.json    take 1's capture clock and canvas
     markers.json           v0.1 markers, kept readable for one release
     exports\               frames and clips written by cue
@@ -122,7 +122,7 @@ The packages include `cue.exe` on Windows and `cue` on macOS/Linux next to the a
 
 `cue --help` lists every command, and `cue COMMAND --help` (or `cue help COMMAND`) prints one command's options and exits 0 without opening the data folder. Unknown options are rejected. `--max-width` scales frames down to at most N pixels wide and never up. Quote `--at-ms` lists in PowerShell (`--at-ms '1000,2500'`).
 
-`cursor` is where the pointer was at that time, `{tMs, x, y, px, py, inVideo}`: `x`/`y` are fractions of the video width and height (outside 0–1 when the pointer was off the source), `px`/`py` are video pixels, and `inVideo` is false when the pointer was on another monitor or over a window covering the source. A click is the same plus `button` (`left`, `right` or `middle`). `cursor` is `null` (or absent in `find` and `transcript --json`) when the session has no pointer track or the pointer was unknown; `--mark-cursor` then draws nothing.
+`cursor` is where the pointer was at that time, `{tMs, x, y, px, py, inVideo}`: `x`/`y` are fractions of the video width and height (outside 0–1 when the pointer was off the source), `px`/`py` are video pixels, and `inVideo` is false when the pointer was on another monitor or over a window covering the source. A click is the same plus `button` (`left`, `right` or `middle`). On an Android recording, `cursor` is the finger while it touches the screen and a touch-down is a `left` click; between touches there is no position. `cursor` is `null` (or absent in `find` and `transcript --json`) when the session has no pointer track or the pointer was unknown; `--mark-cursor` then draws nothing.
 
 The recommended agent workflow, which Copy for agent spells out with full paths:
 

@@ -1,4 +1,6 @@
-//! Cursor tracking for Windows display and window captures (plan item C1).
+//! Cursor tracking for Windows display and window captures (plan item C1),
+//! and the `cursor.jsonl` format that Android touch tracking
+//! ([`crate::touch`]) writes too.
 //!
 //! # Recording
 //!
@@ -48,8 +50,9 @@
 //! - `[dt, dx, dy, state]` is the same, and the state changed to `state`:
 //!   bit 0 left, bit 1 right and bit 2 middle button held ([`LEFT`],
 //!   [`RIGHT`], [`MIDDLE`]), bit 3 [`OUTSIDE`] the source.
-//! - `[dt]` is a gap (secure desktop, minimized or closed window). Gaps keep
-//!   the previous position and state for the deltas that follow.
+//! - `[dt]` is a gap (secure desktop, minimized or closed window, a lifted
+//!   finger). Gaps keep the previous position and state for the deltas that
+//!   follow.
 //!
 //! A line is written whenever the position or state changes, and at least
 //! every [`HEARTBEAT_MS`] otherwise. A press and release between two polls
@@ -87,10 +90,19 @@
 //!
 //! # Other platforms
 //!
-//! macOS and Linux have no sampler, and neither do device sources (Android
-//! and Quest through scrcpy) and cameras (DirectShow, AVFoundation, V4L2),
-//! whose pictures do not contain the host pointer. [`load`] then finds no
-//! file and returns `None`. Adding the desktop platforms would need:
+//! Android device sources (scrcpy) write touches into this format on every
+//! platform; [`crate::touch`] describes how. The primary finger is the
+//! pointer: a touch-down is a [`LEFT`] press, the finger is held down while
+//! it moves, and lifting it releases and starts a gap, since touch has no
+//! hover position. The header's `source` is `"device"`; [`load`], `at`,
+//! `clicks` and [`mark_png`] treat it like any other track. Extra fingers are
+//! not recorded, which keeps the format at version 1.
+//!
+//! Meta Quest has no track: its controllers and hand tracking are not
+//! Android input devices. Neither do cameras (DirectShow, AVFoundation,
+//! V4L2), whose pictures do not contain the host pointer, nor macOS and
+//! Linux desktop sources, which have no sampler. [`load`] then finds no file
+//! and returns `None`. Adding the desktop platforms would need:
 //!
 //! - **macOS** (`avfoundation` "Capture screen N"): poll
 //!   `CGEventGetLocation(CGEventCreate(NULL))`, which is global display space
@@ -195,7 +207,7 @@ pub struct Header {
     pub format: String,
     /// Always [`VERSION`] for files this module can read.
     pub version: u32,
-    /// `"display"` or `"window"`.
+    /// `"display"` or `"window"`, or `"device"` for Android touches.
     pub source: String,
     /// The canvas (first video frame) in physical pixels; 0 when unknown.
     pub canvas_width: u32,
@@ -644,7 +656,7 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
 }
 
 /// The session's cursor track, or `None` when it has none: not recorded yet,
-/// recorded on macOS or Linux, from a device source, or unreadable.
+/// recorded on macOS or Linux, from a Quest or a camera, or unreadable.
 pub fn load(store: &Store, session_id: &str) -> Option<CursorTrack> {
     let folder = store.session_dir(session_id).ok()?;
     let session = store.session(session_id).ok()?;

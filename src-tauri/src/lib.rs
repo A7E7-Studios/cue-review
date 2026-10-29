@@ -8,6 +8,7 @@ pub mod preview;
 pub mod settings;
 pub mod store;
 pub mod takes;
+pub mod touch;
 pub mod transcribe;
 
 use models::*;
