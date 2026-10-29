@@ -4,15 +4,26 @@
 //!
 //! An `android:<serial>` source records through scrcpy with `--no-control`,
 //! so the host pointer never reaches the device and the Windows sampler has
-//! nothing to read. Instead, once scrcpy has decoded its first frame,
-//! [`crate::capture`] starts a [`Reader`] beside it, for the app and
-//! `cue record` alike. The reader's thread runs one probe,
-//! `adb -s <serial> shell` with [`PROBE`]: the product model,
-//! `getevent -lp` and the display rotation. It then streams
-//! `adb -s <serial> shell getevent -lt` (no root needed) into the take's
-//! `cursor.jsonl`. `ActiveCapture::stop` stops it first: it kills the adb
-//! client, which also ends `getevent` on the device, reads what is left and
-//! joins the thread.
+//! nothing to read. Instead [`crate::capture`] starts a [`Reader`] with the
+//! capture, beside scrcpy, for the app and `cue record` alike, and hands it
+//! the canvas ([`Reader::set_canvas`]) once scrcpy has decoded its first
+//! frame. Its thread first starts
+//! `adb -s <serial> shell getevent -lt` (no root needed) on every input
+//! device, then runs one probe, `adb -s <serial> shell` with [`PROBE`]: the
+//! product model, `getevent -lp` and the display rotation. A pump thread
+//! stamps each line as it is read and queues it until the probe has found the
+//! touchscreens and the canvas has come, so a tap right after Record, even
+//! before the first frame, is kept; only `getevent`'s own start (an adb round
+//! trip) is missed. The
+//! track goes into the take's `cursor.jsonl`, flushed about once a second.
+//! `ActiveCapture::stop` stops it first: it kills the adb client, which also
+//! ends `getevent` on the device, and any probe still running
+//! (`capture::output_until`), then reads what is left and joins the thread,
+//! so a stop never waits for a probe.
+//!
+//! A `getevent` that cannot open a touchscreen (it says so on stderr) or
+//! ends before the take does (the device went away) is an error, written to
+//! `capture-timing.json` as `cursorError`; the track written until then stays.
 //!
 //! Meta Quest is skipped ([`is_quest`]): its controllers and hand tracking
 //! are not Android input devices, so `getevent` has nothing to report.
@@ -25,9 +36,8 @@
 //! (`INPUT_PROP_POINTER`). When any of them has `INPUT_PROP_DIRECT`, only
 //! those remain. The emulator's `virtio_input_multi_touch_N` panels have
 //! neither property (IDC files make them touchscreens) and one per display;
-//! foldables have one per panel. A single touchscreen is passed to `getevent`
-//! by path; several are all read, and the first to start a contact owns the
-//! track until it lifts.
+//! foldables have one per panel. Every touchscreen's lines are read, and the
+//! first to start a contact owns the track until it lifts.
 //!
 //! # Contacts
 //!
@@ -46,9 +56,9 @@
 //! frame where both are known; a tap that lands exactly on the previous
 //! contact's raw x or y in a slot not yet seen is not written. The current
 //! slot does come from `getevent -lp` (`ABS_MT_SLOT`'s value).
-//! `SYN_DROPPED` starts a gap and forgets every contact, so a finger already
-//! down is not followed until it touches again; `BTN_TOUCH` up ends every
-//! contact. A contact whose tool type is `MT_TOOL_PALM` does not touch, as
+//! `SYN_DROPPED` releases the primary contact like a lift and forgets every
+//! contact, so a finger already down is not followed until it touches again;
+//! `BTN_TOUCH` up ends every contact. A contact whose tool type is `MT_TOOL_PALM` does not touch, as
 //! InputReader cancels palm pointers, and one that turns into a finger
 //! touches down then. The Pixel 8 flags some deliberate taps near its corners
 //! as palms from start to finish; Android does not deliver those either.
@@ -56,8 +66,9 @@
 //! The primary contact becomes `cursor.jsonl` samples (see [`crate::cursor`]):
 //! touch-down is a sample with no buttons and one with [`cursor::LEFT`] at the
 //! same time and place, so every touch, the take's first one included, is a
-//! press; a move is a `LEFT` sample; lifting is a sample with no buttons at
-//! the last place followed by a gap, since touch has no hover position.
+//! press; a move is a `LEFT` sample; lifting (or `SYN_DROPPED`) is a sample
+//! with no buttons at the last place followed by a gap, since touch has no
+//! hover position.
 //! While a finger rests, heartbeats are filled in up to the next frame (or
 //! the stop), so [`cursor::CursorTrack::at`] does not report a resting finger
 //! as stale. `over_source` is always true: nothing covers a device screen.
@@ -96,13 +107,17 @@
 //!
 //! `getevent -t` stamps each event with the device's own clock. [`Clock`]
 //! maps those stamps onto the capture epoch with the smallest
-//! `received - stamped` difference seen so far, the frame that crossed adb
-//! fastest. Times therefore keep the device's spacing whatever adb's
+//! `received - stamped` difference among the frames of the last
+//! [`CLOCK_PERIODS`] periods of [`CLOCK_PERIOD_US`] (20 to 30 s): the frame
+//! that crossed adb fastest. A window follows a device clock that drifts
+//! against the host's either way; a minimum kept for the whole take would
+//! follow only one that runs fast, and one 50 ppm slow would put times 90 ms
+//! early after 30 minutes. Times keep the device's spacing whatever adb's
 //! buffering does, and lie that fastest delivery after the touch on the
-//! epoch. Each frame's delay beyond the fastest one, as the reader saw it, is
-//! recorded as `touchDelayMs` (`frames`, `p50`, `p95`, `max`) in
-//! `capture-timing.json`. A touch-down's rotation read (50 to 160 ms) delays
-//! the frames queued behind it, but not their times.
+//! epoch. Each frame's delay beyond the fastest one is recorded as
+//! `touchDelayMs` (`frames`, `p50`, `p95`, `max`) in `capture-timing.json`.
+//! Lines are stamped by the pump as they are read, so the reader's own
+//! rotation reads delay nothing.
 //!
 //! The video itself runs behind the device: scrcpy's first decoded frame
 //! anchors the video at `videoHostStartMs`, after the device captured,
@@ -114,18 +129,20 @@
 //! median.
 
 use crate::{
-    capture::{letterbox, output_with_timeout},
+    capture::{adb, letterbox},
     cursor::{self, CursorWriter, Header, Position, Sample},
     deps,
 };
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     fs::File,
-    io::{self, BufRead, BufReader, BufWriter, Write},
+    io::{self, BufRead, BufReader, BufWriter, Read, Write},
     path::Path,
     process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -157,6 +174,14 @@ const ROTATION: &str = "dumpsys input | grep -e Viewport -e SurfaceOrientation";
 pub const ROTATION_REFRESH: Duration = Duration::from_secs(1);
 /// Frame delays kept for `touchDelayMs`, about 14 minutes of dragging at 240 Hz.
 const MAX_DELAYS: usize = 200_000;
+/// [`Clock`] keeps the smallest offset of each period this long, by host time…
+pub const CLOCK_PERIOD_US: i64 = 10_000_000;
+/// …for the current period and the ones before it, this many in all.
+pub const CLOCK_PERIODS: i64 = 3;
+/// How often the track is flushed while touches arrive.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// The result when the take stops before `getevent` could start.
+const STOPPED_EARLY: &str = "Touch tracking stopped before it started";
 
 /// Whether a product model is a Meta Quest, as `adb devices -l` names it.
 pub fn is_quest(model: &str) -> bool {
@@ -617,20 +642,33 @@ impl Contacts {
 }
 
 /// Puts device event times on the capture epoch; see the module docs.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Clock {
-    /// The smallest `received - stamped` seen, in microseconds.
-    offset_us: Option<i64>,
+    /// `(period, smallest received - stamped in it)` in microseconds, for the
+    /// last [`CLOCK_PERIODS`] periods of host time, oldest first.
+    periods: VecDeque<(i64, i64)>,
 }
 
 impl Clock {
     fn observe(&mut self, device_us: u64, host_us: i64) {
         let offset = host_us.saturating_sub(device_us as i64);
-        self.offset_us = Some(self.offset_us.map_or(offset, |known| known.min(offset)));
+        let period = host_us.div_euclid(CLOCK_PERIOD_US);
+        match self.periods.back_mut() {
+            Some((last, smallest)) if *last == period => *smallest = (*smallest).min(offset),
+            _ => self.periods.push_back((period, offset)),
+        }
+        while self
+            .periods
+            .front()
+            .is_some_and(|(first, _)| *first <= period - CLOCK_PERIODS)
+        {
+            self.periods.pop_front();
+        }
     }
     /// The event's time on the capture epoch, in microseconds.
     fn epoch_us(&self, device_us: u64) -> i64 {
-        (device_us as i64).saturating_add(self.offset_us.unwrap_or(0))
+        let offset = self.periods.iter().map(|(_, offset)| *offset).min();
+        (device_us as i64).saturating_add(offset.unwrap_or(0))
     }
     fn ms(&self, device_us: u64) -> u64 {
         (self.epoch_us(device_us).max(0) / 1000) as u64
@@ -704,7 +742,8 @@ impl<W: Write> Track<W> {
                 self.held = Some(position(at, cursor::LEFT));
             }
             (Touch::Move(..), Some(at)) => self.held = Some(position(at, cursor::LEFT)),
-            (Touch::Up, _) => {
+            // Lost after `SYN_DROPPED` too: the press ends where it was last seen.
+            (Touch::Up | Touch::Lost, _) => {
                 if let Some(held) = self.held.take() {
                     self.record(t_ms, Some(Position { buttons: 0, ..held }))?;
                 }
@@ -851,15 +890,95 @@ pub struct Outcome {
     pub delay: Option<Delay>,
 }
 
-/// `adb -s <serial> shell <script>`'s standard output.
-fn adb_shell(serial: &str, script: &str, timeout: Duration) -> Result<String, String> {
-    let mut command = deps::command("adb")?;
-    command.args(["-s", serial, "shell", script]);
-    let out = output_with_timeout(command, timeout)?;
+/// `adb -s <serial> shell <script>`'s standard output, killed once `stopped`.
+fn adb_shell(
+    serial: &str,
+    script: &str,
+    timeout: Duration,
+    stopped: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let out = adb(serial, &["shell", script], timeout, stopped)?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Whether `line` names `path` itself, not a longer one (`event3`, not
+/// `event30`).
+fn mentions(line: &str, path: &str) -> bool {
+    line.match_indices(path).any(|(at, _)| {
+        !line[at + path.len()..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_digit())
+    })
+}
+
+/// Why `getevent` failed, if it did: its stderr says it could not open one of
+/// the touchscreens at `paths` (it goes on with the other devices), or it
+/// `ended` before the take did, with exit `code` when it exited by itself. A
+/// client killed at the stop is not a failure.
+fn getevent_failure(
+    ended: bool,
+    code: Option<i32>,
+    stderr: &str,
+    paths: &[&str],
+) -> Option<String> {
+    let lines = || {
+        stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+    };
+    if let Some(line) = lines().find(|line| paths.iter().any(|path| mentions(line, path))) {
+        return Some(format!(
+            "Touch tracking could not read the touchscreen: {line}"
+        ));
+    }
+    if !ended {
+        return None;
+    }
+    let status = code.map_or_else(String::new, |code| format!(" with status {code}"));
+    Some(match lines().next() {
+        Some(line) => format!("getevent ended{status} before the take did: {line}"),
+        None => format!("getevent ended{status} before the take did"),
+    })
+}
+
+/// The running `getevent`: its adb client in the [`Reader`]'s slot, the pump
+/// that queues its lines and the thread that collects its stderr.
+struct Getevent<'a> {
+    child: &'a Mutex<Option<Child>>,
+    pump: Option<JoinHandle<()>>,
+    stderr: Option<JoinHandle<String>>,
+}
+
+impl Getevent<'_> {
+    /// Kills it unless it already exited, and returns its exit code when it
+    /// exited by itself, and its stderr.
+    fn end(&mut self) -> (Option<i32>, String) {
+        let taken = self.child.lock().ok().and_then(|mut slot| slot.take());
+        let code = taken.and_then(|mut child| {
+            let exited = child.try_wait().ok().flatten();
+            if exited.is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+            exited.and_then(|status| status.code())
+        });
+        if let Some(pump) = self.pump.take() {
+            let _ = pump.join();
+        }
+        let stderr = self.stderr.take().and_then(|join| join.join().ok());
+        (code, stderr.unwrap_or_default())
+    }
+}
+
+impl Drop for Getevent<'_> {
+    fn drop(&mut self) {
+        self.end();
+    }
 }
 
 /// The touch reader of one device take.
@@ -869,19 +988,22 @@ pub struct Reader {
     child: Arc<Mutex<Option<Child>>>,
     join: Option<JoinHandle<Result<Option<Outcome>, String>>>,
     error: Option<String>,
+    /// Hands the thread the canvas once scrcpy has decoded its first frame.
+    canvas: mpsc::Sender<Option<(u32, u32)>>,
 }
 
 impl Reader {
-    /// Reads the touches of `serial` into `folder`'s `cursor.jsonl`. `canvas`
-    /// is the first decoded frame's size.
-    pub fn start(serial: &str, folder: &Path, epoch: Instant, canvas: Option<(u32, u32)>) -> Self {
+    /// Starts reading the touches of `serial` for `folder`'s `cursor.jsonl`.
+    /// Nothing is written before [`Reader::set_canvas`].
+    pub fn start(serial: &str, folder: &Path, epoch: Instant) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
+        let (canvas, canvas_rx) = mpsc::channel();
         let (flag, running) = (stop.clone(), child.clone());
         let (serial, path) = (serial.to_owned(), folder.join(cursor::FILE_NAME));
         let spawned = thread::Builder::new()
             .name("touch-reader".into())
-            .spawn(move || run(&serial, &path, epoch, canvas, &flag, &running));
+            .spawn(move || run(&serial, &path, epoch, canvas_rx, &flag, &running));
         let (join, error) = match spawned {
             Ok(join) => (Some(join), None),
             Err(e) => (None, Some(format!("Touch tracking could not start: {e}"))),
@@ -891,7 +1013,13 @@ impl Reader {
             child,
             join,
             error,
+            canvas,
         }
+    }
+
+    /// The first decoded frame's size, the canvas touches are placed on.
+    pub fn set_canvas(&self, canvas: Option<(u32, u32)>) {
+        let _ = self.canvas.send(canvas);
     }
 
     fn kill(&self) {
@@ -928,12 +1056,73 @@ fn run(
     serial: &str,
     path: &Path,
     epoch: Instant,
-    canvas: Option<(u32, u32)>,
+    canvas: mpsc::Receiver<Option<(u32, u32)>>,
     stop: &AtomicBool,
     child: &Mutex<Option<Child>>,
 ) -> Result<Option<Outcome>, String> {
-    let probe = adb_shell(serial, PROBE, Duration::from_secs(5))
-        .map_err(|e| format!("Touch tracking could not probe the device: {e}"))?;
+    let stopped = || stop.load(Ordering::Acquire);
+    // getevent starts first, on every input device, so a touch made while the
+    // probe runs is kept: the pump stamps its lines and queues them.
+    let (stdout, stderr) = {
+        let mut running = child.lock().map_err(|_| "Touch reader lock poisoned")?;
+        if stopped() {
+            return Err(STOPPED_EARLY.into());
+        }
+        let mut spawned = deps::command("adb")?
+            .args(["-s", serial, "shell", "getevent", "-lt"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Touch tracking could not run getevent: {e}"))?;
+        let pipes = (spawned.stdout.take(), spawned.stderr.take());
+        *running = Some(spawned);
+        pipes
+    };
+    let (queue, lines) = mpsc::channel::<(i64, Vec<u8>)>();
+    let mut getevent = Getevent {
+        child,
+        pump: stdout.map(|stdout| {
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut line = Vec::new();
+                    // A read error is the pipe closing under a killed client.
+                    if !reader
+                        .read_until(b'\n', &mut line)
+                        .is_ok_and(|read| read > 0)
+                    {
+                        break;
+                    }
+                    if queue
+                        .send((epoch.elapsed().as_micros() as i64, line))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        }),
+        // Read to the end, so a full pipe never stalls adb, keeping the start.
+        stderr: stderr.map(|mut stderr| {
+            thread::spawn(move || {
+                let (mut kept, mut chunk) = (Vec::new(), [0u8; 4096]);
+                while let Ok(read @ 1..) = stderr.read(&mut chunk) {
+                    if kept.len() < 16 * 1024 {
+                        kept.extend_from_slice(&chunk[..read]);
+                    }
+                }
+                String::from_utf8_lossy(&kept).into_owned()
+            })
+        }),
+    };
+    let probe = adb_shell(serial, PROBE, Duration::from_secs(5), &stopped).map_err(|e| {
+        if stopped() {
+            STOPPED_EARLY.to_string()
+        } else {
+            format!("Touch tracking could not probe the device: {e}")
+        }
+    })?;
     let mut sections = probe.split(MARKER);
     let (model, listing, rotation) = (
         sections.next().unwrap_or_default(),
@@ -943,18 +1132,23 @@ fn run(
     if is_quest(model.trim()) {
         return Ok(None);
     }
+    // The canvas comes once scrcpy has decoded its first frame; a capture
+    // that never got that far drops the reader instead.
+    let canvas = loop {
+        match canvas.recv_timeout(Duration::from_millis(50)) {
+            Ok(canvas) => break canvas,
+            Err(RecvTimeoutError::Timeout) if !stopped() => (),
+            _ => return Err(STOPPED_EARLY.into()),
+        }
+    };
     let canvas = canvas.ok_or("Touch tracking found no frame size in capture.log")?;
     let screens = touchscreens(listing);
     if screens.is_empty() {
         return Err("Touch tracking found no multitouch touchscreen on the device".into());
     }
+    let paths: Vec<String> = screens.iter().map(|screen| screen.path.clone()).collect();
     let failed = |e: io::Error| format!("Write {}: {e}", path.display());
     let file = File::create(path).map_err(failed)?;
-    let mut command = deps::command("adb")?;
-    command.args(["-s", serial, "shell", "getevent", "-lt"]);
-    if let [screen] = screens.as_slice() {
-        command.arg(&screen.path);
-    }
     let mut recorder = Recorder::new(
         BufWriter::new(file),
         screens,
@@ -962,62 +1156,44 @@ fn run(
         parse_rotation(rotation).unwrap_or_default(),
     )
     .map_err(failed)?;
-    let stdout = {
-        let mut running = child.lock().map_err(|_| "Touch reader lock poisoned")?;
-        if stop.load(Ordering::Acquire) {
-            return recorder
-                .finish(epoch.elapsed().as_millis() as u64)
-                .map(|(outcome, _)| Some(outcome))
-                .map_err(failed);
-        }
-        let mut spawned = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Touch tracking could not run getevent: {e}"))?;
-        let stdout = spawned.stdout.take();
-        *running = Some(spawned);
-        stdout.ok_or("Touch tracking has no getevent output")?
-    };
     let mut probed = Instant::now();
     let mut read_rotation = || {
         if probed.elapsed() < ROTATION_REFRESH {
             return None;
         }
         probed = Instant::now();
-        adb_shell(serial, ROTATION, Duration::from_secs(2))
+        adb_shell(serial, ROTATION, Duration::from_secs(2), &stopped)
             .ok()
             .and_then(|text| parse_rotation(&text))
     };
-    let mut lines = BufReader::new(stdout);
-    let mut line = Vec::new();
-    // A read error is the pipe closing under a killed client: end of input.
-    while lines
-        .read_until(b'\n', &mut line)
-        .is_ok_and(|read| read > 0)
-    {
-        let host_us = epoch.elapsed().as_micros() as i64;
-        if let Ok(text) = std::str::from_utf8(&line) {
-            recorder
-                .line(text, host_us, &mut read_rotation)
-                .map_err(failed)?;
+    let mut flushed = Instant::now();
+    // The queue ends when getevent does: at the stop, or before it on its own.
+    let ended = loop {
+        match lines.recv_timeout(FLUSH_INTERVAL) {
+            Ok((host_us, line)) => {
+                if let Ok(text) = std::str::from_utf8(&line) {
+                    recorder
+                        .line(text, host_us, &mut read_rotation)
+                        .map_err(failed)?;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => (),
+            Err(RecvTimeoutError::Disconnected) => break !stopped(),
         }
-        line.clear();
-        if lines.buffer().is_empty() {
+        if flushed.elapsed() >= FLUSH_INTERVAL {
             recorder.flush().map_err(failed)?;
+            flushed = Instant::now();
         }
-    }
+    };
     let (outcome, _) = recorder
         .finish(epoch.elapsed().as_millis() as u64)
         .map_err(failed)?;
-    if let Ok(mut running) = child.lock() {
-        if let Some(mut finished) = running.take() {
-            let _ = finished.kill();
-            let _ = finished.wait();
-        }
+    let (code, stderr) = getevent.end();
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    match getevent_failure(ended, code, &stderr, &paths) {
+        Some(error) => Err(error),
+        None => Ok(Some(outcome)),
     }
-    Ok(Some(outcome))
 }
 
 #[cfg(test)]
@@ -1632,6 +1808,110 @@ add device 4: /dev/input/event7
             })
         );
         assert_eq!(Delay::from_micros(Vec::new(), 0), None);
+    }
+
+    #[test]
+    fn the_clock_follows_a_device_clock_that_drifts_either_way() {
+        // 1000 ppm, twenty times a real crystal's drift: a frame every 100 ms
+        // for two minutes, each received 2 ms after its event.
+        for ppm in [-1000i64, 1000] {
+            let mut clock = Clock::default();
+            let mut error = 0;
+            for step in 0..1200 {
+                let host_us = 1_000_000 + step * 100_000;
+                let device_us = (500_000_000 + host_us + host_us * ppm / 1_000_000) as u64;
+                clock.observe(device_us, host_us + 2_000);
+                error = (clock.epoch_us(device_us) - host_us).abs();
+            }
+            // At most 30 s of drift: 30 ms here. A minimum kept for the whole
+            // take would be 120 ms off for the slow clock.
+            assert!(error <= 31_000, "{ppm} ppm: {error} us");
+        }
+        // After an idle gap longer than the window, only new frames count:
+        // 99 s later this device clock is 50 ms behind.
+        let mut clock = Clock::default();
+        clock.observe(1_000_000_000, 1_000_000);
+        clock.observe(1_098_950_000, 100_000_000);
+        assert_eq!(clock.ms(1_098_950_000), 100_000);
+        // Within the window, the faster delivery of an earlier period wins.
+        clock.observe(1_108_950_000 + 30_000, 110_000_000 + 40_000);
+        assert_eq!(clock.ms(1_108_950_000), 110_000);
+    }
+
+    #[test]
+    fn getevent_fails_when_it_cannot_read_a_touchscreen_or_ends_early() {
+        let screens = ["/dev/input/event3"];
+        // Killed at the stop; other devices' complaints do not count.
+        assert_eq!(getevent_failure(false, None, "", &screens), None);
+        let noise = "could not get driver version for /dev/input/mouse0, Not a typewriter\n\
+                     could not open /dev/input/event30, Permission denied\n";
+        assert_eq!(getevent_failure(false, None, noise, &screens), None);
+        // The touchscreen itself could not be opened, stopped or not.
+        let denied = "could not open /dev/input/event3, Permission denied\n";
+        for ended in [false, true] {
+            assert_eq!(
+                getevent_failure(ended, Some(1), denied, &screens).as_deref(),
+                Some("Touch tracking could not read the touchscreen: could not open /dev/input/event3, Permission denied")
+            );
+        }
+        // It ended before the take did: the device went away.
+        assert_eq!(
+            getevent_failure(true, Some(1), "\nerror: device '41031FDJH002M3' not found\n", &screens)
+                .as_deref(),
+            Some("getevent ended with status 1 before the take did: error: device '41031FDJH002M3' not found")
+        );
+        assert_eq!(
+            getevent_failure(true, None, "", &screens).as_deref(),
+            Some("getevent ended before the take did")
+        );
+        assert!(mentions(
+            "open /dev/input/event3, denied",
+            "/dev/input/event3"
+        ));
+        assert!(!mentions("open /dev/input/event31", "/dev/input/event3"));
+    }
+
+    #[test]
+    fn dropped_events_release_the_press_before_the_gap() {
+        let stream = "\
+[    1.000000] EV_ABS       ABS_MT_TRACKING_ID   00000001
+[    1.000000] EV_ABS       ABS_MT_POSITION_X    00000064
+[    1.000000] EV_ABS       ABS_MT_POSITION_Y    000000c8
+[    1.000000] EV_SYN       SYN_REPORT           00000000
+[    1.100000] EV_ABS       ABS_MT_POSITION_X    00000065
+[    1.100000] EV_SYN       SYN_DROPPED          00000000
+[    1.150000] EV_SYN       SYN_REPORT           00000000
+[    1.200000] EV_ABS       ABS_MT_TRACKING_ID   00000002
+[    1.200000] EV_ABS       ABS_MT_POSITION_X    0000012c
+[    1.200000] EV_ABS       ABS_MT_POSITION_Y    0000012c
+[    1.200000] EV_SYN       SYN_REPORT           00000000
+";
+        let canvas = (1080, 2400);
+        let (text, _) = record(
+            stream,
+            vec![screen(1079, 2399)],
+            canvas,
+            |_| 3_000,
+            &mut || None,
+            1_300,
+        );
+        // Released at the last place it was seen (the dropped move never
+        // completed a frame), then a gap; the next touch is a press again.
+        assert_eq!(
+            lines(&text),
+            [
+                "[1003,100,200]",
+                "[0,0,0,1]",
+                "[100,0,0,0]",
+                "[0]",
+                "[100,200,100]",
+                "[0,0,0,1]"
+            ]
+        );
+        let (_root, store, id) = session_with(&text, canvas);
+        let track = cursor::load(&store, &id).unwrap();
+        assert_eq!(track.clicks(0, u64::MAX).len(), 2);
+        assert_eq!(track.at(1_150), None);
     }
 
     /// Feeds `stream` to a recorder as if line `index` arrived
