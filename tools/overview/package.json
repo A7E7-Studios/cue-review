@@ -1,0 +1,12 @@
+{
+  "name": "overview",
+  "private": true,
+  "description": "The overview index generator: capabilities, scenarios, review state, pending changes and modules across repositories, as JSON. No dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

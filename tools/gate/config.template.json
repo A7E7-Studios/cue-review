@@ -1,0 +1,67 @@
+{
+  "reportOnly": true,
+  "ignore": [],
+  "protectedPaths": [
+    "tools/gate/**",
+    "tools/overview/**",
+    "tools/setup-agents/**",
+    "tools/kit/**",
+    ".github/**",
+    "CODEOWNERS",
+    "docs/CODEOWNERS",
+    "**/.agents/skills/**",
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    "**/CLAUDE.local.md",
+    "**/.claude/**",
+    "**/.mcp.json"
+  ],
+  "livingDocs": {
+    "include": ["specs/**/*.md", "**/README.md", "**/AGENTS.md", "**/ARCHITECTURE.md"],
+    "exclude": ["changes/**"]
+  },
+  "budgets": [
+    { "pattern": "changes/**/*.md", "bytes": 30720 },
+    { "pattern": "specs/**/spec.md", "bytes": 30720 },
+    { "pattern": "**/AGENTS.md", "bytes": 32768 },
+    { "pattern": "**/README.md", "bytes": 40960 }
+  ],
+  "history": [
+    { "id": "pr-ref", "message": "PR or issue reference", "pattern": "(?<![\\w/])#\\d{2,4}(?![\\w-])" },
+    {
+      "id": "repo-ref",
+      "message": "cross-repo reference",
+      "pattern": "(?<![\\w/.-])(?:[\\w.-]+/)?[\\w.-]{2,}#\\d{2,4}(?![\\w-])"
+    },
+    {
+      "id": "iso-date",
+      "message": "ISO date outside a PROOF line",
+      "pattern": "\\b20\\d\\d-[01]\\d-[0-3]\\d\\b",
+      "skipProofLines": true
+    },
+    {
+      "id": "used-to",
+      "message": "history: \"used to\"",
+      "pattern": "(?<!\\b(?:is|are|was|were|be|been|being|get|gets|got)\\s)\\bused to\\b",
+      "flags": "i"
+    },
+    { "id": "ruled", "message": "decision trail: \"(ruled\"", "pattern": "\\(ruled\\b", "flags": "i" },
+    {
+      "id": "follow-up-work",
+      "message": "roadmap: work promised for later",
+      "pattern": "\\bfollow-up (?:PR|pull request|issue|ticket|task|work)s?\\b",
+      "flags": "i"
+    },
+    {
+      "id": "later",
+      "message": "roadmap: work promised for later",
+      "pattern": "\\b(?:to be done|will be added|is planned) later\\b",
+      "flags": "i"
+    },
+    { "id": "todo", "message": "roadmap: TODO", "pattern": "\\bTODO\\b" }
+  ],
+  "overview": {
+    "excludeModules": ["dev/**", "docs/**", "**/proof/**", "fixtures/**", "**/test/fixtures/**"],
+    "moduleMarkers": ["README.md", "package.json", "pyproject.toml", "build.gradle", "build.gradle.kts", "*.asmdef"]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "gate",
+  "private": true,
+  "description": "The deterministic formality gate: specs, change folders, history lint, budgets, links, nearest README, PR description, workflow files. No dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

@@ -1,0 +1,2 @@
+specs/**/look/**/*.png filter=lfs diff=lfs merge=lfs -text
+changes/**/look/**/*.png filter=lfs diff=lfs merge=lfs -text

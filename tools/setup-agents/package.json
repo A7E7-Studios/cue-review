@@ -1,0 +1,12 @@
+{
+  "name": "setup-agents",
+  "private": true,
+  "description": "One checkout's agent setup: links every .agents/skills folder into its sibling .claude/skills. No dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

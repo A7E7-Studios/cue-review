@@ -9,3 +9,4 @@ storybook-static/
 *.log
 *.tsbuildinfo
 .claude/worktrees/
+/.claude/skills
