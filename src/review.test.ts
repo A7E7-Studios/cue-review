@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeSegment, activeWord, errorMessage, findMatches, formatTime, formatTimer, seekTime, segmentSeekMs, segmentText, transcriptItems, wordSeekMs } from './review';
+import { activeSegment, activeWord, errorMessage, findMatches, formatTime, formatTimer, playheadSegment, seekTime, segmentSeekMs, segmentText, transcriptItems, wordSeekMs } from './review';
 import type { Segment } from './backend';
 describe('transcript and video synchronization', () => {
   it('uses a bounded point highlight for alignment anchors without treating coarse raw bounds as speech',()=>{
@@ -18,6 +18,18 @@ describe('transcript and video synchronization', () => {
     expect(activeSegment(segments,0)).toBe(-1);
     expect(activeSegment(segments,10220)).toBe(0);
     expect(activeSegment(segments,11000)).toBe(-1);
+  });
+  it('places the playhead in the sentence it last passed during a pause, and nowhere before the first',()=>{
+    const segments=[
+      {startMs:0,endMs:1300,text:'When',words:[{text:'When',startMs:0,endMs:1300,seekMs:10220}]},
+      {startMs:1300,endMs:2000,text:'then',words:[{text:'then',startMs:1300,endMs:2000,seekMs:12000}]},
+    ];
+    expect(playheadSegment(segments,0)).toBe(-1);
+    expect(playheadSegment(segments,10220)).toBe(0);
+    expect(playheadSegment(segments,11000)).toBe(0);
+    expect(playheadSegment(segments,12000)).toBe(1);
+    expect(playheadSegment(segments,60000)).toBe(1);
+    expect(playheadSegment([],5000)).toBe(-1);
   });
   it('chooses the nearest overlapping anchor within a line and across adjacent lines',()=>{
     const words=[{text:'first',startMs:0,endMs:100,seekMs:10000},{text:'second',startMs:100,endMs:200,seekMs:10100}];
