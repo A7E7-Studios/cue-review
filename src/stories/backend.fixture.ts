@@ -35,11 +35,13 @@ export function configureScenario(next: Scenario) {
   sequence = 0;
   status = { state: 'idle' };
   if (next === 'recording' || next === 'processing') {
-    recordings[0] = { ...recordings[0], status: next, sourceId: 'display', microphoneId: 'microphone' };
-    status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
+    recordings[0] = { ...recordings[0], status: next, sourceId: 'monitor:1', microphoneId: 'microphone' };
+    status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.0126, liveTranscript: clone(transcript) };
   }
   // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
-  if (next === 'takes' || next === 'recording-take' || next === 'source-gone') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
+  if (next === 'takes' || next === 'recording-take') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
+  // A closed window: its id is no longer listed, so the recording bar names it the original source.
+  if (next === 'source-gone') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo, sourceId: 'window:closed' };
   if (next === 'stuck-take') {
     const session: Session = { ...clone(twoTakeSession), videoPath: sampleVideo, durationMs: takeTwoStartMs, status: 'error', error: stuckTakeError };
     session.takes![1].status = 'swapping';
@@ -50,7 +52,7 @@ export function configureScenario(next: Scenario) {
     session.durationMs = takeTwoStartMs;
     session.takes = session.takes!.slice(0, 1);
     recordTake(session, 'microphone', false);
-    status = { ...status, elapsedMs: 8000, audioLevel: 0.46, liveTranscript: clone(takeTwoLiveTranscript) };
+    status = { ...status, elapsedMs: 8000, audioLevel: 0.0126, liveTranscript: clone(takeTwoLiveTranscript) };
   }
 }
 configureScenario('fresh');
@@ -72,7 +74,7 @@ export const backend = {
   markers: async () => clone(markers),
   status: async () => clone(status),
   sources: async (): Promise<CaptureSource[]> => [
-    { id: 'display', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
+    { id: 'monitor:1', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
     { id: 'quest', name: 'Quest 3', kind: 'quest', available: scenario !== 'unavailable', detail: scenario === 'unavailable' ? 'Reconnect this device to resume its preview.' : undefined },
     { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false },
   ],

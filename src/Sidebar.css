@@ -25,7 +25,7 @@
 
 .side-header { display: flex; align-items: center; flex: none; height: 28px; margin-bottom: -10px; }
 /* macOS: the panel's top row is centred on y = 32 (8px inset, 14px padding, 20px row), on the traffic
-   lights that trafficLightPosition (24, 26) puts 26px down; New recording follows at y = 60. */
+   lights that trafficLightPosition (24, 26) puts 26px down; New session follows at y = 60. */
 .sidebar[data-platform='macos'] .side-header { height: 20px; margin-bottom: 0; }
 /* The lights end about 78px from the window edge; the panel starts 18px in (8px inset, 10px padding). */
 .side-traffic-lights { flex: none; width: calc(var(--size-traffic-lights-width) - 18px); height: var(--size-traffic-lights-height); }
@@ -33,40 +33,37 @@
 .side-collapse:hover { background: var(--color-row-hover); color: var(--color-text); }
 
 .sidebar .side-tools { display: flex; align-items: center; gap: 6px; flex: none; min-height: 0; margin: 0; color: var(--color-text-secondary); }
-.sidebar .side-tools .new-recording {
+/* A plain row, like a session row: the plus says "new", and no red dot suggests it starts recording. */
+.sidebar .side-tools .new-session {
   flex: 1;
   min-width: 0;
   height: var(--size-new-recording);
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 10px;
-  padding: 0 10px 0 12px;
-  border-radius: var(--radius-button);
-  background: var(--color-button);
-  box-shadow: var(--shadow-new-recording);
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: var(--radius-row);
+  background: transparent;
   color: var(--color-text);
   font-size: var(--font-size-body);
-  font-weight: var(--font-weight-strong);
+  font-weight: 500;
   white-space: nowrap;
   position: relative;
 }
-.sidebar .side-tools .new-recording:hover { background: color-mix(in srgb, var(--color-button) 96%, var(--color-text)); color: var(--color-text); }
-.sidebar .side-tools .new-recording:disabled { background: var(--color-button-disabled); box-shadow: none; color: var(--color-text-tertiary); opacity: 1; }
-.sidebar .new-recording:disabled .new-recording-dot { background: var(--color-record-disabled); }
-.new-recording-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: var(--color-record); }
-.new-recording-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
-.sidebar .side-tools .new-section { width: var(--size-new-recording); height: var(--size-new-recording); flex: none; padding: 0; display: grid; place-items: center; border-radius: var(--radius-button); color: var(--color-text-secondary); }
-.sidebar .side-tools .new-section:hover { background: var(--color-row-hover); color: var(--color-text); }
+.sidebar .side-tools .new-session:hover { background: var(--color-row-hover); color: var(--color-text); }
+.sidebar .side-tools .new-session:disabled { background: transparent; color: var(--color-text-tertiary); opacity: 1; }
+.sidebar .new-session > svg { flex: none; }
+.new-session-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 
 /* Decision 7: shortcut hints are aria-hidden and fade in on hover or focus. --motion-fast is 0ms under reduced motion. */
 .sidebar .kbd-hint { flex: none; font-family: inherit; font-size: var(--font-size-kbd); font-weight: 400; color: var(--color-text-tertiary); white-space: nowrap; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .sidebar[data-platform='macos'] .kbd-hint { font-size: var(--font-size-meta); }
 .sidebar .has-kbd:hover .kbd-hint, .sidebar .has-kbd:focus-visible .kbd-hint { opacity: 1; }
 /* The hint sits over the button's right padding, so showing it never takes width from the label. */
-.sidebar .new-recording .kbd-hint { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+.sidebar .new-session .kbd-hint { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none; }
 
-.recording-list { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; margin: 0 -5px; padding: 0 5px; }
+.recording-list { flex: 1; min-height: 0; overflow: auto; margin: 0 -5px; padding: 0 5px; }
 .recording-section { position: relative; margin-bottom: 14px; border-radius: var(--radius-row); outline: 1px solid transparent; outline-offset: 2px; }
 .recording-section:last-of-type { margin-bottom: 4px; }
 
@@ -138,6 +135,9 @@
 .sidebar-menu[data-state=exiting] { pointer-events: none; }
 .sidebar-menu button { width: 100%; min-height: 32px; justify-content: flex-start; padding: 6px 8px; text-align: left; overflow-wrap: anywhere; }
 .sidebar-menu button:hover { background: var(--color-row-hover); }
+/* Shown but refused (the sidebar's menu while recording): dimmed like a disabled button, still focusable. */
+.sidebar-menu button[aria-disabled='true'] { opacity: .42; cursor: default; }
+.sidebar-menu button[aria-disabled='true']:hover { background: none; }
 .sidebar-menu button > svg { width: 12px; height: 12px; }
 .sidebar-menu button:not(.menu-separated) > svg:last-child { margin-left: auto; }
 .sidebar-menu .menu-separated { border-top: 1px solid var(--color-divider); border-radius: 0; margin-top: 4px; padding-top: 9px; }
@@ -146,7 +146,7 @@
 .sidebar-submenu { z-index: 26; animation: sidebar-submenu-in var(--motion-fast) var(--ease-out); }
 @keyframes sidebar-submenu-in { from { opacity: 0; } }
 .sidebar-menu button[aria-expanded='true'] { background: var(--color-row-hover); }
-.section-destinations { max-height: 192px; overflow: auto; scrollbar-width: thin; }
+.section-destinations { max-height: 192px; overflow: auto; }
 
 .dragging-section { opacity: .45; }
 .insert-before::before, .insert-after::after { content: ''; position: absolute; left: 1px; right: 1px; height: 2px; background: var(--color-accent); border-radius: 2px; pointer-events: none; }

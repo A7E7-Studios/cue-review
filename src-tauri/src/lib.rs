@@ -874,7 +874,7 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
                 state: "recording".into(),
                 session_id: Some(session.id.clone()),
                 elapsed_ms: active.elapsed_ms(),
-                audio_level: active.audio_level(),
+                audio_level: active.take_audio_level(),
                 error: active.error(),
                 live_transcript: runtime.live_transcript.clone(),
                 take_index: runtime.active_take.map(|take| take.index),
