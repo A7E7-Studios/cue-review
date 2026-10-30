@@ -263,10 +263,16 @@ fn needs_work(status: TakeStatus) -> bool {
     !matches!(status, TakeStatus::Ready | TakeStatus::Interrupted)
 }
 fn pending_message(take: &Take) -> String {
-    format!(
-        "Take {} has no transcript yet. Retry transcription.",
-        take.index
-    )
+    match take.status {
+        TakeStatus::Swapping => format!(
+            "Take {} was saved by an earlier CueReview and could not be checked yet. Retry to add it.",
+            take.index
+        ),
+        _ => format!(
+            "Take {} has no transcript yet. Retry transcription.",
+            take.index
+        ),
+    }
 }
 /// Sets the session status once a take job ends: `error` with `failure`,
 /// `error` while any take still needs work, otherwise `ready`.
@@ -549,9 +555,7 @@ fn recover_with(store: &Store, id: &str, tools: &dyn Tools) -> Result<(), String
             }
             TakeStatus::Recording | TakeStatus::Finalizing => Some(TakeStatus::Interrupted),
             TakeStatus::Transcribing => Some(TakeStatus::Error),
-            TakeStatus::Swapping if index >= 2 => {
-                Some(upgrade_waiting(&dir, &mut session, &take, tools))
-            }
+            TakeStatus::Swapping if index >= 2 => upgrade_waiting(&dir, &mut session, &take, tools),
             _ => None,
         };
         if let Some(next) = next {
@@ -572,32 +576,36 @@ fn recover_with(store: &Store, id: &str, tools: &dyn Tools) -> Result<(), String
     }
     Ok(())
 }
-/// A format-1 take still waiting to be joined into `video.mp4`. When the
-/// root video already holds it (joined, then the app closed before the
-/// bookkeeping), it plays inside take 1's video; otherwise from its own
-/// video when that is usable, else it is interrupted. The files left from
-/// joining it are deleted.
+/// The status a format-1 take still waiting to be joined into `video.mp4`
+/// moves to, placing its video. When the root video already holds it
+/// (joined, then the app closed before the bookkeeping), it plays inside take
+/// 1's video; otherwise from its own video when that is usable, else it is
+/// interrupted. Either way the files left from joining it are deleted.
+/// `None`, changing nothing, while the root video cannot be read: only it
+/// tells a joined take, whose own copy is gone, from a lost one.
 fn upgrade_waiting(
     dir: &Path,
     session: &mut Session,
     take: &Take,
     tools: &dyn Tools,
-) -> TakeStatus {
+) -> Option<TakeStatus> {
+    let joined = if session.videos.is_empty() {
+        let root = tools.probe(&dir.join(ROOT_VIDEO)).ok()?;
+        (swap_state(root.duration_ms, take.offset_ms, take.duration_ms) == SwapState::Applied)
+            .then_some(root.duration_ms)
+    } else {
+        None
+    };
     let folder = take_dir(dir, take.index);
     for name in JOIN_LEFTOVERS {
         let _ = fs::remove_file(folder.join(name));
     }
     let _ = fs::remove_file(dir.join(format!("concat-t{}.ffconcat", take.index)));
-    if session.videos.is_empty() {
-        if let Ok(root) = tools.probe(&dir.join(ROOT_VIDEO)) {
-            if swap_state(root.duration_ms, take.offset_ms, take.duration_ms) == SwapState::Applied
-            {
-                session.duration_ms = root.duration_ms;
-                return TakeStatus::Error;
-            }
-        }
+    if let Some(root_ms) = joined {
+        session.duration_ms = root_ms;
+        return Some(TakeStatus::Error);
     }
-    match tools.probe(&video_file(dir, take.index)) {
+    Some(match tools.probe(&video_file(dir, take.index)) {
         Ok(media) => {
             if let Some(own) = session.takes.iter_mut().find(|t| t.index == take.index) {
                 own.duration_ms = media.duration_ms;
@@ -606,7 +614,45 @@ fn upgrade_waiting(
             TakeStatus::Error
         }
         Err(_) => TakeStatus::Interrupted,
+    })
+}
+/// Upgrades the format-1 takes of session `id` still waiting to be joined,
+/// as [`recover`] does, but leaves the session's status alone, for a job
+/// about to transcribe them (Retry, `cue transcribe`).
+pub fn upgrade(store: &Store, id: &str) -> Result<(), String> {
+    upgrade_with(store, id, &probe)
+}
+/// [`upgrade`] with the media probe passed in.
+pub(crate) fn upgrade_with(
+    store: &Store,
+    id: &str,
+    probe: &dyn Fn(&Path) -> Result<Media, String>,
+) -> Result<(), String> {
+    struct Probe<'a>(&'a dyn Fn(&Path) -> Result<Media, String>);
+    impl Tools for Probe<'_> {
+        fn probe(&self, path: &Path) -> Result<Media, String> {
+            (self.0)(path)
+        }
     }
+    let dir = store.session_dir(id)?;
+    let _lock = store.lock_session(id)?;
+    let mut session = store.session(id)?;
+    let mut waiting: Vec<Take> = session
+        .takes
+        .iter()
+        .filter(|take| take.status == TakeStatus::Swapping && take.index >= 2)
+        .cloned()
+        .collect();
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    waiting.sort_by_key(|take| take.index);
+    for take in waiting {
+        if let Some(next) = upgrade_waiting(&dir, &mut session, &take, &Probe(probe)) {
+            take_mut(&mut session, take.index)?.status = next;
+        }
+    }
+    store.save_session(&session)
 }
 fn is_temp_name(name: &str) -> bool {
     name.len() > "video..tmp.mp4".len()
@@ -1394,6 +1440,17 @@ mod tests {
         assert_eq!(retry_plan(&session), [2]);
         cleaned(&dir);
 
+        // While video.mp4 cannot be read, nothing tells a joined take from a
+        // lost one: the take keeps waiting, with its leftovers.
+        let (unreadable, dir) = crashed(&store, "processing", waiting(), 3500);
+        fs::remove_file(video_file(&dir, 2)).unwrap();
+        fs::write(dir.join(ROOT_VIDEO), b"locked").unwrap();
+        leftovers(&dir);
+        recover_with(&store, &unreadable, &Fake).unwrap();
+        let session = store.session(&unreadable).unwrap();
+        assert_eq!(session.takes[1].status, TakeStatus::Swapping);
+        assert!(take_dir(&dir, 2).join("swap.json").is_file());
+
         // In neither video: interrupted, the session ready again.
         let (lost, dir) = crashed(&store, "error", waiting(), 2000);
         fs::write(video_file(&dir, 2), b"truncated").unwrap();
@@ -1402,6 +1459,32 @@ mod tests {
         assert_eq!(session.takes[1].status, TakeStatus::Interrupted);
         assert_eq!(session.status, "ready");
         assert!(session.videos.is_empty());
+    }
+
+    #[test]
+    fn upgrading_a_waiting_take_leaves_the_session_status_alone() {
+        // Retry and `cue transcribe` upgrade the take inside their own job.
+        let (_dir, store) = store();
+        let (id, _) = crashed(
+            &store,
+            "processing",
+            vec![
+                take(1, 0, 2000, TakeStatus::Ready),
+                take(2, 2000, 1500, TakeStatus::Swapping),
+            ],
+            2000,
+        );
+        upgrade_with(&store, &id, &fake_probe).unwrap();
+        let session = store.session(&id).unwrap();
+        assert_eq!(session.status, "processing");
+        assert!(session.error.is_none());
+        assert_eq!(session.takes[1].status, TakeStatus::Error);
+        assert_eq!(session.videos, [video(1, 0, 2000), video(2, 2000, 1500)]);
+        // Nothing waiting: the file is not rewritten.
+        let file = store.session_dir(&id).unwrap().join("session.json");
+        let before = fs::read(&file).unwrap();
+        upgrade_with(&store, &id, &fake_probe).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), before);
     }
 
     #[test]
@@ -1522,7 +1605,7 @@ mod tests {
             .error
             .as_deref()
             .unwrap()
-            .contains("Take 2 has no transcript"));
+            .contains("Take 2 was saved by an earlier CueReview"));
         assert_eq!(retry_plan(&session), [2]);
     }
 

@@ -18,8 +18,8 @@ know which take or file holds it.
 
 ### Requirement: Frames come from the take their time falls in
 The `cue` CLI SHALL export each frame of `cue frame`, `cue frames` and `cue moments --frames` from
-the video of the take its session time falls in, at that take's own size, because each take keeps
-its own video and the agent asks by the times the transcript gives it.
+the take video its session time falls in, at that video's size, because each take keeps its own
+video and the agent asks by the times the transcript gives it.
 
 #### Scenario: A frame from a later take
 - **GIVEN** a session whose take 2 recorded another window from 1:12
@@ -32,16 +32,16 @@ its own video and the agent asks by the times the transcript gives it.
 - **PROOF** test: src-tauri/src/cli.rs::tests::frame_help_names_the_take_video
 - **PROOF** desk: open
 
-### Requirement: A clip stays inside one take
-The `cue` CLI SHALL refuse a clip whose range crosses from one take into the next, naming where the
-take starts, and write nothing, because the takes' videos differ in size and source and the agent
-can ask for one clip on each side.
+### Requirement: A clip stays inside one take video
+The `cue` CLI SHALL refuse a clip whose range crosses from one take video into the next, naming the
+take it starts in and where the next video starts, and write nothing, because take videos differ in
+size and source and the agent can ask for one clip on each side.
 
 #### Scenario: A clip across a take boundary
 - **GIVEN** a session whose take 2 starts at 72000 ms
 - **WHEN** an agent runs `cue clip ID --start-ms 70000 --end-ms 75000`
-- **THEN** the clip is refused with a message naming take 2's start at 72000 ms, and no file is
-  written
+- **THEN** the clip is refused with a message naming take 1 and take 2's video starting at
+  72000 ms, and no file is written
 - **PROOF** test: src-tauri/src/agent.rs::tests::a_clip_across_a_take_boundary_is_refused
 
 ### Requirement: The pointer ring fits the take's own frame
@@ -56,8 +56,8 @@ because the take was not scaled into another take's size.
 
 ### Requirement: No take waits to be discarded
 The `cue discard-take` command SHALL refuse every take, saying that takes keep their own videos and
-none waits to be added, and change nothing, because no take is joined any more and scripts that
-call it get an answer rather than an unknown command.
+none waits to be added, and change nothing, because a take never waits to be joined and scripts
+that call it get an answer rather than an unknown command.
 
 #### Scenario: Discarding a take
 - **WHEN** an agent runs `cue discard-take ID 2`

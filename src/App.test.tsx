@@ -1272,6 +1272,12 @@ describe('take playback', () => {
   const position = () => screen.getByLabelText(NAMES.playbackPosition);
   /** jsdom media never plays: this says whether the element is paused, as a playing video would. */
   const setPaused = (media: HTMLMediaElement, paused: boolean) => Object.defineProperty(media, 'paused', { configurable: true, get: () => paused });
+  /** The video reaches its end: it pauses as ended, then fires ended. */
+  const finish = (media: HTMLMediaElement) => {
+    Object.defineProperty(media, 'ended', { configurable: true, get: () => true });
+    setPaused(media, true); fireEvent.pause(media); fireEvent.ended(media);
+    Object.defineProperty(media, 'ended', { configurable: true, get: () => false });
+  };
 
   it('plays on from one take\'s video into the next', async () => {
     twoTakes();
@@ -1290,7 +1296,7 @@ describe('take playback', () => {
 
     // Take 1's video ends: the same player loads take 2's and plays it from its start.
     play.mockClear();
-    setPaused(media, true); fireEvent.pause(media); fireEvent.ended(media);
+    finish(media);
     expect(document.querySelector('video')).toBe(media);
     expect(media).toHaveAttribute('src', TAKE_TWO);
     expect(position()).toHaveValue('10000');
@@ -1304,9 +1310,17 @@ describe('take playback', () => {
     expect(screen.getByRole('button', { name: 'Seek to More at 0:11' })).toHaveAttribute('aria-current', 'true');
 
     // The last take's end ends playback.
-    setPaused(media, true); fireEvent.pause(media); fireEvent.ended(media);
+    finish(media);
     expect(media).toHaveAttribute('src', TAKE_TWO);
     expect(screen.getByRole('button', { name: NAMES.play })).toBeEnabled();
+    expect(play.mock.calls).toHaveLength(1);
+
+    // Paused at take 1's end by a seek, the next take shows without playing.
+    fireEvent.change(position(), { target: { value: '9999' } });
+    fireEvent.loadedMetadata(media);
+    finish(media);
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    fireEvent.loadedMetadata(media);
     expect(play.mock.calls).toHaveLength(1);
   });
   it('seeks into another take\'s video from the scrubber and the transcript', async () => {
@@ -1341,6 +1355,18 @@ describe('take playback', () => {
     expect(media.currentTime).toBe(2.5);
     expect(position()).toHaveValue('2500');
     expect(play).toHaveBeenCalledTimes(2);
+
+    // Pausing while another take's video loads keeps it paused once it is in.
+    await user.click(screen.getByRole('button', { name: 'Seek to More at 0:11' }));
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    // A new source leaves the element paused, with no pause event.
+    setPaused(media, true);
+    await user.click(screen.getByRole('button', { name: NAMES.pause }));
+    expect(screen.getByRole('button', { name: NAMES.play })).toBeEnabled();
+    fireEvent.loadedMetadata(media);
+    expect(play).toHaveBeenCalledTimes(2);
+    fireEvent.change(position(), { target: { value: '2500' } });
+    fireEvent.loadedMetadata(media);
 
     // Paused, a seek into take 2 shows that moment without playing.
     setPaused(media, true); fireEvent.pause(media);

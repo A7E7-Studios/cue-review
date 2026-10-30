@@ -289,7 +289,7 @@ const SPECS: &[Spec] = &[
                 "Write the MP4 here instead of the session's exports folder; fails if PATH exists",
             ),
         ],
-        notes: "A clip comes from one take's video: a range that crosses into the next take is refused, naming where that take starts; export one clip on each side.",
+        notes: "A clip comes from one take video: a range that crosses into the next take's video is refused, naming where that video starts; export one clip on each side.",
     },
     Spec {
         name: "rename",
@@ -1085,7 +1085,7 @@ mod tests {
             "{frame}"
         );
         assert!(help_text("frames --help").contains("the take its time falls in"));
-        assert!(help_text("clip --help").contains("crosses into the next take is refused"));
+        assert!(help_text("clip --help").contains("crosses into the next take's video is refused"));
         assert!(help_text("info --help").contains("takes/N/video.mp4"));
     }
     #[test]

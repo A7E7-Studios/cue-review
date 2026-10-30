@@ -549,7 +549,7 @@ fn finish_transcription(job: ProcessingJob) {
 }
 /// Transcribes only one finished take, which ends ready or error. A take of
 /// a session saved before takes kept their own videos, still waiting to be
-/// joined, is upgraded first (see [`takes::recover`]).
+/// joined, is upgraded first (see [`takes::upgrade`]).
 fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
     let session = s.store.session(id)?;
     let take = takes::list(&session)
@@ -557,7 +557,7 @@ fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
         .find(|take| take.index == index)
         .ok_or_else(|| format!("Take {index} is not part of this recording."))?;
     if take.status == TakeStatus::Swapping {
-        takes::recover(&s.store, id)?;
+        takes::upgrade(&s.store, id)?;
     }
     if !takes::list(&s.store.session(id)?)
         .iter()

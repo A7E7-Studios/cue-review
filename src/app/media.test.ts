@@ -42,10 +42,10 @@ describe('videoAt', () => {
     // A boundary belongs to the take that starts there.
     expect(videoAt(videos, 10000)).toEqual({ index: 1, localMs: 0 });
     expect(videoAt(videos, 12500)).toEqual({ index: 1, localMs: 2500 });
-    // Take 3 has no video of its own: it plays inside take 2's, clamped to that video's end.
-    expect(videoAt(videos, 20000)).toEqual({ index: 1, localMs: 8000 });
+    // A time past a video's end shows its last millisecond, as takes::video_at does.
+    expect(videoAt(videos, 20000)).toEqual({ index: 1, localMs: 7999 });
     expect(videoAt(videos, 26000)).toEqual({ index: 2, localMs: 1000 });
-    expect(videoAt(videos, 40000)).toEqual({ index: 2, localMs: 5000 });
+    expect(videoAt(videos, 40000)).toEqual({ index: 2, localMs: 4999 });
     expect(videoAt(videos, -50)).toEqual({ index: 0, localMs: 0 });
     // A joined session (no videos listed) is one video for the whole timeline.
     expect(videoAt([{ take: 1, startMs: 0, durationMs: 20000 }], 15000)).toEqual({ index: 0, localMs: 15000 });

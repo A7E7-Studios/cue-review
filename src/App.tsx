@@ -117,6 +117,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const releasing = useRef(false);
   const restorePlayback = useRef<Playback | null>(null);
   const pendingSeek = useRef<PendingSeek | null>(null);
+  /** Whether the loaded video was playing: kept through the pause that ends it, for the next take. */
+  const wasPlaying = useRef(false);
   const selection = useRef(0);
   /** The recording shown or about to be shown, set as soon as it is chosen (before React re-renders). */
   const shownId = useRef<string | null>(null);
@@ -289,6 +291,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Loads take video `index` and plays it from `localMs` once its metadata is in, playing on if `play`. */
   const loadVideo = useCallback((index: number, localMs: number, play: boolean) => {
     pendingSeek.current = { localMs, play };
+    // A new source pauses the element without a pause event; the controls show what comes next.
+    wasPlaying.current = play; setPlaying(play);
     setVideoIndex(index);
   }, []);
   /** Seeks the session timeline, loading another take's video when the time falls in it. */
@@ -306,6 +310,9 @@ export default function App({ platform: requested }: AppProps = {}) {
   const togglePlay = useCallback(async () => {
     const media = video.current;
     if (!media || mode !== 'review') return;
+    // While another take's video loads, play or pause applies once it is in.
+    const pending = pendingSeek.current;
+    if (pending) { pending.play = !pending.play; wasPlaying.current = pending.play; setPlaying(pending.play); return; }
     // Play after the last take's end starts the session again from its first take.
     if (media.paused && media.ended && shownVideo > 0) { setTime(0); loadVideo(0, 0, true); return; }
     try { if (media.paused) await media.play(); else media.pause(); } catch (problem) { report(problem); }
@@ -591,10 +598,14 @@ export default function App({ platform: requested }: AppProps = {}) {
         if (restore.playing) void media.play().catch(report);
       }
     },
-    onPlay: () => setPlaying(true),
-    onPause: () => setPlaying(false),
-    // The next take's video plays on from its start; the last one ends playback.
-    onEnded: () => { if (shownVideo + 1 < videos.length) { setTime(videos[shownVideo + 1].startMs); loadVideo(shownVideo + 1, 0, true); } else setPlaying(false); },
+    onPlay: () => { wasPlaying.current = true; setPlaying(true); },
+    // Reaching the end pauses first; whether it was playing still decides the next take.
+    onPause: event => { if (!event.currentTarget.ended) wasPlaying.current = false; setPlaying(false); },
+    // The next take's video goes on from its start, playing if this one was; the last one ends playback.
+    onEnded: () => {
+      if (shownVideo + 1 < videos.length) { setTime(videos[shownVideo + 1].startMs); loadVideo(shownVideo + 1, 0, wasPlaying.current); }
+      else { wasPlaying.current = false; setPlaying(false); }
+    },
     onClick: () => void togglePlay(),
     onError: () => {
       pendingSeek.current = null;

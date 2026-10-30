@@ -38,7 +38,7 @@ export function sessionVideos(session: Session, toUrl: (path: string) => string)
 
 /**
  * Where session time `ms` plays: the last video starting at or before it (the first before
- * any starts) and the time inside it, clamped into that video. A take without its own
+ * any starts) and the time inside it, kept within that video's last millisecond as `takes::video_at` does. A take without its own
  * video plays inside the one before it.
  */
 export function videoAt(videos: readonly TakeVideo[], ms: number): { index: number; localMs: number } | undefined {
@@ -46,7 +46,8 @@ export function videoAt(videos: readonly TakeVideo[], ms: number): { index: numb
   let index = 0;
   videos.forEach((video, at) => { if (video.startMs <= ms) index = at; });
   const video = videos[index];
-  return { index, localMs: Math.min(Math.max(ms - video.startMs, 0), video.durationMs) };
+  // As `takes::video_at`: the last millisecond of a video still shows its last frame.
+  return { index, localMs: Math.min(Math.max(ms - video.startMs, 0), Math.max(video.durationMs - 1, 0)) };
 }
 
 const PLACED = new Set(['transcribing', 'ready', 'error']);

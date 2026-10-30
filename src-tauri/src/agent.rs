@@ -87,32 +87,32 @@ The CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, wh
 }
 /// `cue transcribe`: transcribes a finished session again.
 pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String> {
-    // A take of an older session still waiting to be joined is upgraded
-    // first, as the app does when it starts.
-    if store
-        .session(id)?
-        .takes
-        .iter()
-        .any(|take| take.status == crate::models::TakeStatus::Swapping)
-    {
-        crate::takes::recover(store, id)?;
-    }
     transcribe_existing_with(
         store,
         id,
+        takes::upgrade,
         crate::attach_finished_video,
         crate::transcribe::transcribe,
     )
 }
-/// [`transcribe_existing`] with the video check and the transcription passed
-/// in. Both session writes re-read `session.json` under its lock, so a
+/// [`transcribe_existing`] with the take upgrade, the video check and the
+/// transcription passed in. A take of an older session still waiting to be
+/// joined is upgraded first ([`takes::upgrade`]), as the app does when it
+/// starts. Both session writes re-read `session.json` under its lock, so a
 /// concurrent `cue rename` or take update is never overwritten.
 pub(crate) fn transcribe_existing_with(
     store: &Store,
     id: &str,
+    upgrade: impl FnOnce(&Store, &str) -> Result<(), String>,
     attach: impl FnOnce(&Store, &mut Session) -> Result<(), String>,
     transcribe: impl FnOnce(&Store, &str) -> Result<Transcript, String>,
 ) -> Result<Transcript, String> {
+    if !matches!(
+        store.session(id)?.status.as_str(),
+        "recording" | "processing"
+    ) {
+        upgrade(store, id)?;
+    }
     store.update_session(id, |session| {
         if matches!(session.status.as_str(), "recording" | "processing") {
             return Err("This session is recording or processing. Finish its active job first; reopen CueReview to recover an interrupted session.".into());
@@ -709,7 +709,8 @@ pub fn moments(
     Ok(found)
 }
 /// Refuses a clip from `start` to `end` that crosses from one take video
-/// into the next; otherwise the video it comes from and its start in it.
+/// into the next, naming the take it starts in; otherwise the video it comes
+/// from and its start in it.
 fn clip_source(
     dir: &Path,
     session: &Session,
@@ -721,9 +722,16 @@ fn clip_source(
     let (last, _) = takes::video_at(&videos, end.saturating_sub(1).max(start))
         .ok_or("This session has no video.")?;
     if last.take != first.take {
+        // The take `start` falls in, which may be joined inside an earlier video.
+        let from = takes::list(session)
+            .iter()
+            .filter(|take| takes::on_timeline(take.status) && take.offset_ms <= start)
+            .map(|take| take.index)
+            .next_back()
+            .unwrap_or(first.take);
         return Err(format!(
-            "The clip crosses from take {} into take {}, which starts at {} ms. Export one clip that ends by {} ms and one that starts there.",
-            first.take, last.take, last.start_ms, last.start_ms
+            "The clip crosses from take {from} into take {}, whose video starts at {} ms. Export one clip that ends by {} ms and one that starts there.",
+            last.take, last.start_ms, last.start_ms
         ));
     }
     Ok((takes::video_file(dir, first.take), local))
@@ -1082,6 +1090,7 @@ mod tests {
         let result = transcribe_existing_with(
             &store,
             &id,
+            |_, _| Ok(()),
             |store, session| {
                 // `cue rename` runs while the video is being checked.
                 let (cli, id, done) = (store.clone(), id.clone(), done.clone());
@@ -1113,6 +1122,79 @@ mod tests {
                 assert_eq!(saved.name, "Before");
             }
         }
+    }
+
+    #[test]
+    fn transcribing_again_upgrades_a_take_waiting_to_be_joined_first() {
+        use crate::models::{Take, TakeStatus, TakeVideo};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: None,
+            system_audio: false,
+        };
+        // Saved by an earlier CueReview: take 2 still waits to be joined.
+        let id = session_in(
+            &store,
+            vec![
+                take(1, 0, 2000, TakeStatus::Ready),
+                take(2, 2000, 1500, TakeStatus::Swapping),
+            ],
+        );
+        let folder = store.session_dir(&id).unwrap();
+        fs::write(folder.join("video.mp4"), "2000").unwrap();
+        fs::create_dir_all(takes::take_dir(&folder, 2)).unwrap();
+        fs::write(takes::video_file(&folder, 2), "1500").unwrap();
+        let probe = |path: &Path| -> Result<takes::Media, String> {
+            let duration_ms = fs::read_to_string(path)
+                .map_err(|e| e.to_string())?
+                .trim()
+                .parse()
+                .map_err(|_| "not media".to_string())?;
+            Ok(takes::Media {
+                duration_ms,
+                width: 320,
+                height: 240,
+            })
+        };
+        let mut seen = None;
+        transcribe_existing_with(
+            &store,
+            &id,
+            |store, id| takes::upgrade_with(store, id, &probe),
+            |_, _| Ok(()),
+            |store, id| {
+                seen = Some(store.session(id).unwrap());
+                Ok(Transcript::default())
+            },
+        )
+        .unwrap();
+        // The transcription saw take 2 on the timeline with its own video.
+        let seen = seen.unwrap();
+        assert_eq!(seen.takes[1].status, TakeStatus::Error);
+        assert_eq!(
+            seen.videos,
+            [
+                TakeVideo {
+                    take: 1,
+                    start_ms: 0,
+                    duration_ms: 2000
+                },
+                TakeVideo {
+                    take: 2,
+                    start_ms: 2000,
+                    duration_ms: 1500
+                }
+            ]
+        );
+        assert_eq!(seen.status, "processing");
+        assert_eq!(store.session(&id).unwrap().status, "ready");
     }
 
     #[test]
@@ -1158,9 +1240,13 @@ mod tests {
         let media = |path: &Path, _: u64, _: bool| {
             Ok::<_, String>(words(if path == folder { "First" } else { "Second" }))
         };
-        let transcript = transcribe_existing_with(&store, &id, attached, |store, id| {
-            crate::transcribe::transcribe_with(store, id, &media)
-        })
+        let transcript = transcribe_existing_with(
+            &store,
+            &id,
+            |_, _| Ok(()),
+            attached,
+            |store, id| crate::transcribe::transcribe_with(store, id, &media),
+        )
         .unwrap();
         let placed: Vec<_> = transcript
             .segments
@@ -1189,15 +1275,21 @@ mod tests {
         assert_eq!(store.transcript(&id).unwrap().takes.len(), 2);
 
         // A failure leaves the session in error with the take to retry.
-        let failed = transcribe_existing_with(&store, &id, attached, |store, id| {
-            crate::transcribe::transcribe_with(store, id, &|path: &Path, _, _| {
-                if path == folder {
-                    Ok(words("First"))
-                } else {
-                    Err("Install the local speech model.".to_string())
-                }
-            })
-        });
+        let failed = transcribe_existing_with(
+            &store,
+            &id,
+            |_, _| Ok(()),
+            attached,
+            |store, id| {
+                crate::transcribe::transcribe_with(store, id, &|path: &Path, _, _| {
+                    if path == folder {
+                        Ok(words("First"))
+                    } else {
+                        Err("Install the local speech model.".to_string())
+                    }
+                })
+            },
+        );
         assert_eq!(failed.unwrap_err(), "Install the local speech model.");
         let saved = store.session(&id).unwrap();
         assert_eq!(saved.status, "error");
@@ -1377,7 +1469,7 @@ mod tests {
         let output = dir.path().join("across.mp4");
         let error = clip(&store, &session.id, 70000, 75000, Some(&output)).unwrap_err();
         assert!(
-            error.contains("take 2, which starts at 72000 ms"),
+            error.contains("from take 1 into take 2, whose video starts at 72000 ms"),
             "{error}"
         );
         assert!(!output.exists());
@@ -1395,6 +1487,17 @@ mod tests {
             take_video_at(&folder, &session, 80000).unwrap(),
             (takes::video_file(&folder, 2), 8000, 30000)
         );
+        // A take joined into take 1's video before format 2 is named as itself.
+        let mut joined = session.clone();
+        let mut second = joined.takes[1].clone();
+        second.index = 2;
+        second.offset_ms = 40000;
+        second.duration_ms = 32000;
+        joined.takes[1].index = 3;
+        joined.takes.insert(1, second);
+        joined.videos[1].take = 3;
+        let error = clip_source(&folder, &joined, 70000, 75000).unwrap_err();
+        assert!(error.contains("from take 2 into take 3"), "{error}");
     }
     #[test]
     #[ignore = "Requires FFmpeg; exports frames from two real take videos of different sizes and colours"]

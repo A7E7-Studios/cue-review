@@ -37,8 +37,8 @@ device, and the window first recorded may have closed.
 ### Requirement: Each take keeps its own video
 The app SHALL keep each take's video as its take recorded it, in the take's own folder, and place
 it on the session timeline after the takes before it, without joining, re-encoding or replacing
-any video, because takes of different sources differ in size, and joining them cost a second copy
-of the recording and failed while a player held the file.
+any video, because takes of different sources differ in size, and joining them needs a second copy
+of the recording and cannot replace a file a player holds open.
 
 #### Scenario: Stopping a take
 - **GIVEN** take 2 recording after a take 1 of 1:12
@@ -77,11 +77,15 @@ sessions' takes are already joined in `video.mp4` and their own copies are gone.
 - **WHEN** the app starts, or an agent runs `cue transcribe` on it
 - **THEN** take 2 plays from its own video, or from `video.mp4` when it was already joined, and
   Retry transcribes it
-- **AND** the files left from joining it are deleted
+- **AND** the files left from joining it are deleted, unless `video.mp4` cannot be read, when
+  take 2 keeps waiting
 - **PROOF** test: src-tauri/src/takes.rs::tests::recovery_upgrades_a_take_waiting_to_be_joined
+- **PROOF** test: src-tauri/src/takes.rs::tests::upgrading_a_waiting_take_leaves_the_session_status_alone
+- **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_again_upgrades_a_take_waiting_to_be_joined_first
 
 #### Scenario: A session saved by a newer CueReview
 - **GIVEN** a session whose `formatVersion` is above 2
-- **WHEN** the app or the `cue` CLI reads it
-- **THEN** it is refused with a message to update CueReview, and its files are left as they are
+- **WHEN** the app lists its recordings, or an agent runs `cue info` on it
+- **THEN** the app leaves it out of the sidebar, `cue info` refuses it with a message to update
+  CueReview, and its files are left as they are
 - **PROOF** test: src-tauri/src/store.rs::tests::a_session_of_a_newer_format_is_refused

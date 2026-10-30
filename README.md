@@ -112,7 +112,7 @@ The packages include `cue.exe` on Windows and `cue` on macOS/Linux next to the a
 | `cue find ID --phrase TEXT` | Find a spoken phrase, ignoring case and punctuation: `[{occurrence, startMs, endMs, seekMs, text, cursor?}]`. |
 | `cue frame ID (--at-ms MS \| --phrase TEXT [--occurrence N]) [--max-width N] [--mark-cursor] [--output PATH]` | Export one PNG: `{path, timeMs, width, height, cursor}`. |
 | `cue frames ID (--at-ms MS,MS,... \| --per-segment) [--max-width N] [--mark-cursor] [--output-dir DIR]` | Export several PNGs in one call; `--per-segment` takes one at each segment's seek point and adds `segmentId`. |
-| `cue clip ID --start-ms MS --end-ms MS [--output PATH]` | Export an MP4 clip from one take: `{path}`. A range across a take boundary is refused. |
+| `cue clip ID --start-ms MS --end-ms MS [--output PATH]` | Export an MP4 clip from one take video: `{path}`. A range that crosses into the next take's video is refused. |
 | `cue moments ID [--frames [--max-width N] [--mark-cursor]]` | Spoken pointing moments ("here", "there", "this", "these", "that", "those", "see", "look at", …) with the cursor and the clicks within 1 s: `[{segmentId, term, phrase, seekMs, startMs, endMs, text, cursor, clicks}]`, plus `frame` with `--frames`. |
 | `cue rename ID NAME` | Rename a session. Works while the app is open. |
 | `cue transcribe ID` | Transcribe a finished session again, locally. |
