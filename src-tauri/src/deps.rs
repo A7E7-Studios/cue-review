@@ -17,8 +17,8 @@ pub fn set_resource_dir(path: PathBuf) {
 }
 
 /// The executable `name` runs from. A whisper.cpp runtime folder may hold a
-/// second build for AVX2, FMA and F16C in its `avx2` subfolder, about eight
-/// times faster; it runs on processors that support all three.
+/// second build for AVX2, FMA, F16C and BMI2 in its `avx2` subfolder, about
+/// eight times faster; it runs on processors that support all four.
 pub fn tool(name: &str) -> Result<PathBuf, String> {
     let path = locate(name)?;
     Ok(if name.starts_with("whisper-") {
@@ -44,6 +44,7 @@ fn processor_has_vector() -> bool {
         std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("fma")
             && std::arch::is_x86_feature_detected!("f16c")
+            && std::arch::is_x86_feature_detected!("bmi2")
     }
     #[cfg(not(target_arch = "x86_64"))]
     {

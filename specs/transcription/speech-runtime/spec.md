@@ -16,19 +16,19 @@ which build of it runs and how much of the processor it may use.
 ## Requirements
 
 ### Requirement: The runtime uses the processor's vector instructions
-The app SHALL run the speech runtime built for AVX2, FMA and F16C on a processor that has all
-three, and the build without them on any other, because the build without them transcribes about
-eight times slower, and the build with them cannot start on a processor that lacks them.
+The app SHALL run the speech runtime built for AVX2, FMA, F16C and BMI2 on a processor that has
+all four, and the build without them on any other, because the build without them transcribes
+about eight times slower, and the build with them cannot run on a processor that lacks them.
 
 #### Scenario: A processor with AVX2 runs the fast build
 - **GIVEN** a runtime folder holding both builds
-- **WHEN** the app looks up the speech runtime on a processor with AVX2, FMA and F16C
+- **WHEN** the app looks up the speech runtime on a processor with AVX2, FMA, F16C and BMI2
 - **THEN** it runs the build from the folder's `avx2` subfolder
 - **PROOF** test: src-tauri/src/deps.rs::tests::the_vector_build_runs_where_the_processor_supports_it
 
 #### Scenario: A processor without AVX2 runs the plain build
 - **GIVEN** a runtime folder holding both builds
-- **WHEN** the app looks up the speech runtime on a processor without AVX2, FMA or F16C
+- **WHEN** the app looks up the speech runtime on a processor without AVX2, FMA, F16C or BMI2
 - **THEN** it runs the plain build
 - **AND** a runtime folder without an `avx2` subfolder is used as it is
 - **PROOF** test: src-tauri/src/deps.rs::tests::the_plain_build_runs_where_the_vector_build_cannot

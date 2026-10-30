@@ -22,11 +22,12 @@ if (!existsSync(join(source, '.git'))) {
 }
 const actual = run('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: 'pipe' }).stdout.trim();
 if (actual !== revision) throw new Error(`Unexpected whisper source revision ${actual}. Use a clean .local/whisper-source directory.`);
-// The plain build runs on any processor of the target. On Windows and Linux x64 a second build for
-// AVX2, FMA and F16C goes to the avx2 subfolder; the app runs it where the processor has all three
-// (src-tauri/src/deps.rs), about eight times faster.
-const plain = ['-DGGML_AVX=OFF', '-DGGML_AVX2=OFF', '-DGGML_FMA=OFF', '-DGGML_F16C=OFF'];
-const vector = ['-DGGML_AVX=ON', '-DGGML_AVX2=ON', '-DGGML_FMA=ON', '-DGGML_F16C=ON'];
+// The plain build runs on any processor of the target; on x64 it needs only SSE4.2 (every x64
+// processor since about 2011), as ggml's BMI2 default is off too. On Windows and Linux x64 a second build for AVX2, FMA, F16C and BMI2 goes to the avx2
+// subfolder; the app runs it where the processor has all four (src-tauri/src/deps.rs), about eight
+// times faster.
+const plain = ['-DGGML_AVX=OFF', '-DGGML_AVX2=OFF', '-DGGML_FMA=OFF', '-DGGML_F16C=OFF', '-DGGML_SSE42=ON', '-DGGML_BMI2=OFF'];
+const vector = ['-DGGML_AVX=ON', '-DGGML_AVX2=ON', '-DGGML_FMA=ON', '-DGGML_F16C=ON', '-DGGML_SSE42=ON', '-DGGML_BMI2=ON'];
 const builds = [{ dir: build, flags: plain, out: destination }];
 if (process.arch === 'x64' && process.platform !== 'darwin') builds.push({ dir: `${build}-avx2`, flags: vector, out: join(destination, 'avx2') });
 const suffix = process.platform === 'win32' ? '.exe' : '';

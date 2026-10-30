@@ -33,7 +33,7 @@ update; with the AVX2 build and 4 threads, 1.5–2.6 s.
 
 ## What changes
 
-- The runtime folder holds a second build, for AVX2, FMA and F16C, in its `avx2` subfolder on
+- The runtime folder holds a second build, for AVX2, FMA, F16C and BMI2, in its `avx2` subfolder on
   Windows and Linux x64, and the app runs it where the processor supports it: "A processor with
   AVX2 runs the fast build", "A processor without AVX2 runs the plain build".
 - A recording with about five minutes of speech is transcribed in seconds: "Five minutes of speech
