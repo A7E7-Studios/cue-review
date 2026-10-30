@@ -4,7 +4,7 @@ import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoS
 const sampleVideo = new URL('./sample-capture.webm', import.meta.url).href;
 // 'takes' opens the library session with two takes; 'recording-take' records its take 2.
 // 'window-closed': the window listed as Design review has closed, so Record more refuses it.
-export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'window-closed' | 'camera-sources' | 'camera-blocked';
+export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'window-closed' | 'camera-sources' | 'camera-blocked' | 'camera-no-frame' | 'camera-no-viewer';
 let projects: Project[] = [];
 let recordings: Session[] = [];
 let markers: Marker[] = [];
@@ -81,8 +81,13 @@ export const backend = {
   microphones: async (): Promise<Microphone[]> => [{ id: 'microphone', name: 'Studio microphone' }, { id: 'headset', name: 'Headset microphone' }],
   setup: async (): Promise<SetupStatus> => ({ ready: scenario !== 'setup', modelReady: scenario !== 'setup', issues: scenario === 'setup' ? ['Local speech model is missing.'] : [], dependencies: ['ffmpeg', 'ffprobe', 'whisper-cli', 'whisper-vad-speech-segments', 'adb', 'scrcpy'].map(name => ({ name, available: true })) }),
   preview: async (source: string, id: string) => {
-    if (scenario === 'camera-blocked' && source === 'avfoundation:0' && cameraAttempts++ === 0) {
-      throw new Error('Camera access is blocked. Allow camera access in macOS System Settings, then retry.');
+    if (source === 'avfoundation:0' && cameraAttempts++ === 0) {
+      if (scenario === 'camera-blocked') throw new Error('Camera access is blocked. Allow camera access in macOS System Settings, then retry.');
+      if (scenario === 'camera-no-frame') {
+        // A valid image with no intrinsic dimensions exercises the real first-frame watchdog.
+        return { id, url: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"/>') };
+      }
+      if (scenario === 'camera-no-viewer') throw new Error('Preview could not connect to its viewer. Select Retry to reconnect the preview.');
     }
     return { id, url: previewImage };
   },

@@ -9,7 +9,7 @@
 ## 2. Preview process and transport errors (independent of 1)
 
 - [x] 2.1 Add synthetic decoder failure, bounded-stderr, no-viewer timeout and teardown tests; test: src-tauri/src/preview.rs
-- [x] 2.2 Drain bounded decoder diagnostics concurrently and report actionable startup/stream errors, including no-viewer timeout; test: src-tauri/src/preview.rs
+- [x] 2.2 Drain bounded decoder diagnostics concurrently and report actionable startup/stream errors, including no-viewer timeout; preserve AVFoundation recording-start causes with access/retry guidance; test: src-tauri/src/preview.rs; src-tauri/src/capture.rs::tests::avfoundation_startup_failures_keep_the_cause_and_offer_recovery
 - [x] 2.3 Document preview failure and retry in the root README and retain detailed verification at its documented home; test: node tools/gate/gate.mjs --local
 
 ## 3. First-frame recovery (independent of 1 and 2)

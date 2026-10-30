@@ -30,7 +30,9 @@ error pipe, child teardown, the no-viewer timeout, and a real JPEG through the p
 loopback response without opening a camera. Its ignored `preview_decoder_subprocess_fixture` is a
 private helper invoked by these tests, not a hardware check. Storybook's MacSourcePriority,
 MacCameraSelected and MacCameraBlocked stories use the real App with an in-memory backend; the
-blocked story's Retry restores its fixture preview. These checks do not establish real macOS camera
+blocked story's Retry restores its fixture preview. MacCameraNoFrame exercises the real ten-second
+first-frame watchdog with an image that has no intrinsic dimensions; MacCameraNoViewer renders the
+backend connection-timeout error. Both retain Retry. These checks do not establish real macOS camera
 permission recovery or concurrent preview and recording on physical hardware.
 
 | Area | Covered by |

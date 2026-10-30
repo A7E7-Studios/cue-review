@@ -277,7 +277,9 @@ describe('capture source priority and macos cameras', () => {
   });
 
   it.each(['preview', 'recording'] as const)('shows actionable macos camera startup errors for %s', async phase => {
-    const message = 'Camera access is blocked. Allow camera access in macOS System Settings, then retry.';
+    const message = phase === 'preview'
+      ? 'Camera access is blocked. Allow camera access in macOS System Settings, then retry.'
+      : 'Capture could not start (exit status: 1); see capture.log\nCheck Camera or Screen Recording access in macOS System Settings, close other apps using the source, then retry.';
     backend.sources.mockResolvedValue([display, camera]);
     if (phase === 'preview') backend.preview.mockImplementation(async (sourceId: string, id: string) => {
       if (sourceId === camera.id) throw new Error(message);
@@ -291,7 +293,7 @@ describe('capture source priority and macos cameras', () => {
       await previewOf(camera.name);
       await user.click(screen.getByRole('button', { name: NAMES.record }));
     }
-    expect(await screen.findByText(message)).toBeVisible();
+    expect(await screen.findByText(message.replace(/\s+/g, ' '))).toBeVisible();
     if (phase === 'preview') {
       expect(screen.getByRole('heading', { name: 'Preview unavailable' })).toBeVisible();
       expect(screen.getByRole('button', { name: NAMES.retryPreview })).toBeVisible();

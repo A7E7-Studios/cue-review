@@ -1,6 +1,7 @@
 ---
 title: Camera capture
 code:
+  - src-tauri/src/capture.rs
   - src-tauri/src/preview.rs
   - src/App.tsx
   - src/app/usePreviewStream.ts
@@ -53,6 +54,7 @@ resolving the block, because an indefinitely loading view gives no way to recove
 - **AND** the person can select another source
 - **PROOF** test: src/App.test.tsx::shows actionable macos camera startup errors
 - **PROOF** test: src-tauri/src/preview.rs::tests::decoder_failure_reports_stderr_and_macos_access_guidance
+- **PROOF** test: src-tauri/src/capture.rs::tests::avfoundation_startup_failures_keep_the_cause_and_offer_recovery
 - **PROOF** desk: open
 
 #### Scenario: A camera preview never displays its first frame

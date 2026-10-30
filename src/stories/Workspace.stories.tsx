@@ -11,13 +11,14 @@ import { TrafficLights, usePlatformAttribute } from './Sidebar.stories';
 // do nothing outside the desktop app. macOS draws stand-in traffic lights where the native
 // ones sit. Use the viewport toolbar for 1280 × 820, 900 × 650 and the 520 × 320 compact recorder.
 
-type Scenario = 'fresh' | 'recording' | 'recording-take' | 'processing' | 'takes' | 'window-closed' | 'unavailable' | 'setup' | 'compact' | 'camera-sources' | 'camera-blocked';
+type Scenario = 'fresh' | 'recording' | 'recording-take' | 'processing' | 'takes' | 'window-closed' | 'unavailable' | 'setup' | 'compact' | 'camera-sources' | 'camera-blocked' | 'camera-no-frame' | 'camera-no-viewer';
 const FIXTURE: Record<Scenario, FixtureScenario> = {
   fresh: 'fresh', recording: 'recording', 'recording-take': 'recording-take', processing: 'processing',
   takes: 'takes', 'window-closed': 'window-closed', unavailable: 'unavailable', setup: 'setup', compact: 'recording-take',
   'camera-sources': 'camera-sources', 'camera-blocked': 'camera-blocked',
+  'camera-no-frame': 'camera-no-frame', 'camera-no-viewer': 'camera-no-viewer',
 };
-const SCENARIOS: Scenario[] = ['fresh', 'recording', 'recording-take', 'processing', 'takes', 'window-closed', 'unavailable', 'setup', 'compact', 'camera-sources', 'camera-blocked'];
+const SCENARIOS: Scenario[] = ['fresh', 'recording', 'recording-take', 'processing', 'takes', 'window-closed', 'unavailable', 'setup', 'compact', 'camera-sources', 'camera-blocked', 'camera-no-frame', 'camera-no-viewer'];
 interface Args { scenario: Scenario; platform: Platform }
 
 function Workspace({ scenario, platform }: Args) {
@@ -133,6 +134,27 @@ export const MacCameraBlocked: Story = {
     await userEvent.click(await canvas.findByRole('button', { name: 'Capture screen 0' }));
     await userEvent.click(within(await canvas.findByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'FaceTime HD Camera' }));
     await expect(await canvas.findByRole('heading', { name: 'Preview unavailable' })).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Retry preview' })).toBeVisible();
+  },
+};
+export const MacCameraNoFrame: Story = {
+  args: { platform: 'macos', scenario: 'camera-no-frame' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Capture screen 0' }));
+    await userEvent.click(within(await canvas.findByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'FaceTime HD Camera' }));
+    await expect(await canvas.findByRole('heading', { name: 'Preview unavailable' }, { timeout: 15000 })).toBeVisible();
+    await expect(canvas.getByText(/No preview frame appeared/)).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Retry preview' })).toBeVisible();
+  },
+};
+export const MacCameraNoViewer: Story = {
+  args: { platform: 'macos', scenario: 'camera-no-viewer' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Capture screen 0' }));
+    await userEvent.click(within(await canvas.findByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'FaceTime HD Camera' }));
+    await expect(await canvas.findByText(/Preview could not connect to its viewer/)).toBeVisible();
     await expect(canvas.getByRole('button', { name: 'Retry preview' })).toBeVisible();
   },
 };
