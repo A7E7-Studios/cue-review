@@ -62,7 +62,7 @@ export function Sidebar(props: SidebarProps) {
   const [insertion, setInsertion] = useState<{ id: string; after: boolean } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
-  /** The control that opened the menu: a press on it toggles the menu rather than counting as outside. */
+  /** The … toggle that opened the menu, whose press toggles it rather than counting as outside; null for a menu opened by right-click. */
   const menuAnchor = useRef<HTMLElement | null>(null);
   const typeahead = useRef({ text: '', at: 0 });
   // Move to section opens a submenu beside the recording's menu, as the Claude app's does.
