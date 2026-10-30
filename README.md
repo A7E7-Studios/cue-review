@@ -1,8 +1,38 @@
-# CueReview
+<p align="center">
+  <img src="src-tauri/icons/128x128.png" width="80" height="80" alt="CueReview app icon">
+</p>
 
-**Show it. Say it. Fix it.** A desktop recorder for local, word-aligned review feedback.
+<h1 align="center">CueReview</h1>
 
-CueReview uses Tauri 2, React, and a small Rust backend. It opens directly into a fresh recording draft. Record a display, application window, or supported Android/Quest source with microphone commentary; no project or name is required. Review the transcript beside the video, click a word to seek, record more takes into the same session, and give an agent a local session reference. No account or hosted transcription service is involved.
+<p align="center">
+  <strong>Show it. Say it. Fix it.</strong><br>
+  Record your review. Give your coding agent the context.
+</p>
+
+<p align="center">
+  <a href="https://github.com/A7E7-Studios/cue-review/releases/latest"><strong>Download CueReview</strong></a> ·
+  <a href="#install">Get started</a> ·
+  <a href="#workflow">Workflow</a> ·
+  <a href="#agent-cli">Agent CLI</a>
+</p>
+
+CueReview turns a spoken walkthrough into feedback your coding agent can inspect. Record what you see and explain what needs to change, then review the video beside a searchable transcript. **Copy for agent** gives your agent the local session reference and CLI instructions to retrieve the words, frames and clips it needs.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/cuereview-dark.png">
+  <img src="docs/images/cuereview-light.png" width="1280" alt="CueReview review workspace with recordings in the sidebar, video playback, a word-highlighted transcript, Record more and Copy for agent.">
+</picture>
+
+<p align="center"><sub>The CueReview workspace in light and dark themes, shown with a sample review from the UI workshop.</sub></p>
+
+## Why CueReview
+
+- **Show the issue as you explain it.** Capture a display, window or supported Android/Quest device with spoken commentary. Useful for bug reports, design feedback and testing walkthroughs; see [platform support and setup](#install).
+- **Revisit a moment by its words.** Click transcript words to seek, search recordings by what was said, and add another take with **Record more**.
+- **Give your agent evidence.** The included `cue` CLI retrieves transcripts, frames, clips and supported pointer or touch context from your local recordings.
+- **Keep your review local.** No account or hosted transcription service. Recordings stay on your computer, and transcription works offline after the initial speech setup.
+
+**Record → Review → Hand off.** Open a fresh session, talk through the changes, then click **Copy for agent** and paste the result into your agent's chat. Follow the [workflow](#workflow) for recording and playback controls.
 
 ## Install
 
@@ -11,32 +41,6 @@ Download the Windows installer, Linux Debian package/AppImage, or macOS Apple Si
 The Windows installer installs per user into `%LOCALAPPDATA%\Programs\CueReview` (`cuereview.exe`, `cue.exe` and `tools\whisper-b5454`). Recordings stay in `%LOCALAPPDATA%\CueReview`, so upgrading keeps them. Close CueReview before upgrading, and never upgrade during a recording.
 
 Windows is the hardware-verified platform. macOS uses AVFoundation; Linux uses X11/V4L2. Linux Wayland desktop capture, macOS/Linux per-window capture, macOS/Linux desktop system audio and macOS/Linux cursor tracking are not supported yet. Native macOS/Linux hardware validation remains outstanding. Windows builds are unsigned; macOS builds are ad-hoc signed without notarization. See each release's installation notes and SHA256SUMS.
-
-## Run from source
-
-Requirements: Windows 10/11, Microsoft C++ Build Tools, Rust stable, Node.js 22.12+ or 24+, WebView2, and FFmpeg/ffprobe on PATH. Android and Quest USB capture additionally require ADB and scrcpy on PATH.
-
-```powershell
-npm ci
-npm run tauri dev
-```
-
-On first use, open **Settings → Install transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB). Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
-
-```powershell
-winget install Gyan.FFmpeg
-# For Android/Quest:
-winget install Google.PlatformTools
-winget install Genymobile.scrcpy
-```
-
-Restart the app after changing PATH. Accept the headset's USB debugging prompt, then refresh sources. A Meta Quest virtual camera entry does not establish that a headset is connected: USB devices must appear as `device` in `adb devices -l`. Sources can also fail when a window is minimized, protected content prevents capture, or Windows microphone permissions are disabled.
-
-If another tool manages the device on a nondefault ADB server, launch CueReview and its CLI with that server's `ADB_SERVER_SOCKET`, for example `$env:ADB_SERVER_SOCKET = 'tcp:127.0.0.1:5073'` before starting the executable. Use the existing server rather than resetting unrelated debugging sessions. Quest mirroring currently retains the original stereo view. Registered Meta/Oculus Quest virtual-camera filters are hidden; use the authorized USB headset entry.
-
-All previews stream continuously rather than polling screenshots. Display/window previews use Windows Graphics Capture; Android/Quest previews use the matching installed scrcpy server and FFmpeg; real cameras use FFmpeg. Preview frames fit within 1280×720, with display/window/device streams targeting up to 30 fps. Camera rates depend on the source. Recording resolution is independent of preview resolution. Device previews require the `scrcpy-server` file supplied with scrcpy.
-
-Window recordings keep their initial canvas size. Resizing the source during capture crops or pads to that canvas; choose the desired window size before recording.
 
 ## Workflow
 
@@ -138,6 +142,32 @@ The recommended agent workflow, which Copy for agent spells out with full paths:
 Read the compact transcript first, look at one frame per segment, list the spoken pointing moments, then inspect what you need with a targeted frame or clip. Every time is a session time: frames and clips come from the video of the take the time falls in. Prefer `seekMs` for visual lookup; `startMs`/`endMs` keep the model's original intervals. All timestamps are estimates, so inspect neighboring frames when it matters.
 
 Read-only commands and `rename` run while the app is open. `record`, `transcribe` and `setup --install` take the data folder's process lock and refuse to run beside the app. Every write to a session takes that session's lock in `locks\`, so the app and `cue` never lose each other's updates; the app refreshes the sidebar when its window regains focus. The CLI is the agent interface; no MCP server is needed.
+
+## Run from source
+
+Requirements: Windows 10/11, Microsoft C++ Build Tools, Rust stable, Node.js 22.12+ or 24+, WebView2, and FFmpeg/ffprobe on PATH. Android and Quest USB capture additionally require ADB and scrcpy on PATH.
+
+```powershell
+npm ci
+npm run tauri dev
+```
+
+On first use, open **Settings → Install transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB). Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
+
+```powershell
+winget install Gyan.FFmpeg
+# For Android/Quest:
+winget install Google.PlatformTools
+winget install Genymobile.scrcpy
+```
+
+Restart the app after changing PATH. Accept the headset's USB debugging prompt, then refresh sources. A Meta Quest virtual camera entry does not establish that a headset is connected: USB devices must appear as `device` in `adb devices -l`. Sources can also fail when a window is minimized, protected content prevents capture, or Windows microphone permissions are disabled.
+
+If another tool manages the device on a nondefault ADB server, launch CueReview and its CLI with that server's `ADB_SERVER_SOCKET`, for example `$env:ADB_SERVER_SOCKET = 'tcp:127.0.0.1:5073'` before starting the executable. Use the existing server rather than resetting unrelated debugging sessions. Quest mirroring currently retains the original stereo view. Registered Meta/Oculus Quest virtual-camera filters are hidden; use the authorized USB headset entry.
+
+All previews stream continuously rather than polling screenshots. Display/window previews use Windows Graphics Capture; Android/Quest previews use the matching installed scrcpy server and FFmpeg; real cameras use FFmpeg. Preview frames fit within 1280×720, with display/window/device streams targeting up to 30 fps. Camera rates depend on the source. Recording resolution is independent of preview resolution. Device previews require the `scrcpy-server` file supplied with scrcpy.
+
+Window recordings keep their initial canvas size. Resizing the source during capture crops or pads to that canvas; choose the desired window size before recording.
 
 ## Build and verify
 
