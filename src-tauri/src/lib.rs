@@ -297,13 +297,17 @@ fn delete_section_from_store(s: &Shared, id: &str) -> Result<(), String> {
     s.store.delete_project(id)
 }
 fn delete_session_from_store(s: &Shared, id: &str) -> Result<(), String> {
-    {
+    let refining = {
         let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
         ensure_session_not_in_use(&runtime, id)?;
-        stop_refining(&mut runtime, Some(id));
-    }
+        stop_refining(&mut runtime, Some(id))
+    };
     // A refinement of it holds the inference lock until its Whisper is gone.
-    let _inference = s.inference.lock().map_err(|e| e.to_string())?;
+    let _inference = if refining {
+        Some(s.inference.lock().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     ensure_session_not_in_use(&runtime, id)?;
     s.store.delete_session(id)
@@ -492,8 +496,6 @@ fn activate(
 ) -> Arc<AtomicBool> {
     runtime.last_error = None;
     runtime.live_transcript = None;
-    // Whisper beside a capture runs only with the live threads.
-    stop_refining(runtime, None);
     let cancel = Arc::new(AtomicBool::new(false));
     runtime.live_cancel = Some(cancel.clone());
     runtime.active = Some((session.clone(), active));
@@ -501,8 +503,10 @@ fn activate(
     cancel
 }
 /// Stops the refinements of session `only`, or every one with `None` (a
-/// recording starts); the transcript from Stop stays.
-fn stop_refining(runtime: &mut Runtime, only: Option<&str>) {
+/// recording starts); the transcript from Stop stays. Returns whether one
+/// was running.
+fn stop_refining(runtime: &mut Runtime, only: Option<&str>) -> bool {
+    let before = runtime.refining.len();
     runtime.refining.retain(|(id, cancel)| {
         let stop = only.is_none_or(|only| only == id);
         if stop {
@@ -510,6 +514,7 @@ fn stop_refining(runtime: &mut Runtime, only: Option<&str>) {
         }
         !stop
     });
+    runtime.refining.len() != before
 }
 /// Retry transcribes whole takes: it forgets the stretches saved while
 /// recording and stops a refinement of the recording.
@@ -612,6 +617,8 @@ async fn start_recording(
             session.source_identity = identity;
             s.store.save_session(&session)?;
         }
+        // Whisper beside a capture runs only with the live threads.
+        stop_refining(&mut runtime, None);
         match capture::start_muted(
             config,
             &s.store.session_dir(&session.id)?,
@@ -956,6 +963,8 @@ fn start_take_with(
     };
     let device = config.source_id.starts_with("android:");
     let folder = takes::take_dir(&s.store.session_dir(id)?, take.index);
+    // Whisper beside a capture runs only with the live threads.
+    stop_refining(&mut runtime, None);
     match start(config, &folder, muted) {
         Ok(active) => {
             let session = started.session.clone();
@@ -1190,10 +1199,19 @@ mod orchestration_tests {
             !other.load(Ordering::Acquire),
             "and leaves another recording's"
         );
-        // A recording starting stops every refinement.
-        stop_refining(&mut state.runtime.lock().unwrap(), None);
-        assert!(other.load(Ordering::Acquire));
-        assert!(state.runtime.lock().unwrap().refining.is_empty());
+        // Deleting a recording stops its own refinement only.
+        let deleted = ready_with_takes(&state);
+        let theirs = Arc::new(AtomicBool::new(false));
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .refining
+            .push((deleted.id.clone(), theirs.clone()));
+        delete_session_from_store(&state, &deleted.id).unwrap();
+        assert!(theirs.load(Ordering::Acquire));
+        assert!(!other.load(Ordering::Acquire));
+        assert_eq!(state.runtime.lock().unwrap().refining.len(), 1);
     }
     #[test]
     fn changing_the_language_starts_its_model_download() {
@@ -1515,6 +1533,14 @@ mod orchestration_tests {
             })
             .unwrap();
         let mut asked = None;
+        // A refinement running in the background stops when a take starts.
+        let refining = Arc::new(AtomicBool::new(false));
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .refining
+            .push(("another".into(), refining.clone()));
         let error = start_take_with(
             &state,
             &session.id,
@@ -1529,6 +1555,7 @@ mod orchestration_tests {
         )
         .unwrap_err();
         assert_eq!(error, "The window closed.");
+        assert!(refining.load(Ordering::Acquire));
         let (config, take_folder, muted) = asked.unwrap();
         assert_eq!(config.source_id, "window:4242");
         assert_eq!(config.microphone_id.as_deref(), Some("mic:Headset"));

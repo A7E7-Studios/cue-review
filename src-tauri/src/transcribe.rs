@@ -406,6 +406,18 @@ fn run_whisper_with(
     }
     accept_whisper_output(&prefix, raw)
 }
+/// [`media_source`] for Stop: saved stretches it cannot use are forgotten,
+/// for they are no transcript to refine later.
+fn reused_source(
+    folder: &Path,
+    usable: impl Fn(&str) -> Option<Stretches>,
+) -> (std::path::PathBuf, Option<Stretches>) {
+    let (source, saved) = media_source(folder, usable);
+    if saved.is_none() {
+        stretches::forget(folder);
+    }
+    (source, saved)
+}
 /// The audio a take folder is transcribed from, and the saved stretches to
 /// reuse with it (`usable` gives them for a file name): `mic.wav`; else
 /// `system.wav` when it has usable stretches, for a take without a
@@ -792,16 +804,12 @@ fn transcribe_media_with(
     }
     let language = settings::language(&settings::load(root));
     let (source, saved) = if reuse {
-        media_source(folder, |name| {
+        reused_source(folder, |name| {
             stretches::usable(folder, name, &file_name(&model.path), language)
         })
     } else {
         media_source(folder, |_| None)
     };
-    if reuse && saved.is_none() {
-        // Stretches this pass cannot use are no transcript to refine later.
-        stretches::forget(folder);
-    }
     let from_ms = saved
         .as_ref()
         .map_or(0, |saved| saved.until_ms.min(duration_ms));
@@ -1205,6 +1213,14 @@ Speech segment 0: start = 1.0, end = 2.0
         has("mic.wav");
         assert_eq!(source(&saved), ("mic.wav".into(), Some("mic.wav".into())));
         assert_eq!(source(&|_| None), ("mic.wav".into(), None));
+        // Stop forgets stretches it cannot use, and keeps those it uses.
+        let kept = Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        stretches::save(folder.path(), &kept).unwrap();
+        let file = stretches::folder(folder.path()).join("stretches.json");
+        reused_source(folder.path(), saved);
+        assert!(file.exists());
+        reused_source(folder.path(), |_| None);
+        assert!(!file.exists());
     }
     #[test]
     fn stop_s_stretches_are_refined_by_a_whole_take_pass() {

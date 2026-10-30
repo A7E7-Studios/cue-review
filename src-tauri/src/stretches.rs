@@ -84,9 +84,20 @@ pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
         .chain(regions.windows(2).map(|pair| (pair[0].1, pair[1].0)))
         .filter(|&(end, start)| start <= MAX_STRETCH_MS && start >= end + SHORT_GAP_MS)
         .max_by_key(|&(end, start)| start - end);
-    Some(Cut {
-        at_ms: gap.map_or(MAX_STRETCH_MS, |(end, start)| (end + start) / 2),
-        speech: true,
+    Some(match gap {
+        // Cut in the silence before the first word: that part holds no speech.
+        Some((0, start)) => Cut {
+            at_ms: start / 2,
+            speech: false,
+        },
+        Some((end, start)) => Cut {
+            at_ms: (end + start) / 2,
+            speech: true,
+        },
+        None => Cut {
+            at_ms: MAX_STRETCH_MS,
+            speech: true,
+        },
     })
 }
 
@@ -363,7 +374,13 @@ mod tests {
             speech(20_250)
         );
         // Silence before continuous speech: cut in that silence, not mid-word.
-        assert_eq!(cut(&[(20_000, 33_000)], 33_100), speech(10_000));
+        assert_eq!(
+            cut(&[(20_000, 33_000)], 33_100),
+            Some(Cut {
+                at_ms: 10_000,
+                speech: false
+            })
+        );
         // Gaps after 30 s do not count.
         assert_eq!(
             cut(&[(0, 30_100), (30_400, 33_000)], 33_100),

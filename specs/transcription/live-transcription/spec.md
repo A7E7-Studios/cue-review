@@ -61,8 +61,8 @@ word included; else at 30 s. Audio without speech is skipped, all but its last s
 
 ### Requirement: A transcript made from stretches is refined after Stop
 The app SHALL transcribe each take whose transcript came from stretches once more as a whole, in
-the background after Stop, and replace its words, and SHALL give that up when any recording starts,
-or Retry runs or a delete starts for that recording, because stretches made about 4 points more word errors than
+the background after Stop, and replace its words, and SHALL give that up when any recording
+starts, or when Retry or a delete starts for that recording, because stretches made about 4 points more word errors than
 a whole-take pass on a five-minute review.
 
 #### Scenario: The words improve shortly after Stop
@@ -73,6 +73,7 @@ a whole-take pass on a five-minute review.
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::stop_s_stretches_are_refined_by_a_whole_take_pass
 - **PROOF** test: src/App.test.tsx::reads the open transcript again once it is refined after Stop
 - **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::retry_forgets_stretches_and_refinements_stop_only_for_their_recording
+- **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::record_more_records_the_source_it_is_given
 - **PROOF** desk: open
 
 ### Requirement: The words being spoken appear within a few seconds
