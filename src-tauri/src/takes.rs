@@ -1449,7 +1449,12 @@ mod tests {
         recover_with(&store, &unreadable, &Fake).unwrap();
         let session = store.session(&unreadable).unwrap();
         assert_eq!(session.takes[1].status, TakeStatus::Swapping);
-        assert!(take_dir(&dir, 2).join("swap.json").is_file());
+        for name in JOIN_LEFTOVERS {
+            assert!(take_dir(&dir, 2).join(name).is_file(), "{name}");
+        }
+        // Stray temporary files in the session folder go either way.
+        assert!(!dir.join("video.5d0c7a3e-waiting.tmp.mp4").exists());
+        assert!(!dir.join("concat-t2.ffconcat").exists());
 
         // In neither video: interrupted, the session ready again.
         let (lost, dir) = crashed(&store, "error", waiting(), 2000);

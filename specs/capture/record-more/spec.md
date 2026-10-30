@@ -77,11 +77,13 @@ sessions' takes are already joined in `video.mp4` and their own copies are gone.
 - **WHEN** the app starts, or an agent runs `cue transcribe` on it
 - **THEN** take 2 plays from its own video, or from `video.mp4` when it was already joined, and
   Retry transcribes it
-- **AND** the files left from joining it are deleted, unless `video.mp4` cannot be read, when
-  take 2 keeps waiting
+- **AND** the files left from joining it are deleted; while `video.mp4` cannot be read, take 2
+  keeps waiting with the files in its own folder, and only stray temporary files in the session
+  folder go
 - **PROOF** test: src-tauri/src/takes.rs::tests::recovery_upgrades_a_take_waiting_to_be_joined
 - **PROOF** test: src-tauri/src/takes.rs::tests::upgrading_a_waiting_take_leaves_the_session_status_alone
 - **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_again_upgrades_a_take_waiting_to_be_joined_first
+- **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::retrying_a_take_that_still_waits_says_why
 
 #### Scenario: A session saved by a newer CueReview
 - **GIVEN** a session whose `formatVersion` is above 2

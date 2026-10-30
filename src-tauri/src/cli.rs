@@ -329,7 +329,7 @@ const SPECS: &[Spec] = &[
         positionals: &["SESSION_ID", "INDEX"],
         required: 2,
         options: &[],
-        notes: "A take of an older session that still waited to be added is upgraded when CueReview starts, or by cue transcribe, and plays from its own video.",
+        notes: "A take of an older session that still waited to be added is upgraded when CueReview starts, or by cue transcribe: it plays from its own video, or inside video.mp4 when it was already added. While video.mp4 cannot be read it keeps waiting.",
     },
     Spec {
         name: "setup",

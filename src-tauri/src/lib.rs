@@ -1335,6 +1335,46 @@ mod orchestration_tests {
         assert!(state.runtime.lock().unwrap().active.is_none());
     }
     #[test]
+    fn retrying_a_take_that_still_waits_says_why() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let mut session = ready_with_takes(&state);
+        let take = |index, offset_ms, duration_ms, status| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: None,
+            system_audio: false,
+        };
+        // Saved by an earlier CueReview, with a video.mp4 that cannot be read.
+        session.status = "processing".into();
+        session.takes = vec![
+            take(1, 0, 2000, TakeStatus::Ready),
+            take(2, 2000, 1500, TakeStatus::Swapping),
+            take(3, 3500, 500, TakeStatus::Interrupted),
+        ];
+        state.store.save_session(&session).unwrap();
+        let dir = state.store.session_dir(&session.id).unwrap();
+        std::fs::write(dir.join("video.mp4"), b"not a video").unwrap();
+        let error = run_take(&state, &session.id, 2).unwrap_err();
+        assert!(
+            error.contains("Take 2 still waits to be added")
+                && error.contains("Try again once video.mp4 can be read"),
+            "{error}"
+        );
+        let saved = state.store.session(&session.id).unwrap();
+        assert_eq!(saved.takes[1].status, TakeStatus::Swapping);
+        assert_eq!(saved.status, "processing");
+        // A take that is off the timeline is never transcribed.
+        assert_eq!(
+            run_take(&state, &session.id, 3).unwrap_err(),
+            "Take 3 has no usable video."
+        );
+    }
+    #[test]
     fn retrying_a_take_transcribes_only_it_and_settles_the_session() {
         let folder = tempfile::tempdir().unwrap();
         let state = state(folder.path().into());

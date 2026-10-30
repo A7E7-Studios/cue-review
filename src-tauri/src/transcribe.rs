@@ -914,7 +914,7 @@ mod tests {
             serde_json::to_value(&transcript).unwrap()
         );
 
-        // A take still waiting to be joined stops it, with the way to upgrade it.
+        // A take still waiting to be joined stops it, saying why it could not be checked.
         store
             .update_session(&id, |s| {
                 s.takes.push(take(5, 4500, 800, TakeStatus::Swapping, true));
