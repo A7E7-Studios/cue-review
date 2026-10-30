@@ -21,7 +21,7 @@ Each direction is drawn as the same sample line at 13.5 px and 12 px in Edge at 
 |---|---|---|
 | Review workspace | light | `look/review-light.png` |
 | Review workspace | dark | `look/review-dark.png` |
-| Settings | before (left) and after (right), zoomed 2× | `look/settings-before-after.png` |
+| Settings | before (top) and after (bottom), zoomed 2× | `look/settings-before-after.png` |
 
 Review workspace, light:
 
@@ -31,7 +31,7 @@ Review workspace, dark:
 
 ![Review workspace, dark](look/review-dark.png)
 
-Settings, before and after, zoomed 2×:
+Settings, before (top) and after (bottom), zoomed 2×:
 
 ![Settings before and after](look/settings-before-after.png)
 

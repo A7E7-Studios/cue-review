@@ -20,6 +20,7 @@ SOURCE = ROOT / 'node_modules' / '@fontsource-variable' / 'figtree' / 'files'
 OUT = ROOT / 'src' / 'assets' / 'fonts'
 SUBSETS = ('latin', 'latin-ext')
 WEIGHTS = (400, 500, 600, 700)
+STYLES = {400: 'Regular', 500: 'Medium', 600: 'SemiBold', 700: 'Bold'}
 
 
 def instance(subset: str, weight: int) -> bytes:
@@ -30,6 +31,23 @@ def instance(subset: str, weight: int) -> bytes:
     return plain.getvalue()
 
 
+def name_face(font: TTFont, weight: int) -> None:
+    """Names the face for its weight; the variable font's names describe its default instance."""
+    style = STYLES[weight]
+    names = font['name']
+    for record in list(names.names):
+        if record.nameID in (1, 2, 3, 4, 6, 16, 17):
+            names.removeNames(nameID=record.nameID)
+    plain = style in ('Regular', 'Bold')
+    names.setName('Figtree' if plain else f'Figtree {style}', 1, 3, 1, 0x409)
+    names.setName(style if plain else 'Regular', 2, 3, 1, 0x409)
+    names.setName(f'Figtree-{style};hinted', 3, 3, 1, 0x409)
+    names.setName(f'Figtree {style}', 4, 3, 1, 0x409)
+    names.setName(f'Figtree-{style}', 6, 3, 1, 0x409)
+    names.setName('Figtree', 16, 3, 1, 0x409)
+    names.setName(style, 17, 3, 1, 0x409)
+
+
 def build(subset: str, weight: int) -> pathlib.Path:
     # Hint stems and the x-height for the sizes the app sets text at (11-19 px); Windows' ClearType
     # then snaps them to whole pixels. The latin-ext subset lacks the standard letters ttfautohint
@@ -37,6 +55,7 @@ def build(subset: str, weight: int) -> pathlib.Path:
     # of the same weight, which keeps accented letters aligned with the plain ones.
     reference = {} if subset == 'latin' else {'reference_buffer': instance('latin', weight), 'symbol': True}
     hinted = TTFont(io.BytesIO(ttfautohint.ttfautohint(in_buffer=instance(subset, weight), hinting_range_max=50, windows_compatibility=True, **reference)), recalcTimestamp=False)
+    name_face(hinted, weight)
     # A fixed timestamp keeps the build reproducible: the same package gives the same files.
     hinted['head'].modified = hinted['head'].created
     hinted.flavor = 'woff2'

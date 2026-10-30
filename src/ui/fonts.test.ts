@@ -48,6 +48,13 @@ describe('the bundled typeface', () => {
     }
   });
 
+  it('is the family the app and Storybook set text in', () => {
+    const family = /--font-family:\s*'([^']+)'/.exec(readFileSync('src/ui/tokens.css', 'utf8'))?.[1];
+    expect(family).toBe('Figtree');
+    expect(readFileSync('src/main.tsx', 'utf8')).toMatch(/import '\.\/ui\/fonts\.css';/);
+    expect(readFileSync('.storybook/preview.tsx', 'utf8')).toMatch(/import '\.\.\/src\/ui\/fonts\.css';/);
+  });
+
   it('declares a face for every weight the styles use', () => {
     const tokens = readFileSync('src/ui/tokens.css', 'utf8');
     const resolve = (value: string) => {

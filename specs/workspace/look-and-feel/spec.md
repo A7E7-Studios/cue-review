@@ -70,7 +70,7 @@ menu never offers what would be refused.
 ### Requirement: Text is sharp at 100% display scaling
 The app SHALL set its text in a hinted build of its typeface, in every weight its styles use,
 because the unhinted Figtree blurs at the app's 12–14 px sizes on a display at 100% scaling, and a
-weight without its own face would be synthesized or fall back to another font.
+weight without its own face would render in the nearest declared weight instead of its own.
 
 #### Scenario: Text renders sharply at 100% display scaling
 - **GIVEN** Windows at 100% display scaling
@@ -78,6 +78,7 @@ weight without its own face would be synthesized or fall back to another font.
 - **THEN** letter stems are crisp, with no grey fringe beside each stroke
 - **AND** the text keeps the Float v2 typeface, sizes and line breaks
 - **PROOF** test: src/ui/fonts.test.ts::ships hinted static Figtree faces
+- **PROOF** test: src/ui/fonts.test.ts::is the family the app and Storybook set text in
 - **PROOF** desk: open
 
 #### Scenario: Every weight the styles use has its own face
