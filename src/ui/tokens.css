@@ -131,7 +131,6 @@
   --color-button: #FFFFFF;
   --color-control-ring: #DCDFE5;
   --shadow-button: 0 0 0 1px var(--color-control-ring), 0 1px 2px rgba(16, 24, 40, .06);
-  --shadow-new-recording: var(--shadow-button);
   /* The macOS toolbar's search field. */
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #E4E6EB;
@@ -185,8 +184,7 @@
   --radius-field: 7px;
   --radius-row: 8px;
   --radius-video: 12px;
-  /* FloatV2ReviewMac: a lighter ring on New recording and a cooler search field. */
-  --shadow-new-recording: 0 0 0 1px rgba(24, 24, 27, .07), 0 1px 2px rgba(16, 24, 40, .06);
+  /* FloatV2ReviewMac: a cooler search field. */
   --color-toolbar-search: #F2F3F6;
 }
 
@@ -252,7 +250,6 @@
   --color-text-tertiary-on-selected: #9393A0;
   --color-button: #232328;
   --color-control-ring: #34343B;
-  --shadow-new-recording: var(--shadow-button);
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #232328;
   --color-record-disabled: #6B4446;

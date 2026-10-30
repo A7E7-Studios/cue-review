@@ -43,7 +43,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 1. Open CueReview. A fresh unnamed recording is ready. The source and microphone pickers sit directly under the preview.
 2. Press Record (`Ctrl+R`, `⌘R` on macOS). While recording, the controls under the preview become the recording dock: timer, take number, microphone level, the locked source, mute, compact mode and Stop. Compact mode keeps the dock available in a small window.
 3. Stop. The video is finalized and transcribed locally. Original media remains available if transcription fails; use Retry after fixing setup.
-4. Find the recording in the sidebar. Its title comes from the transcript; click the title to rename it. Search (`Ctrl+K`) filters recordings by name. Drag a recording into a section, or right-click and choose **Move to section**. Sections are optional categories in the same list; drag back to Recents to ungroup. Grouping never moves the media files. Drag section headings to reorder them. Deleting a section returns its recordings to Recents; deleting a recording from its menu requires confirmation and removes its files.
+4. Find the recording in the sidebar. Its title comes from the transcript; click the title to rename it. Search (`Ctrl+K`) filters recordings by name. Drag a recording into a section, or right-click and choose **Move to section**. Right-click empty space in the sidebar (or the **New session** row) for **New session** and **New section**. Sections are optional categories in the same list; drag back to Recents to ungroup. Grouping never moves the media files. Drag section headings to reorder them. Deleting a section returns its recordings to Recents; deleting a recording from its menu requires confirmation and removes its files.
 5. Play the recording and click transcript words to seek. The transcript follows playback until you scroll away; **Return to playback**, or scrolling the playing sentence back into view, resumes following. While recording it follows the newest words, and **Back to live** returns to them. **Find in transcript** searches the text, and **Focus video** hides the transcript. The standard model uses DTW alignment points for visual lookup while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
 6. **Record more** continues the same session as a new take, from the same source. The scrubber shows a tick where each take starts, and the transcript shows a "Take 2 · 0:42" divider. Only the new take is transcribed.
 7. **Copy for agent**, or open the session folder.
@@ -51,7 +51,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 | Action | Windows and Linux | macOS |
 | --- | --- | --- |
 | Record in a new draft, Record more in review, Stop while recording | `Ctrl+R` | `⌘R` |
-| New recording (the only way to start a new session) | `Ctrl+N` | `⌘N` |
+| New session (the only way to start a new recording) | `Ctrl+N` | `⌘N` |
 | Search recordings | `Ctrl+K` | `⌘K` |
 | Play or pause | `Space` | `Space` |
 | Seek back or forward 5 seconds | `←` / `→` | `←` / `→` |
