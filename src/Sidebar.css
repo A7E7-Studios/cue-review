@@ -135,6 +135,9 @@
 .sidebar-menu[data-state=exiting] { pointer-events: none; }
 .sidebar-menu button { width: 100%; min-height: 32px; justify-content: flex-start; padding: 6px 8px; text-align: left; overflow-wrap: anywhere; }
 .sidebar-menu button:hover { background: var(--color-row-hover); }
+/* Shown but refused (the sidebar's menu while recording): dimmed like a disabled button, still focusable. */
+.sidebar-menu button[aria-disabled='true'] { opacity: .42; cursor: default; }
+.sidebar-menu button[aria-disabled='true']:hover { background: none; }
 .sidebar-menu button > svg { width: 12px; height: 12px; }
 .sidebar-menu button:not(.menu-separated) > svg:last-child { margin-left: auto; }
 .sidebar-menu .menu-separated { border-top: 1px solid var(--color-divider); border-radius: 0; margin-top: 4px; padding-top: 9px; }

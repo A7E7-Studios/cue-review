@@ -21,6 +21,7 @@ Each direction is shown in review and with the sidebar's menu open.
 | workspace | review, dark | `look/workspace-review-dark.png` |
 | workspace | recording (New session dimmed) | `look/workspace-recording.png` |
 | sidebar | menu on empty space | `look/sidebar-menu.png` |
+| sidebar | menu while recording (items disabled) | `look/sidebar-menu-recording.png` |
 
 Workspace, review, light:
 
@@ -37,6 +38,10 @@ Workspace, recording:
 Sidebar, menu on empty space:
 
 ![Sidebar menu](look/sidebar-menu.png)
+
+Sidebar, menu while recording:
+
+![Sidebar menu while recording](look/sidebar-menu-recording.png)
 
 ## Components
 

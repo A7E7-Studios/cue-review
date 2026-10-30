@@ -110,6 +110,8 @@ export const Empty: Story = { args: { empty: true } };
 export const LongNames: Story = { args: { longNames: true } };
 export const LongList: Story = { args: { longList: true } };
 export const Busy: Story = { args: { locked: true } };
+/** While recording the sidebar's menu still opens, with both items disabled. */
+export const SidebarMenuWhileRecording: Story = { args: { locked: true }, play: SidebarMenu.play };
 export const Loading: Story = { args: { empty: true, loading: true } };
 export const MoveToRecents: Story = {
   play: async ({ canvasElement }) => {
