@@ -1,14 +1,18 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { DragEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import type { DragEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Project, Session } from './backend';
 import { platform as detectPlatform, shortcut } from './chrome/windowApi';
 import { Icon } from './icons';
 import { formatTime } from './review';
+import { placeSubmenu } from './ui/submenuPlacement';
 import { usePresence } from './ui/usePresence';
 import { NAMES } from './workspace/types';
 import type { SidebarProps } from './workspace/types';
 
-type Menu = { kind: 'session' | 'section'; id: string; x: number; y: number; moving: boolean };
+type Menu = { kind: 'session' | 'section'; id: string; x: number; y: number };
+/** The Move to section submenu opens after the pointer rests this long, and closes this long after it leaves for another item. */
+const SUBMENU_OPEN_MS = 100;
+const SUBMENU_CLOSE_MS = 150;
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
 
 function shortDate(value: string) {
@@ -58,9 +62,25 @@ export function Sidebar(props: SidebarProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const typeahead = useRef({ text: '', at: 0 });
+  // Move to section opens a submenu beside the recording's menu, as the Claude app's does.
+  const [submenu, setSubmenu] = useState(false);
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const moveItem = useRef<HTMLButtonElement>(null);
+  const submenuTimer = useRef(0);
+  const focusSubmenu = useRef(false);
+  const submenuId = useId();
   const movable = (item: Session) => !locked && !inProgress(item);
   const expand = (id: string) => setClosed(current => { const next = new Set(current); next.delete(id); return next; });
-  const closeMenu = () => { setMenu(null); returnFocus.current?.focus(); };
+  const closeMenu = () => { window.clearTimeout(submenuTimer.current); setSubmenu(false); setMenu(null); returnFocus.current?.focus(); };
+  const openSubmenu = (focus: boolean) => { window.clearTimeout(submenuTimer.current); focusSubmenu.current = focus; setSubmenu(true); };
+  const closeSubmenu = () => { window.clearTimeout(submenuTimer.current); setSubmenu(false); moveItem.current?.focus(); };
+  /** Opens or closes the submenu after a pause, so a pointer crossing an item on its way does not flicker it. */
+  const scheduleSubmenu = (open: boolean) => {
+    window.clearTimeout(submenuTimer.current);
+    submenuTimer.current = window.setTimeout(() => { focusSubmenu.current = false; setSubmenu(open); }, open ? SUBMENU_OPEN_MS : SUBMENU_CLOSE_MS);
+  };
+  /** Pointing at another item of the recording's menu closes the submenu after a pause. */
+  const leaveMoveItem = () => { if (submenu) scheduleSubmenu(false); else window.clearTimeout(submenuTimer.current); };
   const menuSession = shownMenu?.kind === 'session' ? sessions.find(item => item.id === shownMenu.id) : undefined;
   const menuSection = shownMenu?.kind === 'section' ? sections.find(item => item.id === shownMenu.id) : undefined;
   const sectionDeletable = (id: string) => !locked && !sessions.some(item => item.projectId === id && inProgress(item));
@@ -80,12 +100,29 @@ export function Sidebar(props: SidebarProps) {
     window.addEventListener('resize', position);
     return () => window.removeEventListener('resize', position);
   }, [menu]);
+  useLayoutEffect(() => {
+    if (!submenu || !submenuRef.current) return;
+    const position = () => {
+      const panel = submenuRef.current, parent = menuRef.current, trigger = moveItem.current;
+      if (!panel || !parent || !trigger) return;
+      const { offsetWidth: width, offsetHeight: height } = panel;
+      const placed = placeSubmenu(trigger.getBoundingClientRect(), parent.getBoundingClientRect(), { width, height }, { width: window.innerWidth, height: window.innerHeight });
+      panel.style.left = `${placed.left}px`; panel.style.top = `${placed.top}px`; panel.dataset.side = placed.side;
+    };
+    position();
+    if (focusSubmenu.current) submenuRef.current.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    focusSubmenu.current = false;
+    window.addEventListener('resize', position);
+    return () => window.removeEventListener('resize', position);
+  }, [submenu]);
+  useEffect(() => () => window.clearTimeout(submenuTimer.current), []);
   useEffect(() => {
+    window.clearTimeout(submenuTimer.current); setSubmenu(false);
     if (!menu) return;
     typeahead.current = { text: '', at: 0 };
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !returnFocus.current?.contains(event.target)) setMenu(null);
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !submenuRef.current?.contains(event.target) && !returnFocus.current?.contains(event.target)) setMenu(null);
     };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
@@ -96,12 +133,35 @@ export function Sidebar(props: SidebarProps) {
     if (!movable(item)) return;
     const rect = anchor.getBoundingClientRect();
     returnFocus.current = anchor;
-    setMenu({ kind: 'session', id: item.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
+    setMenu({ kind: 'session', id: item.id, x: x ?? rect.right, y: y ?? rect.top });
   };
   const openSectionMenu = (section: Project, anchor: HTMLElement, x?: number, y?: number) => {
     if (locked) return;
     const rect = anchor.getBoundingClientRect(); returnFocus.current = anchor;
-    setMenu({ kind: 'section', id: section.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
+    setMenu({ kind: 'section', id: section.id, x: x ?? rect.right, y: y ?? rect.top });
+  };
+  /** Arrow keys, Home/End and typeahead within one menu; `back` handles Escape (and ArrowLeft in the submenu). */
+  const menuKeys = (container: HTMLElement | null, event: ReactKeyboardEvent, back: () => void, nested: boolean) => {
+    event.stopPropagation();
+    const buttons = [...(container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') || [])];
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length]?.focus();
+    } else if (event.key === 'Escape' || (nested && event.key === 'ArrowLeft')) { event.preventDefault(); back(); }
+    else if (event.key === 'Tab') { closeMenu(); }
+    else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      const now = Date.now();
+      const letter = event.key.toLocaleLowerCase();
+      const text = now - typeahead.current.at < 700 ? typeahead.current.text + letter : letter;
+      typeahead.current = { text, at: now };
+      const query = [...text].every(char => char === letter) ? letter : text;
+      [...buttons.slice(index + 1), ...buttons.slice(0, index + 1)].find(button => button.textContent?.trim().toLocaleLowerCase().startsWith(query))?.focus();
+    }
+  };
+  /** One tab stop per menu: its focused item. */
+  const rovingFocus = (container: HTMLElement | null, target: EventTarget) => {
+    container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]').forEach(button => { button.tabIndex = button === target ? 0 : -1; });
   };
   const reorder = async (id: string, targetId: string | null, after: boolean) => {
     if (locked || id === targetId || !sections.some(item => item.id === id)) return;
@@ -209,6 +269,8 @@ export function Sidebar(props: SidebarProps) {
               onDragEnd={finishDrag}
               onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }}
               aria-expanded={!sectionClosed} onClick={() => toggleSection(section.id)}><span>{section.name}</span><Icon name="chevron" className="section-chevron"/></button>
+            {props.onNewInSection && !locked && !filtering && <button className="section-new" aria-label={NAMES.newSessionInSection(section.name)} title={NAMES.newSessionInSection(section.name)}
+              onClick={() => { expand(section.id); props.onNewInSection?.(section.id); }}><Icon name="plus"/></button>}
             <button className="section-options" disabled={locked} aria-label={NAMES.sectionOptions(section.name)} aria-haspopup="menu" aria-expanded={menu?.kind === 'section' && menu.id === section.id} onClick={event => menu?.kind === 'section' && menu.id === section.id ? closeMenu() : openSectionMenu(section, event.currentTarget)}><Icon name="more"/></button>
           </div>
           <div className="section-reveal" data-open={!sectionClosed} aria-hidden={sectionClosed} inert={sectionClosed}><div className="section-sessions">{matches.filter(item => item.projectId === section.id).map(renderSession)}{!sessions.some(item => item.projectId === section.id) && <p className="side-empty">{dragging ? 'Drop here' : NAMES.noRecordings}</p>}</div></div>
@@ -222,44 +284,30 @@ export function Sidebar(props: SidebarProps) {
       <div className="side-filter-status" role="status">{noMatches && <p className="side-empty">{NAMES.noMatches}</p>}</div>
     </div>
     {props.utilities && <div className="side-bottom">{props.utilities}</div>}
-    {menuPresence.present && shownMenu && (menuSession || menuSection) && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'section' ? NAMES.sectionActions : shownMenu.moving ? NAMES.moveToSection : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }} onFocus={event => {
-      menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]').forEach(button => { button.tabIndex = button === (event.target as HTMLElement) ? 0 : -1; });
-    }} onKeyDown={event => {
-      event.stopPropagation();
-      const buttons = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') || [])];
-      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-        event.preventDefault(); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length]?.focus();
-      } else if (event.key === 'Escape') { event.preventDefault(); closeMenu(); }
-      else if (event.key === 'Tab') { closeMenu(); }
-      else if (event.key === 'ArrowLeft' && shownMenu.moving) { event.preventDefault(); setMenu({ ...shownMenu, moving: false }); }
-      else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
-        event.preventDefault();
-        const now = Date.now();
-        const letter = event.key.toLocaleLowerCase();
-        const text = now - typeahead.current.at < 700 ? typeahead.current.text + letter : letter;
-        typeahead.current = { text, at: now };
-        const query = [...text].every(char => char === letter) ? letter : text;
-        [...buttons.slice(index + 1), ...buttons.slice(0, index + 1)].find(button => button.textContent?.trim().toLocaleLowerCase().startsWith(query))?.focus();
-      }
-    }}>
+    {menuPresence.present && shownMenu && (menuSession || menuSection) && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'section' ? NAMES.sectionActions : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }}
+      onFocus={event => rovingFocus(menuRef.current, event.target)} onKeyDown={event => menuKeys(menuRef.current, event, closeMenu, false)}>
       {menuSection ? <>
         <button role="menuitem" onClick={() => { closeMenu(); props.onRenameSection(menuSection); }}>{NAMES.rename}</button>
         <button role="menuitem" disabled={sections[0]?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index - 1]?.id ?? null, false); }}>{NAMES.moveUp}</button>
         <button role="menuitem" disabled={sections.at(-1)?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index + 1]?.id ?? null, true); }}>{NAMES.moveDown}</button>
+        <button role="menuitem" onClick={() => { closeMenu(); props.onCreateSection(); }}>{NAMES.newSectionItem}</button>
         <button role="menuitem" className="menu-separated destructive" disabled={!sectionDeletable(menuSection.id)} title={!sectionDeletable(menuSection.id) ? 'Finish recording and processing before deleting this section.' : undefined} onClick={() => { closeMenu(); props.onDeleteSection(menuSection); }}>{NAMES.deleteSectionItem}</button>
-      </> : menuSession && (shownMenu.moving ? <>
-        <div className="sidebar-menu-title">{NAMES.moveToSection}</div>
-        <div className="section-destinations">
-          <button role="menuitem" disabled={!menuSession.projectId} onClick={() => void move(menuSession.id, null)}>{NAMES.recents}{!menuSession.projectId && <Icon name="check"/>}</button>
-          {sections.map(section => <button role="menuitem" key={section.id} disabled={menuSession.projectId === section.id} onClick={() => void move(menuSession.id, section.id)}>{section.name}{menuSession.projectId === section.id && <Icon name="check"/>}</button>)}
-        </div>
-        <button className="menu-separated" role="menuitem" onClick={() => { closeMenu(); props.onCreateSection(menuSession.id); }}><Icon name="plus"/>{NAMES.newSection}</button>
-      </> : <>
-        <button role="menuitem" onClick={() => setMenu({ ...shownMenu, moving: true })} onKeyDown={event => { if (event.key === 'ArrowRight') { event.preventDefault(); setMenu({ ...shownMenu, moving: true }); } }}>{NAMES.moveToSection}<Icon name="chevron"/></button>
-        <button role="menuitem" onClick={() => { closeMenu(); props.onRename(menuSession); }}>{NAMES.rename}</button>
-        <button role="menuitem" className="menu-separated destructive" onClick={() => { closeMenu(); props.onDeleteSession(menuSession); }}>{NAMES.deleteRecordingItem}</button>
-      </>)}
+      </> : menuSession && <>
+        <button ref={moveItem} role="menuitem" aria-haspopup="menu" aria-expanded={submenu} aria-controls={submenu ? submenuId : undefined}
+          onPointerEnter={() => scheduleSubmenu(true)} onClick={() => openSubmenu(false)}
+          onKeyDown={event => { if (['ArrowRight', 'Enter', ' '].includes(event.key)) { event.preventDefault(); event.stopPropagation(); openSubmenu(true); } }}>{NAMES.moveToSection}<Icon name="chevron"/></button>
+        <button role="menuitem" onPointerEnter={leaveMoveItem} onClick={() => { closeMenu(); props.onRename(menuSession); }}>{NAMES.rename}</button>
+        <button role="menuitem" className="menu-separated destructive" onPointerEnter={leaveMoveItem} onClick={() => { closeMenu(); props.onDeleteSession(menuSession); }}>{NAMES.deleteRecordingItem}</button>
+      </>}
+    </div>}
+    {menu && submenu && menuSession && <div ref={submenuRef} id={submenuId} className="sidebar-menu sidebar-submenu" role="menu" aria-label={NAMES.moveToSection}
+      onPointerEnter={() => window.clearTimeout(submenuTimer.current)}
+      onFocus={event => rovingFocus(submenuRef.current, event.target)} onKeyDown={event => menuKeys(submenuRef.current, event, closeSubmenu, true)}>
+      <div className="section-destinations">
+        <button role="menuitem" disabled={!menuSession.projectId} onClick={() => void move(menuSession.id, null)}>{NAMES.recents}{!menuSession.projectId && <Icon name="check"/>}</button>
+        {sections.map(section => <button role="menuitem" key={section.id} disabled={menuSession.projectId === section.id} onClick={() => void move(menuSession.id, section.id)}>{section.name}{menuSession.projectId === section.id && <Icon name="check"/>}</button>)}
+      </div>
+      <button className="menu-separated" role="menuitem" onClick={() => { closeMenu(); props.onCreateSection(menuSession.id); }}><Icon name="plus"/>{NAMES.newSectionItem}</button>
     </div>}
   </aside>;
 }

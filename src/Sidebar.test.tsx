@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import { Sidebar } from './Sidebar';
@@ -171,5 +171,86 @@ describe('Float v2 sidebar', () => {
   test('omits the utility row when Float v2 passes no utilities', () => {
     renderSidebar({utilities: null});
     expect(document.querySelector('.side-bottom')).toBeNull();
+  });
+});
+
+describe('Move to section submenu', () => {
+  const twoSections = [{ id: 'work', name: 'Workspace', createdAt: '2026-01-01' }, { id: 'home', name: 'Home', createdAt: '2026-01-02' }];
+  test('opens Move to section as a submenu on hover', async () => {
+    const user = userEvent.setup();
+    renderSidebar({ sections: twoSections });
+    await user.click(screen.getByRole('button', { name: 'Recording options' }));
+    const trigger = screen.getByRole('menuitem', { name: 'Move to section' });
+    expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
+    await user.hover(trigger);
+    const submenu = await screen.findByRole('menu', { name: 'Move to section' });
+    // The recording's menu stays open beside it, its trigger expanded.
+    expect(screen.getByRole('menu', { name: 'Recording actions' })).toBeInTheDocument();
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    const items = within(submenu).getAllByRole('menuitem');
+    expect(items.map(item => item.textContent)).toEqual(['Recents', 'Workspace', 'Home', 'New section…']);
+    expect(within(submenu).getByRole('menuitem', { name: 'Workspace' })).toBeDisabled();
+    // Pointing at another item closes it after a pause.
+    await user.hover(screen.getByRole('menuitem', { name: 'Rename' }));
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'Move to section' })).not.toBeInTheDocument());
+  });
+  test('moves a recording through the submenu with the keyboard', async () => {
+    const user = userEvent.setup();
+    const onMove = vi.fn().mockResolvedValue(true);
+    renderSidebar({ sections: twoSections, onMove });
+    await user.click(screen.getByRole('button', { name: 'Recording options' }));
+    const trigger = screen.getByRole('menuitem', { name: 'Move to section' });
+    expect(trigger).toHaveFocus();
+    await user.keyboard('{ArrowRight}');
+    const submenu = screen.getByRole('menu', { name: 'Move to section' });
+    expect(within(submenu).getByRole('menuitem', { name: 'Recents' })).toHaveFocus();
+    await user.keyboard('{ArrowLeft}');
+    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole('menu', { name: 'Move to section' })).not.toBeInTheDocument();
+    await user.keyboard('{Enter}');
+    await user.keyboard('{ArrowDown}');
+    // Workspace is the recording's own section and is skipped.
+    expect(screen.getByRole('menuitem', { name: 'Home' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(onMove).toHaveBeenCalledWith('review', 'home');
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+  });
+  test('offers New section at the end of the submenu', async () => {
+    const user = userEvent.setup();
+    const onCreateSection = vi.fn();
+    renderSidebar({ onCreateSection });
+    await user.click(screen.getByRole('button', { name: 'Recording options' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Move to section' }));
+    await user.click(within(screen.getByRole('menu', { name: 'Move to section' })).getByRole('menuitem', { name: 'New section…' }));
+    expect(onCreateSection).toHaveBeenCalledWith('review');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+});
+
+describe('making sections and sessions from the sidebar', () => {
+  test('offers New section in a section\'s menu', async () => {
+    const user = userEvent.setup();
+    const onCreateSection = vi.fn();
+    renderSidebar({ onCreateSection });
+    await user.click(screen.getByRole('button', { name: 'Section options for Workspace' }));
+    await user.click(within(screen.getByRole('menu', { name: 'Section actions' })).getByRole('menuitem', { name: 'New section…' }));
+    expect(onCreateSection).toHaveBeenCalledWith();
+  });
+  test('shows a new-session button on a section heading', async () => {
+    const user = userEvent.setup();
+    const onNewInSection = vi.fn();
+    renderSidebar({ onNewInSection });
+    const add = screen.getByRole('button', { name: 'New session in Workspace' });
+    // A collapsed section opens, so the new recording shows where it lands.
+    await user.click(screen.getByRole('button', { name: 'Workspace' }));
+    await user.click(add);
+    expect(onNewInSection).toHaveBeenCalledWith('work');
+    expect(screen.getByRole('button', { name: 'Workspace' })).toHaveAttribute('aria-expanded', 'true');
+  });
+  test('hides the new-session button while recording', () => {
+    const { rerender } = renderSidebar({ onNewInSection: vi.fn() });
+    expect(screen.getByRole('button', { name: 'New session in Workspace' })).toBeInTheDocument();
+    rerender({ locked: true });
+    expect(screen.queryByRole('button', { name: 'New session in Workspace' })).not.toBeInTheDocument();
   });
 });
