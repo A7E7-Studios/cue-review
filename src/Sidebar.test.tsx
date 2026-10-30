@@ -224,10 +224,34 @@ describe('the sidebar menu', () => {
     expect(create).toHaveFocus();
   });
 
-  test('offers no sidebar menu while recording', () => {
-    renderSidebar({locked: true});
+  test('opens the sidebar menu with both items disabled while recording', async () => {
+    const user = userEvent.setup();
+    const {onNew, onCreateSection} = renderSidebar({locked: true});
     fireEvent.contextMenu(document.querySelector('.recording-list')!);
-    fireEvent.contextMenu(screen.getByRole('button', {name:'New session'}));
+    const items = within(screen.getByRole('menu', {name:'Sidebar actions'})).getAllByRole('menuitem');
+    expect(items.map(item => item.getAttribute('aria-disabled'))).toEqual(['true', 'true']);
+    expect(items[0]).toHaveFocus();
+    await user.click(items[0]); await user.click(items[1]);
+    expect(onNew).not.toHaveBeenCalled();
+    expect(onCreateSection).not.toHaveBeenCalled();
+    await user.keyboard('{Escape}');
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  test('opens from anywhere in the sidebar outside rows and headings', () => {
+    renderSidebar();
+    fireEvent.contextMenu(screen.getByRole('button', {name:'Settings'}));
+    expect(screen.getByRole('menu', {name:'Sidebar actions'})).toBeVisible();
+  });
+
+  test('closes when the New session row it was opened from is clicked', async () => {
+    const user = userEvent.setup();
+    const {onNew} = renderSidebar();
+    const create = screen.getByRole('button', {name:'New session'});
+    fireEvent.contextMenu(create);
+    expect(screen.getByRole('menu', {name:'Sidebar actions'})).toBeVisible();
+    await user.click(create);
+    expect(screen.queryByRole('menu', {name:'Sidebar actions'})).not.toBeInTheDocument();
+    expect(onNew).toHaveBeenCalledTimes(1);
   });
 });

@@ -31,19 +31,23 @@ beside it reads as a folder on disk.
 - **PROOF** desk: open
 
 ### Requirement: The sidebar has its own menu
-The app SHALL offer New session and New section in a menu that right-clicking empty space in the
-sidebar opens, and that is also the New session row's context menu, because that is where a
-desktop app's list keeps its create actions, and the context menu key reaches it from the
-keyboard.
+The app SHALL offer New session and New section in a menu that right-clicking anywhere in the
+sidebar outside its rows, section headings and their options buttons opens, the New session row
+included, because that is where a desktop app's list keeps its create actions, and the context
+menu key reaches it from the keyboard.
 
 #### Scenario: Right-clicking empty space in the sidebar
 - **GIVEN** the app in review
-- **WHEN** the reviewer right-clicks empty space in the sidebar's list
-- **THEN** a menu offers "New session" and "New section", and a click outside it closes it
+- **WHEN** the reviewer right-clicks empty space in the sidebar: the list, around New session or
+  the bottom area
+- **THEN** a menu offers "New session" and "New section", and a click anywhere outside it, the New
+  session row included, closes it
 - **AND** a right-click on a session row or a section heading, or on its options button, still opens
   that row's own menu
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu right-clicking empty space in the list offers New session and New section
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu closes the sidebar menu on a click outside it
+- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu opens from anywhere in the sidebar outside rows and headings
+- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu closes when the New session row it was opened from is clicked
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu a right-click on a row or section options button opens its own menu
 - **PROOF** desk: open
 
@@ -58,7 +62,8 @@ keyboard.
 #### Scenario: The sidebar menu while recording
 - **GIVEN** a take being recorded
 - **WHEN** the reviewer right-clicks empty space in the sidebar or the New session row
-- **THEN** no menu opens, and "New session" is dimmed
-- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu offers no sidebar menu while recording
+- **THEN** the sidebar's menu opens with "New session" and "New section" disabled, and "New
+  session" in the sidebar is dimmed
+- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu opens the sidebar menu with both items disabled while recording
 - **PROOF** test: src/App.test.tsx::record more unloads the video before recording a take, shows it live, and reloads the video with a cache-buster once processing ends
 - **PROOF** desk: open

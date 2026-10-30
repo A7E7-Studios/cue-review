@@ -892,9 +892,10 @@ describe('record more', () => {
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('button', { name: NAMES.copyForAgent })).toBeDisabled();
     expect(screen.getByRole('button', { name: NAMES.newSession })).toBeDisabled();
-    // Sections cannot change while recording, so the sidebar's menu does not open.
+    // Sections cannot change while recording: the sidebar's menu opens with its items disabled.
     fireEvent.contextMenu(document.querySelector('.recording-list')!);
-    expect(screen.queryByRole('menuitem', { name: NAMES.newSection })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: NAMES.newSection })).toHaveAttribute('aria-disabled', 'true');
+    await user.keyboard('{Escape}');
     expect(transcriptPane().getByText('Take 2 · recording')).toBeVisible();
     expect(screen.queryByText(/Adding to this session/)).not.toBeInTheDocument();
 

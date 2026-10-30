@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { DragEvent } from 'react';
+import type { DragEvent, MouseEvent } from 'react';
 import type { Project, Session } from './backend';
 import { platform as detectPlatform, shortcut } from './chrome/windowApi';
 import { Icon } from './icons';
@@ -101,10 +101,11 @@ export function Sidebar(props: SidebarProps) {
     returnFocus.current = anchor; menuAnchor.current = anchor;
     setMenu({ kind: 'session', id: item.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
   };
-  const openListMenu = (x: number, y: number, anchor: HTMLElement | null = null) => {
-    if (locked) return;
+  // No anchor: a press anywhere outside the menu closes it, the New session row included.
+  // While recording it still opens, with both items disabled, so the click is answered.
+  const openListMenu = (x: number, y: number) => {
     returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    menuAnchor.current = anchor;
+    menuAnchor.current = null;
     setMenu({ kind: 'list', id: '', x, y, moving: false });
   };
   const openSectionMenu = (section: Project, anchor: HTMLElement, x?: number, y?: number) => {
@@ -194,7 +195,16 @@ export function Sidebar(props: SidebarProps) {
   const recentSessions = matches.filter(item => !item.projectId || !sections.some(section => section.id === item.projectId));
   const noMatches = filtering && !matches.length;
 
-  return <aside className="sidebar" data-platform={os} aria-label={NAMES.recordings}>
+  // Rows, section headings and their options buttons open their own menus; anywhere else in the
+  // sidebar opens the sidebar's. Every handler calls preventDefault, so no webview menu shows.
+  const sidebarContextMenu = (event: MouseEvent<HTMLElement>) => {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    if (event.target instanceof Node && menuRef.current?.contains(event.target)) return;
+    openListMenu(event.clientX, event.clientY);
+  };
+
+  return <aside className="sidebar" data-platform={os} aria-label={NAMES.recordings} onContextMenu={sidebarContextMenu}>
     {(os === 'macos' || showCollapse) && <div className="side-header" {...(os === 'macos' ? { 'data-tauri-drag-region': '' } : {})}>
       {/* macOS draws its traffic lights here (tauri.macos.conf.json trafficLightPosition). */}
       {os === 'macos' && <span className="side-traffic-lights" aria-hidden="true" data-tauri-drag-region=""/>}
@@ -203,14 +213,13 @@ export function Sidebar(props: SidebarProps) {
     <div className="side-tools">
       {/* Its context menu (right-click, Shift+F10 or the Menu key) is the sidebar's: New session and New section. */}
       <button className="new-session has-kbd" disabled={locked} onClick={props.onNew} aria-keyshortcuts={newKey.aria}
-        onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openListMenu(event.clientX || rect.left, event.clientY || rect.bottom, event.currentTarget); }}>
+        onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openListMenu(event.clientX || rect.left, event.clientY || rect.bottom); }}>
         <Icon name="plus" size={16} strokeWidth={2}/>
         <span className="new-session-label">{NAMES.newSession}</span>
         <kbd className="kbd-hint" aria-hidden="true">{newKey.label}</kbd>
       </button>
     </div>
-    {/* Rows and section headings open their own menus; anywhere else in the list opens the sidebar's. */}
-    <div className="recording-list" onContextMenu={event => { if (event.defaultPrevented) return; event.preventDefault(); openListMenu(event.clientX, event.clientY); }}>
+    <div className="recording-list">
       {shownSections.map(section => {
         const sectionClosed = isClosed(section.id);
         return <section key={section.id} data-section-id={section.id} aria-label={NAMES.section(section.name)} className={`recording-section ${dropTarget === section.id ? 'drop-target' : ''} ${draggingSection === section.id ? 'dragging-section' : ''} ${insertion?.id === section.id ? insertion.after ? 'insert-after' : 'insert-before' : ''}`} {...dropHandlers(section.id)}>
@@ -255,8 +264,8 @@ export function Sidebar(props: SidebarProps) {
       }
     }}>
       {shownMenu.kind === 'list' ? <>
-        <button role="menuitem" onClick={() => { closeMenu(); props.onNew(); }}>{NAMES.newSession}</button>
-        <button role="menuitem" onClick={() => { closeMenu(); props.onCreateSection(); }}>{NAMES.newSection}</button>
+        <button role="menuitem" aria-disabled={locked || undefined} onClick={locked ? undefined : () => { closeMenu(); props.onNew(); }}>{NAMES.newSession}</button>
+        <button role="menuitem" aria-disabled={locked || undefined} onClick={locked ? undefined : () => { closeMenu(); props.onCreateSection(); }}>{NAMES.newSection}</button>
       </> : menuSection ? <>
         <button role="menuitem" onClick={() => { closeMenu(); props.onRenameSection(menuSection); }}>{NAMES.rename}</button>
         <button role="menuitem" disabled={sections[0]?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index - 1]?.id ?? null, false); }}>{NAMES.moveUp}</button>

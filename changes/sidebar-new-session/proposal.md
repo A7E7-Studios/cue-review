@@ -21,11 +21,12 @@ actions in a right-click menu.
 - A plain "+ New session" row replaces the red-dot "New recording" button; Ctrl+N (⌘N) stays
   (scenario: Starting a new session from the sidebar). The Settings shortcut list and the README
   call the command New session.
-- The New section button goes. Right-clicking empty space in the sidebar, or the New session row,
-  opens a menu with New session and New section (scenarios: Right-clicking empty space in the
+- The New section button goes. Right-clicking empty space anywhere in the sidebar, or the New
+  session row, opens a menu with New session and New section (scenarios: Right-clicking empty space in the
   sidebar; Reaching the sidebar menu from the keyboard). Move to section > New section on a row
   stays.
-- While recording the sidebar menu does not open (scenario: The sidebar menu while recording).
+- While recording the sidebar menu opens with both items disabled (scenario: The sidebar menu while
+  recording).
 
 ## Settled questions
 
@@ -36,6 +37,11 @@ actions in a right-click menu.
 - **Q5 The label**: "+ New session". Rejected: "+ New"; "+ New recording".
 - **Q6 The red dot on a recording session's row**: keep it; it marks the session recording now.
   Rejected: drop it too.
+- **Where the menu opens** (the owner's answer to the webview polish batch's Q1): the whole sidebar,
+  "left panel: New session and New section", outside rows, section headings and their … buttons.
+  Rejected: the list only.
+- **While recording** (the owner's answer to the webview polish batch's Q6): the menu opens with both
+  items disabled. Rejected: no menu.
 - **Q13 The look**: a plain row with a plus, like the Claude app (`look/directions/row/`).
   Rejected: the white raised button with a plus (`look/directions/button/`).
 
