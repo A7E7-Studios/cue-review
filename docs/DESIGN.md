@@ -28,7 +28,7 @@ This replaces the v0.1 rule of keeping native window chrome.
 
 | Platform | Chrome |
 | --- | --- |
-| Windows | `decorations: false` and a 40px custom title bar: logo, sidebar toggle, centered search (`Ctrl+K`), Settings, then Minimize, Maximize/Restore and Close at 46×40. Close hovers `#C42B1C` with white. Drag regions (`data-tauri-drag-region`) sit only on empty bar areas, never on a control or the search field; double-clicking them maximizes. |
+| Windows | `decorations: false` and a 44px custom title bar: logo, sidebar toggle, centered search (`Ctrl+K`), Settings, then Minimize, Maximize/Restore and Close at 46×44. The window-control glyphs are 10×10px with 1px lines on whole pixels, as Windows draws its own; the sidebar toggle and Settings are 20px icons in 36×32 buttons. Close hovers `#C42B1C` with white. Drag regions (`data-tauri-drag-region`) sit only on empty bar areas, never on a control or the search field; double-clicking them maximizes. |
 | macOS | `titleBarStyle: Overlay` with a hidden title. The native traffic lights sit inside the inset sidebar panel (78×28 reserved). `trafficLightPosition` (24, 26) puts their top edge 26px down, so the panel's first row (the Hide sidebar button) is centred on y = 32 and New recording starts at y = 60, as in the mock. The content toolbar is 52px with search (`#F2F3F6`) and Settings (8px corners), and shows a Show sidebar toggle only while the sidebar is hidden. |
 | Linux | Native decorations, with the Windows bar layout minus window controls and drag regions. |
 
@@ -56,7 +56,7 @@ Window control names are "Minimize window", "Maximize window" or "Restore window
 | Recording | Record dot `#E5484D`; Stop `#D7333A` with white text; live dot `#FF6369`; status chip `#FDECEC` with `#B42318`; preview ring 2px `#E5484D` |
 | Recording dock | `#18181B`, divider `#3F3F46`, secondary text `#A1A1AA`, meter `#4ADE80` / `#FACC15` / `#3F3F46` |
 | Radii | Window 8 (16 on macOS); rows 7; pills 999; video 10 (12 on macOS); macOS sidebar panel 16; current transcript row 12 |
-| Sizes | Windows title bar 40 with 46×40 controls; macOS toolbar 52; sidebar 232; transcript 320 (min 280); rows 32; New recording 36; play 40; pills 32–36; dock controls 44 |
+| Sizes | Windows title bar 44 with 46×44 controls and 36×32 icon buttons; macOS toolbar 52; sidebar 232; transcript 320 (min 280); rows 32; New recording 36; play 40; pills 32–36; dock controls 44 |
 
 The dark theme (`:root[data-theme='dark']`) is derived from these roles. It has not been designed in the mocks yet and needs its own review. The theme is chosen only in **Settings → Appearance**; there is no theme button in the sidebar or title bar. `src/chrome/platformAttribute.ts` applies the saved theme to `<html>` before React loads, so the page never paints light first. The native window background (`backgroundColor` in the platform configs) is still light and shows for a moment before the webview paints; following the theme there needs the Rust side or a window capability.
 
@@ -73,7 +73,7 @@ The dark theme (`:root[data-theme='dark']`) is derived from these roles. It has 
 - **The dock shows no "Take N" label and no caption, a deliberate deviation from the mock.** `FloatV2RecordMoreWindows` draws "Take 2" in the dock and "Adding to this session. Stop to process take 2 on this device." under it. The transcript's "Take 2 · recording" divider already names the take, so the dock leaves both out and keeps one width on every take.
 - **New section is disabled while recording, a deliberate deviation from the mock.** `FloatV2RecordMoreWindows` dims New recording but leaves New section at full strength. Sections cannot change while recording, so the sidebar keeps New section disabled (and dimmed) with New recording, its rows and its section controls, rather than offering a control that would only be refused.
 - **Accepted deviations from the mock, so playback never reflows text.** The mock's pill has 7px of padding, which only fits beside a 3.5px space by pushing the neighbouring words apart; a layout-free pill can reach as far as the word gap minus the space left visible, hence 4px into a widened gap. The current row keeps weight 400 (mock 500) and 8px vertical padding (mock 10px), because changing either when a row becomes current would rewrap it and shift every row below.
-- **Right-click.** The left panel's menu is the sidebar's row menu with the shortcut at the right of New recording; what a right-click opens where is in the [look-and-feel spec](../specs/workspace/look-and-feel/spec.md).
+- **Right-click.** The webview's own menu never shows: a right-click opens the app's own menu where there is one, the system's editing menu in a text field, and nothing elsewhere ([look-and-feel spec](../specs/workspace/look-and-feel/spec.md)).
 - **Settings dialog.** Appearance, the recording tools' status with Install transcription and technical details, the vocabulary field, and the shortcut list.
 
 ## Shortcuts and hints
@@ -102,6 +102,7 @@ Use motion to explain a state change. Recording start/stop, timecode, video fram
 | Device popover | 120ms opacity and 4px translation | Entry implemented; exit continuity remains open |
 | Dialog | 180ms opacity and 5px translation | Implemented; background stays inert through exit |
 | Section disclosure | 180ms height reveal; chevron rotation | Implemented; collapsed content inert immediately |
+| Sidebar hide and show | 200ms width ease with the sidebar sliding out and the sheet following (over the sheet below 1000px) | Implemented; instant beside a live preview or a recording; the leaving sidebar is inert |
 | Toast | 180ms opacity | Entry implemented; dismissal continuity remains open |
 | Shortcut hints | 120ms opacity on hover or focus | Implemented |
 | Workspace changes | At most 180–220ms restrained transition after content is ready | Proposed; do not animate resize or crossfade live video |
