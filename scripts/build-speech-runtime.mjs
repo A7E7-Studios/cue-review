@@ -22,17 +22,27 @@ if (!existsSync(join(source, '.git'))) {
 }
 const actual = run('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: 'pipe' }).stdout.trim();
 if (actual !== revision) throw new Error(`Unexpected whisper source revision ${actual}. Use a clean .local/whisper-source directory.`);
-run('cmake', ['-S', source, '-B', build, '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_SHARED_LIBS=OFF', '-DGGML_NATIVE=OFF', '-DGGML_METAL=OFF', '-DGGML_OPENMP=OFF', '-DGGML_AVX=OFF', '-DGGML_AVX2=OFF', '-DGGML_FMA=OFF', '-DGGML_F16C=OFF', '-DWHISPER_BUILD_TESTS=OFF', '-DWHISPER_BUILD_SERVER=OFF', '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded', ...(process.platform === 'darwin' ? ['-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0'] : [])]);
-run('cmake', ['--build', build, '--config', 'Release', '--parallel', '3', '--target', 'whisper-cli', 'whisper-vad-speech-segments']);
-mkdirSync(destination, { recursive: true });
+// The plain build runs on any processor of the target; on x64 it needs only SSE4.2 (every x64
+// processor since about 2011), because this script turns ggml's BMI2 default off. On Windows and Linux x64 a second build for AVX2, FMA, F16C and BMI2 goes to the avx2
+// subfolder; the app runs it where the processor has all four (src-tauri/src/deps.rs), about eight
+// times faster.
+const plain = ['-DGGML_AVX=OFF', '-DGGML_AVX2=OFF', '-DGGML_FMA=OFF', '-DGGML_F16C=OFF', '-DGGML_SSE42=ON', '-DGGML_BMI2=OFF'];
+const vector = ['-DGGML_AVX=ON', '-DGGML_AVX2=ON', '-DGGML_FMA=ON', '-DGGML_F16C=ON', '-DGGML_SSE42=ON', '-DGGML_BMI2=ON'];
+const builds = [{ dir: build, flags: plain, out: destination }];
+if (process.arch === 'x64' && process.platform !== 'darwin') builds.push({ dir: `${build}-avx2`, flags: vector, out: join(destination, 'avx2') });
 const suffix = process.platform === 'win32' ? '.exe' : '';
-for (const name of ['whisper-cli', 'whisper-vad-speech-segments']) {
-  const binary = name + suffix;
-  const candidates = [join(build, 'bin', binary), join(build, 'bin/Release', binary)];
-  const path = candidates.find(existsSync);
-  if (!path) throw new Error(`Missing speech binary: ${binary}`);
-  run(path, ['-h']);
-  copyFileSync(path, join(destination, binary));
+for (const { dir, flags, out } of builds) {
+  run('cmake', ['-S', source, '-B', dir, '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_SHARED_LIBS=OFF', '-DGGML_NATIVE=OFF', '-DGGML_METAL=OFF', '-DGGML_OPENMP=OFF', ...flags, '-DWHISPER_BUILD_TESTS=OFF', '-DWHISPER_BUILD_SERVER=OFF', '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded', ...(process.platform === 'darwin' ? ['-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0'] : [])]);
+  run('cmake', ['--build', dir, '--config', 'Release', '--parallel', '3', '--target', 'whisper-cli', 'whisper-vad-speech-segments']);
+  mkdirSync(out, { recursive: true });
+  for (const name of ['whisper-cli', 'whisper-vad-speech-segments']) {
+    const binary = name + suffix;
+    const candidates = [join(dir, 'bin', binary), join(dir, 'bin/Release', binary)];
+    const path = candidates.find(existsSync);
+    if (!path) throw new Error(`Missing speech binary: ${binary}`);
+    run(path, ['-h']);
+    copyFileSync(path, join(out, binary));
+  }
 }
 copyFileSync(join(source, 'LICENSE'), join(destination, 'LICENSE-whisper.txt'));
 if (existsSync(join(source, 'ggml/LICENSE'))) copyFileSync(join(source, 'ggml/LICENSE'), join(destination, 'LICENSE-ggml.txt'));
