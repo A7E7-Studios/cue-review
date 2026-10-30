@@ -237,7 +237,7 @@ The decoded host-frame arrival is an approximation of the device/PC clock relati
 - [x] Clip extraction handles start/end boundaries, repeated phrases, no matches, and missing audio streams.
 - [x] Missing dependencies and nonzero process exits produce actionable errors rather than success metadata.
 - [x] `cue --help` and `cue COMMAND --help` exit 0 without opening the store; unknown flags fail; `transcript --segments` prints take dividers; `frames` batches respect `--max-width` and never overwrite; `rename` works while the lock is held; `moments` finds pointing words (`verify-cli.cjs`, 28 October 2026).
-- [x] Takes: lifecycle, offsets, swap verification and the startup recovery matrix (`takes::tests`); the ignored FFmpeg concat test checks real boundary frames and audio onset.
+- [x] Takes: lifecycle, offsets, each take's video placed on the timeline, the format-1 upgrade and the startup recovery matrix (`takes::tests`); the ignored FFmpeg test `agent::tests::actual_frames_come_from_each_take_video` exports real frames and a clip from two take videos of different sizes.
 
 ### Desktop acceptance
 
