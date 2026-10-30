@@ -110,7 +110,7 @@ export interface ScrubberProps {
   disabled?: boolean;
 }
 
-/** Review controls: scrubber, play, time, speed, focus and the Record more pill (decision 6). */
+/** Review controls: scrubber, play, time, speed and focus (decision 6). The recording bar sits under them. */
 export interface PlaybackBarProps {
   timeMs: number;
   durationMs: number;
@@ -127,19 +127,13 @@ export interface PlaybackBarProps {
   focused: boolean;
   /** Labelled NAMES.focusVideo or NAMES.restoreTranscript. */
   onToggleFocus: () => void;
-  recordMoreDisabled: boolean;
-  /** Another action is under way: Record more and the error's actions stay focusable but inert (aria-disabled). */
-  recordMoreBusy?: boolean;
-  onRecordMore: () => void;
-  /** Why Record more failed, shown beside the pill as an alert, with NAMES.newRecording and NAMES.dismissError. */
-  recordMoreError?: string;
-  /** Starts a new recording instead, for a source that is gone. */
-  onNewRecording?: () => void;
-  onDismissRecordMoreError?: () => void;
 }
 
 export type CaptureMenu = 'source' | 'microphone';
-/** Draft controls: source and microphone pickers and Record. Keeps the `.source-trigger` and `.mic-trigger` hooks. */
+/**
+ * The recording bar, named NAMES.recordingBar: source and microphone pickers and Record in a draft,
+ * Record more in review. Keeps the `.source-trigger` and `.mic-trigger` hooks.
+ */
 export interface CaptureControlsProps {
   /** Every listed source, including a placeholder for a missing previous choice. */
   sources: CaptureSource[];
@@ -164,14 +158,26 @@ export interface CaptureControlsProps {
   onRefreshMicrophones: () => void;
   /** Disables the source picker (recording or busy). */
   locked: boolean;
+  /**
+   * Review: the picker shows the session's own source, because a take records the session's source.
+   * It stays focusable but inert (aria-disabled), titled and described by SOURCE_LOCKED.
+   */
+  sourceLocked?: boolean;
   /** Disables the microphone picker. */
   busy: boolean;
-  /** NAMES.record, NAMES.pleaseWait or NAMES.transcribing. */
+  /** Review: Record continues the session as a new take, and its tooltip says so. */
+  review?: boolean;
+  /** NAMES.record, NAMES.pleaseWait or NAMES.transcribing in a draft; NAMES.recordMore in review. */
   recordLabel: string;
   recordDisabled: boolean;
-  /** Recording is starting: Record stays focusable but inert (aria-disabled). */
+  /** Recording is starting: Record and the error's New recording stay focusable but inert (aria-disabled). */
   recordBusy?: boolean;
   onRecord: () => void;
+  /** Why Record more failed, shown under the bar as an alert, with NAMES.newRecording and NAMES.dismissError. */
+  recordMoreError?: string;
+  /** Starts a new recording instead, for a source that is gone. */
+  onNewRecording?: () => void;
+  onDismissRecordMoreError?: () => void;
 }
 
 /** The dark dock that replaces the playback bar while recording (decision 6). No progress bar. */
@@ -306,7 +312,8 @@ export const NAMES = {
   restoreTranscript: 'Restore transcript',
   recordMore: 'Record more',
 
-  // Capture controls
+  // Recording bar (capture controls)
+  recordingBar: 'Recording bar',
   record: 'Record',
   pleaseWait: 'Please wait…',
   transcribing: 'Transcribing…',

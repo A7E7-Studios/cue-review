@@ -16,11 +16,13 @@ import { SOURCE_GONE, takeTwoLiveTranscript, takeTwoStartMs, transcript as first
 const sample = new URL('../../docs/design/float-v2/sample-capture.svg', import.meta.url).href;
 const SPEEDS = [1, 1.5, 2, 0.75];
 const sources: CaptureSource[] = [
-  { id: 'display', name: 'Display 1', kind: 'display', available: true },
+  { id: 'monitor:1', name: 'Display 1', kind: 'display', available: true },
   { id: 'window', name: 'Library — Component browser', kind: 'window', available: true },
   { id: 'quest', name: 'Quest 3', kind: 'quest', available: true },
   { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false, detail: 'Reconnect this camera and refresh, or choose another source.' },
 ];
+/** The session's window in 'source-gone': it has closed, so it is no longer listed and the bar names it the original source. */
+const closedWindow: CaptureSource = { id: 'window:closed', name: 'Original source', kind: 'window', available: false };
 const microphones = [{ id: 'microphone', name: 'Studio microphone' }, { id: 'headset', name: 'Headset microphone' }];
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const recordingTakeTwo: Transcript = { takes: [{ index: 1, startMs: 0 }], segments: [...takeOneSegments, ...takeTwoLiveTranscript.segments] };
@@ -42,7 +44,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const [muted, setMuted] = useState(false);
   const [compactMode, setCompactMode] = useState(compact);
   const [menu, setMenu] = useState<CaptureMenu | null>(null);
-  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : 'display');
+  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : 'monitor:1');
   const [microphoneId, setMicrophoneId] = useState('microphone');
   const [systemAudio, setSystemAudio] = useState(false);
   const [notice, setNotice] = useState('');
@@ -72,20 +74,26 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const segments = transcriptProps.transcript.segments;
   const showTranscript = !draft && !focused && !compactMode;
 
+  const bar = {
+    sources, microphones, microphoneId, microphoneUnavailable: false, muted, menu, onMenu: setMenu, onSelectMicrophone: setMicrophoneId, onMuted: setMuted,
+    onRefreshSources: () => setNotice('Refresh selected.'), onRefreshMicrophones: () => setNotice('Refresh selected.'), locked: false, busy: false,
+  };
   const controls = recording
     ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={0.0126} sourceName="Display 1" hasMicrophone microphoneName="Microphone (HD Pro Webcam C920)" muted={muted} onMuted={setMuted}
         compact={compactMode} onToggleCompact={() => setCompactMode(value => !value)} stopDisabled={false} onStop={() => setNotice('Stop selected.')}/>
     : draft
-      ? <CaptureControls sources={sources} source={source} microphones={microphones} microphoneId={microphoneId} microphoneUnavailable={false}
-          systemAudio={systemAudio} muted={muted} menu={menu} onMenu={setMenu} onSelectSource={setSourceId} onSelectMicrophone={setMicrophoneId}
-          onSystemAudio={setSystemAudio} onMuted={setMuted} onRefreshSources={() => setNotice('Refresh selected.')} onRefreshMicrophones={() => setNotice('Refresh selected.')}
-          locked={false} busy={false} recordLabel="Record" recordDisabled={!source?.available} onRecord={() => setNotice('Record selected.')}/>
-      : <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
+      ? <CaptureControls {...bar} source={source} systemAudio={systemAudio} onSelectSource={setSourceId} onSystemAudio={setSystemAudio}
+          recordLabel="Record" recordDisabled={!source?.available} onRecord={() => setNotice('Record selected.')}/>
+      : <>
+        <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
           onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
-          onToggleFocus={() => setFocused(value => !value)} recordMoreDisabled={scenario === 'processing'}
-          onRecordMore={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
-          recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
+          onToggleFocus={() => setFocused(value => !value)}/>
+        <CaptureControls {...bar} review sourceLocked source={scenario === 'source-gone' ? closedWindow : sources[0]} systemAudio={false} onSelectSource={() => {}} onSystemAudio={() => {}}
+          recordLabel="Record more" recordDisabled={scenario === 'processing'}
+          onRecord={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
+          recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>
+      </>;
 
   return <div style={{ height: '100vh', display: 'flex', minWidth: 0, overflow: 'hidden', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
     <div className="cr-center">
