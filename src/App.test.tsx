@@ -822,7 +822,7 @@ describe('record more', () => {
       return takeTwo(newSession(id));
     });
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toHaveTextContent('Take 2');
+    expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toHaveTextContent(/^00:00$/);
     expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic1', false, false);
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('button', { name: NAMES.copyForAgent })).toBeDisabled();
@@ -830,7 +830,7 @@ describe('record more', () => {
     // Sections cannot change while recording, so New section is off too (a deliberate deviation from the mock).
     expect(screen.getByRole('button', { name: NAMES.newSection })).toBeDisabled();
     expect(transcriptPane().getByText('Take 2 · recording')).toBeVisible();
-    expect(screen.getByText('Adding to this session. Stop to process take 2 on this device.')).toBeVisible();
+    expect(screen.queryByText(/Adding to this session/)).not.toBeInTheDocument();
 
     // The live tail of take 2 sits on the session timeline after the saved take 1.
     status = { ...status, elapsedMs: 3000, liveTranscript: { segments: [{ startMs: 11000, endMs: 12500, text: 'More words', words: [{ text: 'More', startMs: 11000, endMs: 11600 }, { text: 'words', startMs: 11600, endMs: 12500 }] }] } };
