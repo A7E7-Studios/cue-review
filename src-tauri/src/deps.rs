@@ -248,6 +248,14 @@ fn claim(state: &Mutex<Fetch>, wanted: &SpeechModel) -> bool {
     };
     true
 }
+/// Tells a running download of a model other than `wanted`, which is
+/// installed, to stop.
+fn stop_other(state: &Mutex<Fetch>, wanted: &SpeechModel) {
+    let mut fetch = locked(state);
+    if fetch.running {
+        fetch.cancel = fetch.model != wanted.name;
+    }
+}
 /// Downloads the chosen language's model until it is installed, asking
 /// `chosen` again after each download, so a language chosen meanwhile gets
 /// its model too. Stops at the first failure of the model still chosen, and
@@ -373,11 +381,7 @@ pub fn start_language_model_download() -> Result<(), String> {
     let models = models_dir();
     let wanted = language_model(chosen_language());
     if wanted.installed_in(&models) {
-        // A download for a language no longer chosen stops.
-        let mut fetch = locked(fetch_state());
-        if fetch.running {
-            fetch.cancel = fetch.model != wanted.name;
-        }
+        stop_other(fetch_state(), wanted);
         return Ok(());
     }
     if !claim(fetch_state(), wanted) {
@@ -848,6 +852,47 @@ mod tests {
         assert_eq!(*order.borrow(), ["small.en"]);
         assert!(SMALL_EN.installed_in(dir.path()));
         assert!(locked(&state).error.is_none());
+    }
+
+    #[test]
+    fn a_stop_taken_back_is_no_failure() {
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let calls = std::cell::Cell::new(0);
+        // German is chosen, the download of small.en stops at its next chunk,
+        // and English is chosen again before the stop is looked at.
+        let download = |model: &SpeechModel, models: &Path, progress: &dyn Fn(u64) -> bool| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                assert!(!claim(&state, &SMALL));
+                assert!(!progress(1000), "the stop reaches the download");
+                assert!(!claim(&state, &SMALL_EN));
+                return Err("The download was stopped.".into());
+            }
+            fs::File::create(model.path_in(models))
+                .unwrap()
+                .set_len(model.size)
+                .unwrap();
+            Ok(())
+        };
+        assert!(claim(&state, &SMALL_EN));
+        fetch_loop(dir.path(), &|| "en", &download, &state).unwrap();
+        assert_eq!(calls.get(), 2, "small.en is fetched again");
+        assert!(locked(&state).error.is_none());
+        assert!(SMALL_EN.installed_in(dir.path()));
+    }
+
+    #[test]
+    fn choosing_an_installed_language_stops_the_other_download() {
+        let state = Mutex::new(Fetch::default());
+        assert!(claim(&state, &SMALL));
+        stop_other(&state, &SMALL_EN);
+        assert!(locked(&state).cancel, "the German download stops");
+        stop_other(&state, &SMALL);
+        assert!(!locked(&state).cancel, "German again keeps it");
+        locked(&state).running = false;
+        stop_other(&state, &SMALL_EN);
+        assert!(!locked(&state).cancel, "nothing runs, nothing to stop");
     }
 
     #[test]
