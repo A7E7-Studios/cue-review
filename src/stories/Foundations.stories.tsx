@@ -30,18 +30,23 @@ function Foundations() {
     <section className="workshop-section"><h2>Pills and buttons</h2><div className="workshop-row">
       <button type="button" className="cr-btn cr-accent-pill"><Icon name="agent" strokeWidth={1.9}/>Copy for agent</button>
       <button type="button" className="cr-btn cr-accent-pill" disabled><Icon name="agent" strokeWidth={1.9}/>Copy for agent</button>
-      <button type="button" className="cr-btn cr-dark-pill"><span className="cr-record-dot" aria-hidden="true"/>Record more</button>
-      <button type="button" className="cr-btn cr-dark-pill" disabled><span className="cr-record-dot" aria-hidden="true"/>Record more</button>
       <button type="button" className="cr-btn cr-pill"><Icon name="refresh" strokeWidth={1.8}/>Retry transcription</button>
       <button type="button" className="cr-btn cr-speed">1×</button>
       <button type="button" className="cr-btn cr-round-button" aria-label="Open recording folder"><Icon name="folder" strokeWidth={1.7}/></button>
       <button type="button" className="cr-btn cr-round-button cr-ghost" aria-label="Focus video"><Icon name="expand" strokeWidth={1.8}/></button>
       <button type="button" className="cr-btn cr-play" data-playing="false" aria-label="Play"><Icon name="play" filled/></button>
     </div></section>
-    <section className="workshop-section"><h2>Capture</h2><div className="workshop-row">
-      <button type="button" className="cr-btn cr-capture-trigger"><Icon name="monitor" strokeWidth={1.7}/><span>Display 1</span><Icon name="chevron" strokeWidth={2}/></button>
-      <button type="button" className="cr-btn cr-capture-trigger"><Icon name="mic" strokeWidth={1.7}/><span>Studio microphone</span><Icon name="chevron" strokeWidth={2}/></button>
-      <button type="button" className="cr-btn cr-dark-pill cr-record"><span className="cr-record-dot" aria-hidden="true"/>Record</button>
+    <section className="workshop-section"><h2>Recording bar</h2><div className="workshop-row">
+      <div className="cr-capture">
+        <button type="button" className="cr-btn cr-capture-trigger"><Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">Display 1</span><Icon name="chevron" strokeWidth={2}/></button>
+        <button type="button" className="cr-btn cr-capture-trigger"><Icon name="mic" strokeWidth={1.7}/><span className="cr-capture-label">Studio microphone</span><Icon name="chevron" strokeWidth={2}/></button>
+        <button type="button" className="cr-btn cr-record"><span className="cr-record-dot" aria-hidden="true"/><span className="cr-capture-label">Record</span></button>
+      </div>
+      <div className="cr-capture">
+        <button type="button" className="cr-btn cr-capture-trigger" title="Design review — Figma"><Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">Design review — Figma</span><Icon name="chevron" strokeWidth={2}/></button>
+        <button type="button" className="cr-btn cr-capture-trigger"><Icon name="micOff" strokeWidth={1.7}/><span className="cr-capture-label">No microphone</span><Icon name="chevron" strokeWidth={2}/></button>
+        <button type="button" className="cr-btn cr-record" disabled><span className="cr-record-dot" aria-hidden="true"/><span className="cr-capture-label">Record more</span></button>
+      </div>
       <button type="button" className="cr-btn cr-stop"><span className="cr-stop-square" aria-hidden="true"/>Stop</button>
     </div></section>
     <section className="workshop-section"><h2>Dialog actions</h2><div className="workshop-row">

@@ -30,6 +30,10 @@ describe('token contrast', () => {
     expect(contrast(token('color-scrubber-tick'), token('color-scrubber-track'))).toBeGreaterThanOrEqual(3);
     expect(contrast(token('color-scrubber-tick'), token('color-scrubber-speech'))).toBeGreaterThanOrEqual(3);
   });
+  it('keeps white text legible on the red of Record and Stop', () => {
+    expect(token('color-on-stop')).toBe('#FFFFFF');
+    expect(contrast(token('color-on-stop'), token('color-stop'))).toBeGreaterThanOrEqual(4.5);
+  });
   it('keeps tertiary text legible on the sheet and the ground', () => {
     expect(contrast(token('color-text-tertiary'), token('color-sheet'))).toBeGreaterThanOrEqual(4.5);
     expect(contrast(token('color-text-tertiary'), token('color-ground'))).toBeGreaterThanOrEqual(4.5);

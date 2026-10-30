@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, RefObject } from 'react';
+import type { FormEvent } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { backend, videoUrl } from './backend';
@@ -10,21 +10,23 @@ import type { Platform } from './chrome/windowApi';
 import { SettingsDialog } from './dialogs/SettingsDialog';
 import { Icon } from './icons';
 import { errorMessage, seekTime } from './review';
+import { SearchDialog } from './search/SearchDialog';
 import { Sidebar } from './Sidebar';
 import { CaptureControls } from './workspace/CaptureControls';
 import { captureEmptyState, MediaStage, reviewEmptyState } from './workspace/MediaStage';
 import type { MediaStageViewProps } from './workspace/MediaStage';
-import { PlaybackBar } from './workspace/PlaybackBar';
+import { PLAYBACK_SPEEDS, PlaybackBar } from './workspace/PlaybackBar';
 import { RecordingDock } from './workspace/RecordingDock';
 import { SessionHeader } from './workspace/SessionHeader';
 import { TranscriptPane } from './workspace/TranscriptPane';
 import { NAMES } from './workspace/types';
-import type { CaptureMenu, MediaEmptyState, WorkspaceMode } from './workspace/types';
-import { DeleteRecordingDialog, DiscardTakeDialog, NameDialog } from './app/dialogs';
+import type { CaptureMenu, WorkspaceMode } from './workspace/types';
+import { DeleteRecordingDialog, NameDialog } from './app/dialogs';
 import type { NameDialogState } from './app/dialogs';
-import { liveTake, recordingTranscript, releaseMedia, sessionVideoUrl, takeInFlight, takeMarks, takeSwapping } from './app/media';
+import { liveTake, recordingTranscript, releaseMedia, sessionVideos, takeInFlight, takeMarks, videoAt } from './app/media';
 import { MICROPHONE_UNAVAILABLE, useCaptureDevices } from './app/useCaptureDevices';
 import { useCompactWindow } from './app/useCompactWindow';
+import { useContextMenuGuard } from './app/useContextMenuGuard';
 import { canTakeFocus, useFocusRescue } from './app/useFocusRescue';
 import { usePreviewStream } from './app/usePreviewStream';
 import { useShortcuts } from './app/useShortcuts';
@@ -32,13 +34,22 @@ import { useSidebarLayout, useSidebarSlide } from './app/useSidebarLayout';
 import { useTheme } from './app/useTheme';
 
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
-const SPEEDS = [1, 1.5, 2, 0.75];
-const STARTING_TAKE: MediaEmptyState = { title: 'Starting the next take…' };
+/** The chosen playback speed stays for every recording and the next start (playback-controls spec). */
+const SPEED_KEY = 'cuereview.playbackSpeed';
+function storedSpeed() {
+  try {
+    const value = Number(localStorage.getItem(SPEED_KEY));
+    return (PLAYBACK_SPEEDS as readonly number[]).includes(value) ? value : 1;
+  } catch { return 1; }
+}
 /** Runtime status polling: every 700 ms, backing off up to 10 s while the backend keeps failing. */
 const POLL_MS = 700;
 const POLL_MAX_MS = 10000;
 const pollDelay = (failures: number) => Math.min(POLL_MS * 2 ** failures, POLL_MAX_MS);
-type Playback = { id: string; time: number; playing: boolean };
+/** Where a reloaded or newly opened video should stand; `fromSearch` marks a search result's line, whose load is no reload. */
+type Playback = { id: string; time: number; playing: boolean; fromSearch?: boolean };
+/** A seek into a take video that is still loading, applied once its metadata has loaded. */
+type PendingSeek = { localMs: number; play: boolean };
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
 const settled = (item: Session) => item.status === 'ready' || item.status === 'error';
 
@@ -56,8 +67,9 @@ export default function App({ platform: requested }: AppProps = {}) {
   const report = useCallback((problem: unknown) => { setError(errorMessage(problem)); }, []);
   const reportInDialog = useCallback((problem: unknown) => { setDialogError(errorMessage(problem)); }, []);
   const [theme, setTheme] = useTheme(report, os);
+  useContextMenuGuard();
   const sidebar = useSidebarLayout();
-  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
+  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay } = sidebar;
   const { compact, toggleCompact, exitCompact } = useCompactWindow(report);
   const {
     sourceOptions, microphones, source, microphoneUnavailable, refreshDevices,
@@ -81,29 +93,41 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [installing, setInstalling] = useState(false);
   const [dialog, setDialog] = useState<NameDialogState | null>(null);
   const [deletion, setDeletion] = useState<{ id: string; name: string } | null>(null);
-  /** The take whose discard is being confirmed. */
-  const [discarding, setDiscarding] = useState<{ id: string; index: number } | null>(null);
-  /** Why Record more failed, shown beside its pill rather than in the workspace banner. */
+  /** Why Record more failed, shown under the recording bar rather than in the workspace banner. */
   const [recordMoreError, setRecordMoreError] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** The transcripts the search window searches, by session id. */
+  const [searchTranscripts, setSearchTranscripts] = useState<ReadonlyMap<string, Transcript>>(() => new Map());
+  /** The sessions as they are now, for the search window's reader, which starts once per opening. */
+  const searchSessions = useRef<Session[]>([]);
+  /** A search result's time, for a recording whose video may not load again (search spec). */
+  const searchSeek = useRef<{ id: string; time: number; request: number } | null>(null);
+  /** Each Ctrl/⌘+F asks the transcript to open its find bar. */
+  const [findRequest, setFindRequest] = useState(0);
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
   const [mediaRevision, setMediaRevision] = useState(0);
-  /** The session whose video stays unloaded while a take records and is appended to video.mp4. */
-  const [heldMedia, setHeldMedia] = useState<string | null>(null);
+  /** Which of the session's take videos the <video> plays. */
+  const [videoIndex, setVideoIndex] = useState(0);
+  /** Session time: the loaded take video's start plus its own playback time. */
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const [speed, setSpeed] = useState(storedSpeed);
   const [focusVideo, setFocusVideo] = useState(false);
+  /** Whether leaving focus docks the sidebar again: only when it was docked before focus. */
+  const focusRestoresSidebar = useRef(false);
+  const [draftSection, setDraftSection] = useState<string | null>(null);
 
   const video = useRef<HTMLVideoElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
   const appRoot = useRef<HTMLDivElement>(null);
   const sheet = useRef<HTMLElement>(null);
   const deletionFocus = useRef<HTMLElement | null>(null);
   /** Set while the app itself unloads the video, so the resulting media events are not failures. */
   const releasing = useRef(false);
   const restorePlayback = useRef<Playback | null>(null);
+  const pendingSeek = useRef<PendingSeek | null>(null);
+  /** Whether the loaded video was playing: kept through the pause that ends it, for the next take. */
+  const wasPlaying = useRef(false);
   const selection = useRef(0);
   /** The recording shown or about to be shown, set as soon as it is chosen (before React re-renders). */
   const shownId = useRef<string | null>(null);
@@ -125,17 +149,18 @@ export default function App({ platform: requested }: AppProps = {}) {
   const locked = recording || busy;
   const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
   const { preview, previewError, onPreviewError } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
-  const mediaHeld = !!session && (heldMedia === session.id || takeInFlight(session));
-  const videoSrc = session && !draft && !mediaHeld ? sessionVideoUrl(session, videoUrl) : undefined;
+  /** The video stays unloaded while a later take records or its video is finished. */
+  const mediaHeld = takeInFlight(session);
+  // Each take keeps its own video; one <video> plays the one the session time falls in.
+  const videos = useMemo(() => session ? sessionVideos(session, videoUrl) : [], [session]);
+  const shownVideo = Math.min(videoIndex, Math.max(videos.length - 1, 0));
+  const videoSrc = session && !draft && !mediaHeld ? videos[shownVideo]?.url : undefined;
+  /** Several take videos play as one timeline of the session's length; one video keeps its own length. */
+  const timeline = videos.length > 1 && session ? session.durationMs : duration;
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
-  /**
-   * Record more itself unloads the video while its take starts. That is a busy moment for the pill
-   * (aria-disabled), not a reason to disable it, so focus stays on it through a refusal.
-   */
-  const startingTake = busy && !!session && heldMedia === session.id && !takeInFlight(session);
-  const canRecordMore = !!session && !draft && settled(session) && (!!videoSrc || startingTake) && devicesReady;
-  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || !!discarding || settingsOpen; });
+  const canRecordMore = !!session && !draft && settled(session) && !!videoSrc && devicesReady;
+  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
 
@@ -153,24 +178,26 @@ export default function App({ platform: requested }: AppProps = {}) {
     });
   }, []);
 
-  const openSession = useCallback(async (id: string) => {
+  /** Opens a recording; resolves true once it is shown, false when superseded or failed. */
+  const openSession = useCallback(async (id: string): Promise<boolean> => {
     const request = ++selection.current;
-    restorePlayback.current = null; setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
+    restorePlayback.current = null; pendingSeek.current = null; setDraftSection(null); setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
-      if (request !== selection.current) return;
+      if (request !== selection.current) return false;
       shownId.current = next.id;
-      setSession(next); setTranscript(text); setDraft(false); setTime(0); setPlaying(false); setDuration(next.durationMs);
-      if (settled(next)) setHeldMedia(current => current === next.id ? null : current);
+      setSession(next); setTranscript(text); setDraft(false); setTime(0); setVideoIndex(0); setPlaying(false); setDuration(next.durationMs);
       if (next.status === 'recording') {
-        // Restore the capture's choices, including a later take's microphone.
+        // Restore the capture's choices, including a later take's source and microphone.
         const take = next.takes?.find(item => item.status === 'recording');
-        if (next.sourceId) setSourceId(next.sourceId);
+        const recorded = take?.sourceId ?? next.sourceId;
+        if (recorded) setSourceId(recorded);
         setMicrophoneId(take ? take.microphoneId || '' : next.microphoneId || '');
         setSystemAudio(take ? take.systemAudio : next.systemAudio || false);
       }
-    } catch (problem) { if (request === selection.current) report(problem); }
+      return true;
+    } catch (problem) { if (request === selection.current) report(problem); return false; }
     finally { if (request === selection.current) setLoading(false); }
   }, [report, dismissOverlay, setSourceId, setMicrophoneId, setSystemAudio]);
 
@@ -206,7 +233,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', visible); };
   }, [refreshProjects]);
 
-  // Runtime status. Stop returns before a take is appended and transcribed, so the open
+  // Runtime status. Stop returns before a take is finished and transcribed, so the open
   // recording is re-read until it settles, and then its video and transcript reload.
   useEffect(() => {
     if (!isTauri()) return;
@@ -241,7 +268,6 @@ export default function App({ platform: requested }: AppProps = {}) {
             if (!stillOpen()) return;
             setSession(fresh); setDuration(fresh.durationMs);
             if (text) setTranscript(text);
-            setHeldMedia(held => held === fresh.id ? null : held);
             if (unreadable !== undefined) report(unreadable);
             if (!finished) await refreshProjects();
           } else setSession(fresh);
@@ -266,24 +292,67 @@ export default function App({ platform: requested }: AppProps = {}) {
   // Compact mode exists only while recording.
   useEffect(() => { if (compact && !recording) void exitCompact(); }, [compact, recording, exitCompact]);
 
-  const prepare = useCallback(() => {
+  /** A new session; one started from a section heading is filed in that section when it records. */
+  const prepare = useCallback((sectionId?: unknown) => {
     if (locked) return;
-    selection.current++; shownId.current = null; restorePlayback.current = null; dismissOverlay();
-    setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null); setRecordMoreError('');
+    setDraftSection(typeof sectionId === 'string' ? sectionId : null);
+    selection.current++; shownId.current = null; restorePlayback.current = null; pendingSeek.current = null; dismissOverlay();
+    setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setVideoIndex(0); setCaptureMenu(null); setRecordMoreError('');
   }, [locked, dismissOverlay]);
+  /** Loads take video `index` and plays it from `localMs` once its metadata is in, playing on if `play`. */
+  const loadVideo = useCallback((index: number, localMs: number, play: boolean) => {
+    pendingSeek.current = { localMs, play };
+    // A new source pauses the element without a pause event; the controls show what comes next.
+    wasPlaying.current = play; setPlaying(play);
+    setVideoIndex(index);
+  }, []);
+  /** Seeks the session timeline, loading another take's video when the time falls in it. */
   const seek = useCallback((ms: number) => {
-    const next = seekTime(ms, duration);
-    if (video.current) video.current.currentTime = next / 1000;
+    const next = seekTime(ms, timeline);
     setTime(next);
-  }, [duration]);
+    const target = videoAt(videos, next);
+    if (!target) return;
+    const media = video.current;
+    const pending = pendingSeek.current;
+    // A video still loading takes the latest seek and keeps the play state the first one saw.
+    if (target.index !== shownVideo || pending) loadVideo(target.index, target.localMs, pending ? pending.play : !!media && !media.paused);
+    else if (media) media.currentTime = target.localMs / 1000;
+  }, [timeline, videos, shownVideo, loadVideo]);
   const togglePlay = useCallback(async () => {
     const media = video.current;
     if (!media || mode !== 'review') return;
+    // While another take's video loads, play or pause applies once it is in.
+    const pending = pendingSeek.current;
+    if (pending) { pending.play = !pending.play; wasPlaying.current = pending.play; setPlaying(pending.play); return; }
+    // Play after the last take's end starts the session again from its first take.
+    if (media.paused && media.ended && shownVideo > 0) { setTime(0); loadVideo(0, 0, true); return; }
     try { if (media.paused) await media.play(); else media.pause(); } catch (problem) { report(problem); }
-  }, [mode, report]);
-  const cycleSpeed = () => {
-    const next = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+  }, [mode, report, shownVideo, loadVideo]);
+  // Focus video hides the sidebar and the transcript; leaving it docks the sidebar again if it was docked before.
+  const toggleFocus = () => {
+    if (focusVideo) { setFocusVideo(false); return; }
+    // Focus clears the docked preference at any width, so a window that widens meanwhile shows no
+    // sidebar; an overlay (a narrow window) simply closes. Leaving focus docks it again if it was.
+    focusRestoresSidebar.current = sidebar.docked;
+    sidebar.undock(); dismissOverlay();
+    setFocusVideo(true);
+  };
+  /** Showing the sidebar while focused ends focus, so the transcript returns with it. */
+  const toggleSidebar = () => {
+    // It shows the sidebar now; leaving focus still docks it again if it was docked before focus.
+    if (focusVideo && !sidebarVisible) { setFocusVideo(false); sidebar.show(); } else sidebar.toggle();
+  };
+  const wasFocused = useRef(false);
+  useEffect(() => {
+    if (wasFocused.current && !focusVideo && focusRestoresSidebar.current) sidebar.dock();
+    if (!focusVideo) focusRestoresSidebar.current = false;
+    wasFocused.current = focusVideo;
+  }, [focusVideo, sidebar.dock]);
+  // Focus belongs to review: a new recording or a recording in progress ends it.
+  useEffect(() => { if (focusVideo && mode !== 'review') setFocusVideo(false); }, [focusVideo, mode]);
+  const chooseSpeed = (next: number) => {
     setSpeed(next);
+    try { localStorage.setItem(SPEED_KEY, String(next)); } catch { /* the speed still applies now */ }
     if (video.current) video.current.playbackRate = next;
   };
 
@@ -309,10 +378,11 @@ export default function App({ platform: requested }: AppProps = {}) {
       if (!source?.available) throw new Error(source?.detail || 'Choose an available screen, window, or connected device first.');
       if (microphoneUnavailable) throw new Error(MICROPHONE_UNAVAILABLE);
       setStartingRecording(true);
-      const next = await backend.start(null, null, sourceId, microphoneId || null, systemAudio, muted);
+      const target = draftSection && projects.some(section => section.id === draftSection) ? draftSection : null;
+      const next = await backend.start(target, null, sourceId, microphoneId || null, systemAudio, muted);
       shownId.current = next.id;
       setSession(next); setDraft(false); setTranscript(EMPTY_TRANSCRIPT); runtimeState.current = 'recording';
-      setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0 }); setTime(0); setPlaying(false);
+      setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0 }); setTime(0); setVideoIndex(0); setPlaying(false);
       await refreshProjects();
     } catch (problem) { report(problem); }
     finally { setStartingRecording(false); setBusy(false); }
@@ -322,61 +392,113 @@ export default function App({ platform: requested }: AppProps = {}) {
     actionEpoch.current++; setBusy(true); setError('');
     try {
       const next = await backend.stop();
+      // A mute from the dock lasts for its take: the next one starts unmuted unless Mute is ticked again.
+      setMuted(false);
       setSession(next); setDraft(false);
       runtimeState.current = next.status === 'processing' ? 'processing' : 'idle';
       setStatus({ state: runtimeState.current, sessionId: runtimeState.current === 'processing' ? next.id : undefined }); setDuration(next.durationMs);
-      if (settled(next)) {
-        setTranscript(await backend.transcript(next.id));
-        setHeldMedia(current => current === next.id ? null : current);
-      }
+      if (settled(next)) setTranscript(await backend.transcript(next.id));
       await refreshProjects();
     } catch (problem) { report(problem); }
     finally { setBusy(false); }
   };
   /**
-   * Continues the open recording as a new take on its own source (decision 10). A refusal, such as a
-   * source that is gone, is shown beside the Record more pill with New recording as the way forward.
+   * Continues the open recording as a new take with its own video (decision 10), recording the
+   * recording bar's source, system audio and microphone. A refusal, such as a window that has
+   * closed, is shown under the bar with New recording as the other way forward.
    */
   const recordMore = async () => {
     if (!session || !canRecordMore || busy || loading || recording || processing || captureBlocked) return;
+    if (!source?.available) { setRecordMoreError(source?.detail || 'Choose an available screen, window, or connected device first.'); return; }
     if (microphoneUnavailable) { setRecordMoreError(MICROPHONE_UNAVAILABLE); return; }
-    actionEpoch.current++; setBusy(true); setError(''); setRecordMoreError('');
-    // Windows keeps an open file locked and the backend replaces video.mp4 after the take,
-    // so the video is unloaded first and stays unloaded until processing has finished.
-    const playback = unloadVideo(session.id);
-    setHeldMedia(session.id);
+    actionEpoch.current++; setBusy(true); setError(''); setRecordMoreError(''); setCaptureMenu(null);
+    // No file is replaced, so the video stays loaded; it pauses so its sound is not recorded with system audio.
+    video.current?.pause();
     try {
-      // The take uses the current microphone choice and the session's own source and system audio.
-      const next = await backend.recordMore(session.id, microphoneId || null, session.systemAudio ?? false, muted);
+      const next = await backend.recordMore(session.id, sourceId, microphoneId || null, systemAudio, muted);
       const take = next.takes?.find(item => item.status === 'recording') ?? next.takes?.at(-1);
-      setSession(next); setTime(0);
-      if (next.sourceId) setSourceId(next.sourceId);
-      setSystemAudio(next.systemAudio ?? false);
+      // The take records the live source; review comes back at the session's start.
+      pendingSeek.current = null; setSession(next); setTime(0); setVideoIndex(0);
       runtimeState.current = 'recording';
       setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0, takeIndex: take?.index, takeOffsetMs: take?.offsetMs });
       await refreshProjects();
-    } catch (problem) {
-      setHeldMedia(null);
-      reloadVideo(playback);
-      setRecordMoreError(errorMessage(problem));
-    } finally { releasing.current = false; setBusy(false); }
+    } catch (problem) { setRecordMoreError(errorMessage(problem)); }
+    finally { setBusy(false); }
   };
   const recordCommand = () => { if (recording) void stop(); else if (draft) void start(); else void recordMore(); };
 
-  const changeSearch = (value: string) => {
-    setSearch(value);
-    if (value.trim() && !sidebarVisible) showSidebar();
+  /** Search waits while recording, like the sidebar's rows. */
+  const openSearch = () => { if (!locked) setSearchOpen(true); };
+  searchSessions.current = sessions;
+  // Each opening reads every settled recording's transcript again, four at a time, so a transcript
+  // that changed (a retry, `cue transcribe`) is searched as it is now. Lines read at an earlier
+  // opening stay listed until their new read arrives.
+  useEffect(() => {
+    if (!searchOpen) return;
+    let alive = true;
+    const queue = searchSessions.current.filter(settled);
+    const next = async () => {
+      for (let item = queue.shift(); item && alive; item = queue.shift()) {
+        const read = await backend.transcript(item.id).catch(() => null);
+        if (!alive || !read) continue;
+        const id = item.id;
+        setSearchTranscripts(current => new Map(current).set(id, read));
+      }
+    };
+    void Promise.all([next(), next(), next(), next()]);
+    return () => { alive = false; };
+  }, [searchOpen]);
+  /** A search result: the recording, standing paused at the line's time, or at its start. */
+  const openResult = (id: string, atMs?: number) => {
+    if (!draft && !loading && session?.id === id) {
+      // Already open: the video does not load again, so seek it here.
+      dismissOverlay();
+      video.current?.pause();
+      seek(atMs ?? 0);
+      return;
+    }
+    const opening = openSession(id);
+    const request = selection.current, time = (atMs ?? 0) / 1000;
+    // A new source applies a line's time when it loads (a recording starts at 0 anyway); the layout
+    // effect below covers the same source.
+    if (atMs !== undefined) restorePlayback.current = { id, time, playing: false, fromSearch: true };
+    searchSeek.current = { id, time, request };
+    void opening.then(shown => {
+      // A failed load drops what it would have applied; a superseded one leaves the newer choice's.
+      if (shown || request !== selection.current) return;
+      if (searchSeek.current?.request === request) searchSeek.current = null;
+      if (restorePlayback.current?.fromSearch && restorePlayback.current.id === id) restorePlayback.current = null;
+    });
+  };
+  // When the chosen recording commits, the video it shows is final. If it is the video already
+  // there (the same source, shown while another load ran), it does not load again: seek it now.
+  // Only for the latest selection, so an earlier choice never acts on a later one.
+  useLayoutEffect(() => {
+    const pending = searchSeek.current, media = video.current;
+    if (!pending || session?.id !== pending.id) return;
+    searchSeek.current = null;
+    if (pending.request !== selection.current || !media || media.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    if (restorePlayback.current?.id === pending.id) restorePlayback.current = null;
+    media.pause();
+    // A session time, which may fall in another take's video.
+    seek(pending.time * 1000);
+  }, [session]);
+  /** Ctrl/⌘+F: Find in the transcript; in focus, the transcript comes back first. */
+  const openFind = () => {
+    if (!focusVideo) { setFindRequest(value => value + 1); return; }
+    setFocusVideo(false);
+    requestAnimationFrame(() => setFindRequest(value => value + 1));
   };
   useShortcuts({
     platform: os,
-    enabled: !dialog && !deletion && !discarding && !settingsOpen && !captureMenu,
+    enabled: !dialog && !deletion && !settingsOpen && !searchOpen && !captureMenu,
     onRecord: recordCommand,
     onNew: prepare,
     onTogglePlay: mode === 'review' && videoSrc ? () => void togglePlay() : undefined,
     onSeekBy: mode === 'review' ? delta => seek(time + delta) : undefined,
-    search: searchRef,
-    onClearSearch: () => setSearch(''),
-    onEscape: sidebarOverlay ? dismissOverlay : undefined,
+    onSearch: locked ? undefined : openSearch,
+    onFind: mode === 'review' ? openFind : undefined,
+    onEscape: sidebarOverlay ? dismissOverlay : focusVideo ? () => setFocusVideo(false) : undefined,
   });
 
   const changeMuted = async (next: boolean) => {
@@ -474,7 +596,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       setDeletion(null);
       if (session?.id === item.id) {
         shownId.current = null;
-        setSession(null); setDraft(true); setTranscript(EMPTY_TRANSCRIPT); setTime(0); setDuration(0); setPlaying(false); setLoading(false); setFocusVideo(false);
+        setSession(null); setDraft(true); setTranscript(EMPTY_TRANSCRIPT); setTime(0); setVideoIndex(0); setDuration(0); setPlaying(false); setLoading(false); setFocusVideo(false);
       }
       await refreshProjects();
       setNotice('Recording deleted');
@@ -487,48 +609,13 @@ export default function App({ platform: requested }: AppProps = {}) {
     // The runtime transcribes one job at a time, whichever recording it belongs to.
     if (!session || busy || captureBlocked) return;
     setBusy(true);
-    // Retry may finish appending a take to video.mp4 first.
-    const swapping = takeSwapping(session);
-    const playback = swapping ? unloadVideo(session.id) : null;
-    if (swapping) setHeldMedia(session.id);
     try {
       await backend.retry(session.id);
       setSession({ ...session, status: 'processing', error: undefined });
       runtimeState.current = 'processing';
       setStatus({ state: 'processing', sessionId: session.id });
       setError('');
-    } catch (problem) {
-      if (swapping) { setHeldMedia(null); reloadVideo(playback); }
-      report(problem);
-    } finally { releasing.current = false; setBusy(false); }
-  };
-  /**
-   * Drops a take whose swap into video.mp4 keeps failing (`swapping` after a failed Retry). The take
-   * keeps its folder and the session settles, usually to ready. The video stayed unloaded while the
-   * take was pending; it reloads under a version that counts the discarded take, so the webview
-   * cannot serve the copy it cached before Record more.
-   */
-  const discardTake = async () => {
-    const target = discarding;
-    if (!target || busy) return;
-    actionEpoch.current++; setBusy(true); setDialogError('');
-    try {
-      const next = await backend.discardTake(target.id, target.index);
-      // The take is gone either way: a transcript that cannot be read yet is reported in the workspace.
-      let text: Transcript | undefined;
-      let unreadable: unknown;
-      try { text = await backend.transcript(next.id); } catch (problem) { unreadable = problem; }
-      if (shownId.current === next.id) {
-        setSession(next); setDuration(next.durationMs); setTime(0); setPlaying(false); setError('');
-        if (text) setTranscript(text);
-        setHeldMedia(held => held === next.id ? null : held);
-        reloadVideo(null);
-      }
-      setDiscarding(null);
-      setNotice(`Take ${target.index} discarded`);
-      if (unreadable !== undefined) report(unreadable);
-      await refreshProjects().catch(report);
-    } catch (problem) { reportInDialog(problem); }
+    } catch (problem) { report(problem); }
     finally { setBusy(false); }
   };
   /** Settings may close while it works: a late failure then goes to the workspace. */
@@ -553,8 +640,6 @@ export default function App({ platform: requested }: AppProps = {}) {
   const shownTranscript = recording ? recordingTranscript(transcript, status) : { ...transcript, takes: marks };
   const transcriptError = mode === 'review' && !processing && (session?.status === 'error' || transcript.error)
     ? transcript.error || session?.error || 'The transcript could not be created.' : undefined;
-  /** A take that Retry could not add to video.mp4, offered for discarding beside Retry. */
-  const stuckTake = transcriptError && session?.status === 'error' ? session.takes?.find(take => take.index > 1 && take.status === 'swapping') : undefined;
   const emptyMessage = recording
     ? noAudio ? 'No audio input was selected for this recording.'
       : !setup?.modelReady ? 'Transcription needs setup.'
@@ -564,52 +649,77 @@ export default function App({ platform: requested }: AppProps = {}) {
         : loading ? undefined : 'No speech was detected in this recording.';
   const empty = mode !== 'review'
     ? captureEmptyState({ source, loading, paused: previewPaused, previewError })
-    : busy && heldMedia === session?.id && !processing ? STARTING_TAKE
-      // Nothing is under way for a stuck take, so the stage does not say it is finishing.
-      : stuckTake && !loading ? { title: `Take ${stuckTake.index} is not in the video yet`, detail: 'Retry to add it, or discard the take to play the recording.' }
-        : reviewEmptyState({ loading, processing: processing || mediaHeld });
+    : reviewEmptyState({ loading, processing: processing || mediaHeld });
+  const startMs = videos[shownVideo]?.startMs ?? 0;
   const videoProps: MediaStageViewProps['videoProps'] = {
-    onTimeUpdate: event => setTime(event.currentTarget.currentTime * 1000),
+    // While another take's video loads, the old one's time is not the session's.
+    onTimeUpdate: event => { if (!pendingSeek.current) setTime(startMs + event.currentTarget.currentTime * 1000); },
     onLoadedMetadata: event => {
       const media = event.currentTarget;
-      setDuration(Number.isFinite(media.duration) ? media.duration * 1000 : session?.durationMs ?? 0);
+      if (videos.length <= 1) setDuration(Number.isFinite(media.duration) ? media.duration * 1000 : session?.durationMs ?? 0);
       media.playbackRate = speed;
+      const pending = pendingSeek.current;
       const restore = restorePlayback.current;
-      if (restore && restore.id === session?.id) {
+      if (pending) {
+        pendingSeek.current = null; restorePlayback.current = null;
+        media.currentTime = pending.localMs / 1000; setTime(startMs + pending.localMs);
+        if (pending.play) void media.play().catch(report);
+      } else if (restore && restore.id === session?.id && restore.fromSearch) {
+        // A search result's line is a session time: it may fall in another take's video.
         restorePlayback.current = null;
-        media.currentTime = restore.time; setTime(restore.time * 1000);
+        const target = videoAt(videos, restore.time * 1000);
+        if (target && target.index !== shownVideo) { loadVideo(target.index, target.localMs, false); return; }
+        media.currentTime = (target?.localMs ?? restore.time * 1000) / 1000; setTime(restore.time * 1000);
+      } else if (restore && restore.id === session?.id) {
+        restorePlayback.current = null;
+        media.currentTime = restore.time; setTime(startMs + restore.time * 1000);
         if (restore.playing) void media.play().catch(report);
       }
     },
-    onPlay: () => setPlaying(true),
-    onPause: () => setPlaying(false),
-    onEnded: () => setPlaying(false),
+    onPlay: () => { wasPlaying.current = true; setPlaying(true); },
+    // Reaching the end pauses first; whether it was playing still decides the next take.
+    onPause: event => { if (!event.currentTarget.ended) wasPlaying.current = false; setPlaying(false); },
+    // The next take's video goes on from its start, playing if this one was; the last one ends playback.
+    onEnded: () => {
+      if (shownVideo + 1 < videos.length) { setTime(videos[shownVideo + 1].startMs); loadVideo(shownVideo + 1, 0, wasPlaying.current); }
+      else { wasPlaying.current = false; setPlaying(false); }
+    },
     onClick: () => void togglePlay(),
     onError: () => {
-      const restoring = restorePlayback.current?.id === session?.id;
-      if (restoring) restorePlayback.current = null;
-      if (!releasing.current && !restoring) setError('This recording could not be played. Open its folder to inspect the video file.');
+      pendingSeek.current = null;
+      // The app's own reload of a video may fail on the way; a search result's video is no reload.
+      const restore = restorePlayback.current?.id === session?.id ? restorePlayback.current : null;
+      if (restore) restorePlayback.current = null;
+      if (!releasing.current && (!restore || restore.fromSearch)) setError('This recording could not be played. Open its folder to inspect the video file.');
     },
   };
 
   const dock = <RecordingDock platform={os} elapsedMs={status.elapsedMs || 0} take={status.takeIndex ?? 1} audioLevel={status.audioLevel}
-    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable} muted={muted} onMuted={next => void changeMuted(next)}
+    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable}
+    microphoneName={microphones.find(item => item.id === microphoneId)?.name} muted={muted} onMuted={next => void changeMuted(next)}
     compact={compact} onToggleCompact={() => void toggleCompact()} stopDisabled={busy} onStop={() => void stop()}/>;
+  // The recording bar in a draft and in review: its choices are the app's, and set the next recording's or take's
+  // source, system audio and microphone.
+  const bar = {
+    platform: os, sources: sourceOptions, source, systemAudio, microphones, microphoneId, microphoneUnavailable, muted, menu: captureMenu, onMenu: setCaptureMenu,
+    onSelectSource: (id: string) => { setSourceId(id); setPreviewRevision(value => value + 1); }, onSystemAudio: setSystemAudio,
+    onSelectMicrophone: setMicrophoneId, onMuted: setMuted, onRefreshMicrophones: () => void refreshDevices().catch(report),
+    onRefreshSources: () => void refreshDevices().then(() => setPreviewRevision(value => value + 1)).catch(report),
+    locked, busy,
+  };
   // `busy` is a moment, not a state of the control: those buttons stay focusable (aria-disabled), so focus never drops to the page.
   const controls = mode === 'recording' ? dock
-    : mode === 'draft' ? <CaptureControls platform={os} sources={sourceOptions} source={source} microphones={microphones} microphoneId={microphoneId}
-        microphoneUnavailable={microphoneUnavailable} systemAudio={systemAudio} muted={muted} menu={captureMenu} onMenu={setCaptureMenu}
-        onSelectSource={id => { setSourceId(id); setPreviewRevision(value => value + 1); }} onSelectMicrophone={setMicrophoneId}
-        onSystemAudio={setSystemAudio} onMuted={setMuted}
-        onRefreshSources={() => void refreshDevices().then(() => setPreviewRevision(value => value + 1)).catch(report)}
-        onRefreshMicrophones={() => void refreshDevices().catch(report)}
-        locked={locked} busy={busy} recordLabel={busy ? NAMES.pleaseWait : captureBlocked ? NAMES.transcribing : NAMES.record}
+    : mode === 'draft' ? <CaptureControls {...bar}
+        recordLabel={busy ? NAMES.pleaseWait : captureBlocked ? NAMES.transcribing : NAMES.record}
         recordDisabled={captureBlocked || loading || !devicesReady || !source?.available || microphoneUnavailable} recordBusy={busy} onRecord={() => void start()}/>
-      : <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
-          playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onCycleSpeed={cycleSpeed}
-          focused={focusVideo} onToggleFocus={() => setFocusVideo(value => !value)}
-          recordMoreDisabled={!canRecordMore || loading || processing || captureBlocked} recordMoreBusy={busy} onRecordMore={() => void recordMore()}
-          recordMoreError={recordMoreError || undefined} onNewRecording={prepare} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
+      : <>
+        <PlaybackBar platform={os} timeMs={time} durationMs={timeline} segments={shownTranscript.segments} takes={marks} onSeek={seek}
+          playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onSpeed={chooseSpeed}
+          focused={focusVideo} onToggleFocus={toggleFocus}/>
+        <CaptureControls {...bar} review
+          recordLabel={NAMES.recordMore} recordDisabled={!canRecordMore || loading || processing || captureBlocked || !source?.available} recordBusy={busy} onRecord={() => void recordMore()}
+          recordMoreError={recordMoreError || undefined} onNewRecording={prepare} onDismissRecordMoreError={() => setRecordMoreError('')}/>
+      </>;
 
   // Focus that loses its control goes to the control taking its place (decisions 6 and 9).
   useFocusRescue(appRoot, lost => {
@@ -627,14 +737,9 @@ export default function App({ platform: requested }: AppProps = {}) {
       if (other) return other;
     }
     if (mode === 'recording') return find('.cr-stop');
-    return find('.cr-stage-controls .cr-dark-pill') ?? sheet.current;
+    return find('.cr-stage-controls .cr-record') ?? sheet.current;
   });
-  /** The same home for a dialog whose invoking control is gone when it closes (a discarded take's button). */
-  const stageFocus = useMemo<RefObject<HTMLElement | null>>(() => ({
-    get current() { return [...(appRoot.current?.querySelectorAll('.cr-stage-controls .cr-dark-pill') ?? [])].find(canTakeFocus) ?? sheet.current; },
-  }), []);
-
-  const errorBanner = error && !dialog && !deletion && !discarding && !settingsOpen && <div className="app-error" role="alert">
+  const errorBanner = error && !dialog && !deletion && !settingsOpen && <div className="app-error" role="alert">
     <Icon name="warning" strokeWidth={1.8}/><p>{error}</p>
     <button type="button" aria-label={NAMES.dismissError} title={NAMES.dismissError} onClick={() => setError('')}><Icon name="close" strokeWidth={1.8}/></button>
   </div>;
@@ -663,23 +768,23 @@ export default function App({ platform: requested }: AppProps = {}) {
         status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
         error={transcriptError} onRetry={() => void retry()} retryDisabled={captureBlocked} retryBusy={busy}
-        discardTake={stuckTake?.index} onDiscardTake={stuckTake && session ? () => { setDialogError(''); setDiscarding({ id: session.id, index: stuckTake.index }); } : undefined}/>
+        findRequest={findRequest}/>
     </div>}
   </main>;
 
   // The sidebar slides out and in, except beside a live preview or a recording, so live video is never resized by an animation.
   const liveVideo = mode !== 'review';
   const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, liveVideo);
-  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
+  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} utilities={null} onSearch={openSearch}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
     onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
     onRenameSection={item => openDialog({ kind: 'renameSection', id: item.id, value: item.name })}
-    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })}
+    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })} onNewInSection={prepare}
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
     onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
-  const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
-    search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
+  const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={toggleSidebar}
+    onOpenSettings={openSettings}/>;
 
   return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}
     data-sidebar-motion={liveVideo ? 'instant' : 'slide'} data-compact={compact || undefined}>
@@ -695,6 +800,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     </>}
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
+    <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} sessions={sessions} sections={projects} transcripts={searchTranscripts}
+      onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={refreshSetup}
       onRefreshSetup={refreshSetup} onDownloadLanguageModel={backend.downloadLanguageModel}
@@ -703,8 +810,6 @@ export default function App({ platform: requested }: AppProps = {}) {
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>
     <DeleteRecordingDialog target={deletion} busy={busy} error={deletion ? dialogError : ''} restoreFocusRef={deletionFocus} fallbackFocusRef={sheet}
       onClose={() => setDeletion(null)} onDelete={() => void deleteRecording()}/>
-    <DiscardTakeDialog take={discarding?.index ?? null} busy={busy} error={discarding ? dialogError : ''} fallbackFocusRef={stageFocus}
-      onClose={() => setDiscarding(null)} onDiscard={() => void discardTake()}/>
     {/* Always mounted, so screen readers announce each notice as it appears. */}
     <div className="app-toast-region" role="status">{notice && <div className="app-toast">{notice}</div>}</div>
   </div>;

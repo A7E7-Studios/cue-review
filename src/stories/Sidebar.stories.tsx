@@ -1,6 +1,6 @@
 import { useLayoutEffect, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, userEvent, waitFor, within } from 'storybook/test';
+import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import { Sidebar } from '../Sidebar';
 import type { Platform } from '../chrome/windowApi';
 import { date, sections as exampleSections, sessions as exampleSessions } from './fixtures';
@@ -27,8 +27,8 @@ export const moreRecents = [
   { ...exampleSessions[3], id: 'export', name: 'Export dialog edge cases', durationMs: 96000 },
 ];
 
-type Props = { platform: Platform; selected: boolean; filter: string; showCollapse: boolean; empty: boolean; longNames: boolean; longList: boolean; locked: boolean; loading: boolean };
-function SidebarExample({ platform, selected, filter, showCollapse, empty, longNames, longList, locked, loading }: Props) {
+type Props = { platform: Platform; selected: boolean; showCollapse: boolean; empty: boolean; longNames: boolean; longList: boolean; locked: boolean; loading: boolean };
+function SidebarExample({ platform, selected, showCollapse, empty, longNames, longList, locked, loading }: Props) {
   usePlatformAttribute(platform);
   const [sections, setSections] = useState(() => empty ? [] : exampleSections.map(section => ({ ...section, name: longNames ? `${section.name} — navigation, review and accessibility improvements` : section.name })));
   const [sessions, setSessions] = useState(() => empty ? [] : [...exampleSessions, ...moreRecents, ...(longList ? Array.from({ length: 36 }, (_, index) => ({ ...exampleSessions[3], id: `recent-${index}`, name: `Review session ${index + 1}` })) : [])].map(session => ({ ...session, name: longNames ? `${session.name} with a very long description that should truncate gracefully` : session.name })));
@@ -37,10 +37,11 @@ function SidebarExample({ platform, selected, filter, showCollapse, empty, longN
   const mac = platform === 'macos';
   return <div style={{ position: 'relative', display: 'grid', gridTemplateColumns: 'var(--size-sidebar) minmax(0, 1fr)', height: 'min(720px, 100vh)', background: mac ? 'var(--color-sheet)' : 'var(--color-ground)' }}>
     {mac && <TrafficLights/>}
-    <Sidebar platform={platform} showCollapse={showCollapse} filter={filter} sections={sections} sessions={sessions} activeId={activeId} locked={locked} loading={loading} utilities={null}
+    <Sidebar platform={platform} showCollapse={showCollapse} onSearch={() => setMessage('Search selected.')} sections={sections} sessions={sessions} activeId={activeId} locked={locked} loading={loading} utilities={null}
       onCollapse={() => setMessage('Collapse action selected.')} onNew={() => { setActiveId(''); setMessage('Fresh temporary recording selected.'); }} onOpen={setActiveId}
       onRename={session => setMessage(`Rename selected: ${session.name}`)} onRenameSection={section => setMessage(`Rename selected: ${section.name}`)}
       onCreateSection={() => setSections(items => [...items, { id: `new-${items.length}`, name: 'New section', createdAt: date }])}
+      onNewInSection={id => { setActiveId(''); setMessage(`New session in ${sections.find(section => section.id === id)?.name}.`); }}
       onDeleteSection={section => { setSections(items => items.filter(item => item.id !== section.id)); setSessions(items => items.map(item => item.projectId === section.id ? { ...item, projectId: null } : item)); setMessage('Section removed. Its recordings are back in Recents.'); }}
       onDeleteSession={session => { setSessions(items => items.filter(item => item.id !== session.id)); setMessage('Sample recording removed. No files were accessed.'); }}
       onMove={async (id, projectId) => { setSessions(items => items.map(item => item.id === id ? { ...item, projectId } : item)); setMessage('Recording moved.'); return true; }}
@@ -48,7 +49,7 @@ function SidebarExample({ platform, selected, filter, showCollapse, empty, longN
     <div className="workshop-sidebar-note" style={{ background: 'var(--color-sheet)', ...(mac ? {} : { borderTop: '1px solid var(--color-sheet-edge)', borderLeft: '1px solid var(--color-sheet-edge)', borderTopLeftRadius: 'var(--radius-window)' }) }}>
       <h2>Recording organization</h2>
       <p>{message}</p>
-      <p>Use the row menu or drag a recording. Section menus also offer keyboard-accessible Move up and Move down actions. Hover or focus a row for its duration and date, and New recording for its shortcut.</p>
+      <p>Use the row menu or drag a recording. Section menus also offer keyboard-accessible Move up and Move down actions. Right-click empty space for New session and New section. Hover or focus a row for its duration and date, and New session for its shortcut.</p>
     </div>
   </div>;
 }
@@ -57,7 +58,7 @@ const meta = {
   title: 'Sidebar/Organization', component: SidebarExample,
   // Shared with Chrome.stories.tsx; not stories.
   excludeStories: ['usePlatformAttribute', 'TrafficLights', 'moreRecents'],
-  args: { platform: 'windows', selected: true, filter: '', showCollapse: false, empty: false, longNames: false, longList: false, locked: false, loading: false },
+  args: { platform: 'windows', selected: true, showCollapse: false, empty: false, longNames: false, longList: false, locked: false, loading: false },
   argTypes: { platform: { control: 'inline-radio', options: ['windows', 'macos', 'linux'] } },
   render: args => <SidebarExample key={`${args.empty}-${args.longNames}-${args.longList}-${args.selected}`} {...args}/>,
 } satisfies Meta<typeof SidebarExample>;
@@ -78,18 +79,21 @@ export const HoverMeta: Story = {
 };
 export const ShortcutHint: Story = {
   play: async ({ canvasElement }) => {
-    const create = within(canvasElement).getByRole('button', { name: 'New recording' });
+    const create = within(canvasElement).getByRole('button', { name: 'New session' });
     await userEvent.tab();
     await expect(create).toHaveFocus();
     await expect(create).toHaveAttribute('aria-keyshortcuts');
     await expect(create.querySelector('kbd')).toHaveAttribute('aria-hidden', 'true');
   },
 };
-export const Filtered: Story = { args: { filter: 'e' } };
-export const NoMatches: Story = {
-  args: { filter: 'zebra' },
+/** Right-click on empty space in the list: the sidebar's own menu. */
+export const SidebarMenu: Story = {
   play: async ({ canvasElement }) => {
-    await expect(within(canvasElement).getByRole('status')).toHaveTextContent('No matches');
+    const list = canvasElement.querySelector<HTMLElement>('.recording-list')!;
+    const box = list.getBoundingClientRect();
+    fireEvent.contextMenu(list, { clientX: box.left + 60, clientY: box.bottom - 120 });
+    const menu = await within(canvasElement.ownerDocument.body).findByRole('menu', { name: 'Sidebar actions' });
+    await expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['New session', 'New section']);
   },
 };
 export const MacOS: Story = { args: { platform: 'macos', showCollapse: true } };
@@ -100,6 +104,8 @@ export const Empty: Story = { args: { empty: true } };
 export const LongNames: Story = { args: { longNames: true } };
 export const LongList: Story = { args: { longList: true } };
 export const Busy: Story = { args: { locked: true } };
+/** While recording the sidebar's menu still opens, with both items disabled. */
+export const SidebarMenuWhileRecording: Story = { args: { locked: true }, play: SidebarMenu.play };
 export const Loading: Story = { args: { empty: true, loading: true } };
 export const MoveToRecents: Story = {
   play: async ({ canvasElement }) => {
@@ -128,6 +134,23 @@ export const CollapsedSection: Story = {
     const toggle = canvas.getByRole('button', { name: 'Interface' });
     await userEvent.click(toggle);
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  },
+};
+export const MoveToSectionSubmenu: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getAllByRole('button', { name: 'Recording options' })[0]);
+    await userEvent.hover(canvas.getByRole('menuitem', { name: 'Move to section' }));
+    const submenu = await canvas.findByRole('menu', { name: 'Move to section' });
+    await waitFor(() => expect(within(submenu).getByRole('menuitem', { name: 'New section…' })).toBeVisible());
+  },
+};
+export const SectionNewSession: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Keyboard focus in the heading shows its + as hovering does (synthetic hover applies no :hover).
+    canvas.getByRole('button', { name: 'Interface' }).focus();
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'New session in Interface' })).toBeVisible());
   },
 };
 export const ContextMenu: Story = {

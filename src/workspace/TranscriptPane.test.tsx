@@ -95,27 +95,6 @@ describe('TranscriptPane in review', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
     rerender(<TranscriptPane {...props({ transcript: { segments: [] }, error: 'Speech model not found', onRetry, retryDisabled: true })}/>);
     expect(screen.getByRole('button', { name: 'Retry transcription' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: /^Discard take/ })).not.toBeInTheDocument();
-  });
-  it('offers to discard a stuck take beside Retry, inert but focusable while another action runs', async () => {
-    const user = userEvent.setup();
-    const onRetry = vi.fn();
-    const onDiscardTake = vi.fn();
-    const error = 'Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.';
-    const { rerender } = render(<TranscriptPane {...props({ error, onRetry, discardTake: 2, onDiscardTake })}/>);
-    const discard = screen.getByRole('button', { name: 'Discard take 2' });
-    expect(discard).toHaveAttribute('aria-haspopup', 'dialog');
-    expect(discard.parentElement).toBe(screen.getByRole('button', { name: 'Retry transcription' }).parentElement);
-    await user.click(discard);
-    expect(onDiscardTake).toHaveBeenCalledTimes(1);
-    rerender(<TranscriptPane {...props({ error, onRetry, discardTake: 2, onDiscardTake, retryBusy: true })}/>);
-    expect(discard).toHaveAttribute('aria-disabled', 'true');
-    discard.focus();
-    expect(discard).toHaveFocus();
-    await user.click(discard);
-    await user.click(screen.getByRole('button', { name: 'Retry transcription' }));
-    expect(onDiscardTake).toHaveBeenCalledTimes(1);
-    expect(onRetry).not.toHaveBeenCalled();
   });
   it('shows the empty message in the body and a Processing chip while processing', () => {
     render(<TranscriptPane {...props({ transcript: { segments: [] }, status: 'processing', emptyMessage: 'Transcribing…' })}/>);
@@ -164,10 +143,10 @@ describe('TranscriptPane while recording', () => {
     await user.click(screen.getByRole('button', { name: 'Find in transcript' }));
     await user.type(screen.getByRole('searchbox', { name: 'Find in transcript' }), 'grid');
     rerender(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } })}/>);
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('searchbox')).not.toBeInTheDocument());
     expect(document.querySelector('.found, .cr-find-mark')).toBeNull();
     rerender(<TranscriptPane {...props()}/>);
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('searchbox')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Find in transcript' })).toHaveAttribute('aria-expanded', 'false');
   });
   it('treats a first recording as one live take without a divider', () => {
@@ -178,6 +157,21 @@ describe('TranscriptPane while recording', () => {
 });
 
 describe('Find in transcript', () => {
+  it('opens the find bar with Ctrl+F', async () => {
+    const { rerender } = render(<TranscriptPane {...props()}/>);
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    // App turns Ctrl/⌘+F into a new findRequest.
+    rerender(<TranscriptPane {...props()} findRequest={1}/>);
+    const field = screen.getByRole('searchbox', { name: 'Find in transcript' });
+    // It slides open: the first frames start closed.
+    expect(field.closest('.cr-find-reveal')).toHaveAttribute('data-state', 'entering');
+    await waitFor(() => expect(field.closest('.cr-find-reveal')).toHaveAttribute('data-state', 'open'));
+    expect(field).toHaveFocus();
+    // A second request while open takes focus back to the field.
+    screen.getByRole('button', { name: 'Find in transcript' }).focus();
+    rerender(<TranscriptPane {...props()} findRequest={2}/>);
+    expect(field).toHaveFocus();
+  });
   it('finds, steps through matches and closes back to its button', async () => {
     const user = userEvent.setup();
     render(<TranscriptPane {...props()}/>);
@@ -202,7 +196,7 @@ describe('Find in transcript', () => {
     await user.type(field, 'zz');
     expect(screen.getByRole('status')).toHaveTextContent('No matches');
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('searchbox')).not.toBeInTheDocument());
     expect(button).toHaveFocus();
   });
 });

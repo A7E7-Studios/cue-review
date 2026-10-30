@@ -409,7 +409,7 @@ pub(crate) fn transcribe_with(
     let all = takes::list(&session);
     if let Some(take) = all.iter().find(|take| take.status == TakeStatus::Swapping) {
         return Err(format!(
-            "Take {index} has not been added to the recording yet. Open CueReview and choose Retry to finish it, or drop it with cue discard-take {id} {index}.",
+            "Take {index} was saved by an earlier CueReview and still waits to be added to the recording: video.mp4 could not be read, and only it tells whether the take is already in it. Try again once video.mp4 can be read.",
             index = take.index
         ));
     }
@@ -940,7 +940,7 @@ mod tests {
             serde_json::to_value(&transcript).unwrap()
         );
 
-        // A take still waiting to join the video stops it, with a way out.
+        // A take still waiting to be joined stops it, saying why it could not be checked.
         store
             .update_session(&id, |s| {
                 s.takes.push(take(5, 4500, 800, TakeStatus::Swapping, true));
@@ -949,7 +949,8 @@ mod tests {
             .unwrap();
         let error = transcribe_with(&store, &id, &|_, _, _| panic!("transcribed")).unwrap_err();
         assert!(
-            error.contains(&format!("cue discard-take {id} 5")),
+            error.contains("Take 5 was saved by an earlier CueReview")
+                && error.contains("Try again once video.mp4 can be read"),
             "{error}"
         );
     }

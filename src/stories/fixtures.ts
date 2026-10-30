@@ -29,11 +29,14 @@ export const previewImage = 'data:image/svg+xml;charset=utf-8,' + encodeURICompo
 // take 1 runs to 1:20 and take 2 adds 54 seconds.
 export const takeTwoStartMs = 80000;
 export const twoTakeSession: Session = {
-  ...sessions[0], sourceId: 'display', microphoneId: 'microphone', systemAudio: false,
+  ...sessions[0], sourceId: 'monitor:1', microphoneId: 'microphone', systemAudio: false,
+  // A Windows display id, as the session stored it at its first capture.
+  sourceIdentity: { kind: 'display', device: '\\\\.\\DISPLAY1', left: 0, top: 0, right: 1920, bottom: 1080 },
   takes: [
     { index: 1, offsetMs: 0, durationMs: takeTwoStartMs, status: 'ready', folder: '.', microphoneId: 'microphone', systemAudio: false },
-    { index: 2, offsetMs: takeTwoStartMs, durationMs: 54000, status: 'ready', folder: 'takes/2', microphoneId: 'microphone', systemAudio: false },
+    { index: 2, offsetMs: takeTwoStartMs, durationMs: 54000, status: 'ready', folder: 'takes/2', sourceId: 'window:design', microphoneId: 'microphone', systemAudio: false },
   ],
+  // No `videos`: the workshop has one sample video, so the session plays it for its whole timeline, as a joined session does.
 };
 const line = (id: string, startMs: number, endMs: number, text: string) => ({ id, startMs, endMs, text, words: [] });
 export const twoTakeTranscript: Transcript = {
@@ -61,10 +64,8 @@ export const twoTakeTranscript: Transcript = {
     line('t2-segment-2', 97000, 104000, 'And the finished toast could link straight to the file.'),
   ],
 };
-/** The backend's refusal when Record more's source is gone (src-tauri/src/takes.rs, SOURCE_GONE). */
-export const SOURCE_GONE = 'The original window/display for this recording is no longer available. Start a new recording to capture another source.';
-/** A swap that keeps failing: the session error once Retry could not add take 2 (takes.rs, swap_media). */
-export const stuckTakeError = "video.mp4 lasts 81200 ms, which matches neither the recording before take 2 (80000 ms) nor the recording with it (134000 ms). The take's files are kept in takes/2; discard the take to keep using the recording.";
+/** The backend's refusal when a window chosen in the recording bar has closed since it was listed (src-tauri/src/capture.rs). */
+export const WINDOW_CLOSED = 'This window is no longer available';
 // The same session while take 2 records: its live tail, timed on the combined timeline.
 export const takeTwoLiveTranscript: Transcript = {
   status: 'provisional',

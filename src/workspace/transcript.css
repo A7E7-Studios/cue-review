@@ -23,7 +23,11 @@
 .cr-status-chip[data-status='processing'] { background: var(--color-pill); color: var(--color-text-secondary); }
 .cr-status-chip[data-status='processing'] > i { background: var(--color-accent); }
 
-/* Find in transcript */
+/* Find in transcript. The bar slides open and closed over 180ms by easing its row from 0fr to 1fr
+   (instant under reduced motion, where --motion-normal is 0ms); the clip keeps its focus ring. */
+.cr-find-reveal { flex-shrink: 0; display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--motion-normal) var(--ease-out), opacity var(--motion-normal) var(--ease-out); }
+.cr-find-reveal:is([data-state='entering'], [data-state='exiting']) { grid-template-rows: 0fr; opacity: 0; }
+.cr-find-clip { min-height: 0; overflow: hidden; padding-top: 2px; }
 .cr-find {
   flex-shrink: 0; height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 4px;
   margin: 0 10px 8px; padding: 0 4px 0 10px; border-radius: 8px;
@@ -44,7 +48,7 @@
 
 /* Rows */
 .cr-transcript-scroll {
-  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding-block: 12px;
+  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scroll-padding-block: 12px;
   display: flex; flex-direction: column; gap: 1px; padding: 0 10px 14px;
 }
 .cr-row {

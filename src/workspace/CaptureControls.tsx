@@ -105,9 +105,16 @@ export interface CaptureControlsViewProps extends CaptureControlsProps {
   platform?: Platform;
 }
 
-/** Draft controls: source and microphone pickers and Record. Keeps the `.source-trigger` and `.mic-trigger` hooks. */
+/**
+ * The recording bar: one dark capsule shaped like the recording dock, with the source and microphone
+ * pickers and Record (a draft) or Record more (review). Keeps the `.source-trigger` and `.mic-trigger`
+ * hooks. As its slot narrows, workspace.css drops the picker labels to icons, then Record's label;
+ * each label stays as visually hidden text, so every control keeps its name. A refusal of Record more
+ * shows under the bar with New recording and Dismiss.
+ */
 export function CaptureControls(props: CaptureControlsViewProps) {
-  const { sources, source, microphones, microphoneId, microphoneUnavailable, systemAudio, muted, menu, onMenu, locked, busy, recordLabel, recordDisabled, recordBusy = false, onRecord, platform } = props;
+  const { sources, source, microphones, microphoneId, microphoneUnavailable, systemAudio, muted, menu, onMenu, locked, busy, review = false,
+    recordLabel, recordDisabled, recordBusy = false, onRecord, recordMoreError, onNewRecording, onDismissRecordMoreError, platform } = props;
   const sourceTrigger = useRef<HTMLButtonElement>(null);
   const micTrigger = useRef<HTMLButtonElement>(null);
   const sourceRef = useForwardedRef(sourceTrigger, props.sourceTriggerRef);
@@ -159,33 +166,48 @@ export function CaptureControls(props: CaptureControlsViewProps) {
     ...microphones.map(item => ({ id: item.id, label: item.name, selected: microphoneId === item.id, onSelect: () => choose('microphone', () => props.onSelectMicrophone(item.id)) })),
   ];
 
-  return <div className="cr-capture">
-    <div ref={sourceField} className="cr-capture-field" {...fieldHandlers('source')}>
-      <button ref={sourceRef} type="button" className="cr-btn cr-capture-trigger source-trigger" title={source?.name} disabled={locked}
-        aria-expanded={menu === 'source'} aria-controls={menu === 'source' ? `${ids}-source` : undefined} onClick={() => onMenu(menu === 'source' ? null : 'source')}>
-        <Icon name="monitor" strokeWidth={1.7}/><span>{source?.name || 'Choose source'}</span><Icon name="chevron" strokeWidth={2}/>
+  const recordTitle = review ? `${NAMES.recordMore} (${record.label}): continue this session as a new take` : `Start recording (${record.label})`;
+
+  return <div className="cr-capture-slot" role="group" aria-label={NAMES.recordingBar}>
+    <div className="cr-capture">
+      <div ref={sourceField} className="cr-capture-field" {...fieldHandlers('source')}>
+        <button ref={sourceRef} type="button" className="cr-btn cr-capture-trigger source-trigger" title={source?.name} disabled={locked}
+          aria-expanded={menu === 'source'} aria-controls={menu === 'source' ? `${ids}-source` : undefined} onClick={() => onMenu(menu === 'source' ? null : 'source')}>
+          <Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">{source?.name || 'Choose source'}</span><Icon name="chevron" strokeWidth={2}/>
+        </button>
+        {menu === 'source' && <Popover id={`${ids}-source`} anchor={sourceTrigger} title="Capture source" refreshLabel={NAMES.refreshCaptureDevices} onRefresh={props.onRefreshSources}>
+          <OptionList label={NAMES.captureSources} options={sourceOptions}/>
+          {source?.detail && <p className="cr-popover-note">{source.detail}</p>}
+          <label className="cr-popover-check"><input type="checkbox" checked={systemAudio} onChange={event => props.onSystemAudio(event.target.checked)}/>{source && DEVICE_KINDS.has(source.kind) ? NAMES.includeDeviceAudio : NAMES.includeSystemAudio}</label>
+        </Popover>}
+      </div>
+      <div ref={micField} className="cr-capture-field" {...fieldHandlers('microphone')}>
+        <button ref={micRef} type="button" className="cr-btn cr-capture-trigger mic-trigger" disabled={busy}
+          title={microphoneUnavailable ? 'Selected microphone unavailable. Reconnect it or choose another input.' : undefined}
+          aria-expanded={menu === 'microphone'} aria-controls={menu === 'microphone' ? `${ids}-microphone` : undefined} onClick={() => onMenu(menu === 'microphone' ? null : 'microphone')}>
+          <Icon name={microphone && !muted ? 'mic' : 'micOff'} strokeWidth={1.7}/><span className="cr-capture-label">{micLabel}</span><Icon name="chevron" strokeWidth={2}/>
+        </button>
+        {menu === 'microphone' && <Popover id={`${ids}-microphone`} anchor={micTrigger} title="Microphone" refreshLabel={NAMES.refreshMicrophones} onRefresh={props.onRefreshMicrophones}>
+          <OptionList label={NAMES.microphoneOptions} options={micOptions}/>
+          {microphoneUnavailable && <p className="cr-popover-note">Reconnect the selected microphone and refresh microphones, choose another input, or select No microphone.</p>}
+          <label className="cr-popover-check"><input type="checkbox" checked={muted} onChange={event => props.onMuted(event.target.checked)}/>{NAMES.muteMicrophone}</label>
+        </Popover>}
+      </div>
+      <button type="button" className="cr-btn cr-record" title={recordTitle} aria-keyshortcuts={record.aria} disabled={recordDisabled} aria-disabled={recordBusy || undefined}
+        aria-describedby={recordMoreError ? `${ids}-error` : undefined} onClick={recordBusy ? undefined : onRecord}>
+        <span className="cr-record-dot" aria-hidden="true"/><span className="cr-capture-label">{recordLabel}</span>
       </button>
-      {menu === 'source' && <Popover id={`${ids}-source`} anchor={sourceTrigger} title="Capture source" refreshLabel={NAMES.refreshCaptureDevices} onRefresh={props.onRefreshSources}>
-        <OptionList label={NAMES.captureSources} options={sourceOptions}/>
-        {source?.detail && <p className="cr-popover-note">{source.detail}</p>}
-        <label className="cr-popover-check"><input type="checkbox" checked={systemAudio} onChange={event => props.onSystemAudio(event.target.checked)}/>{source && DEVICE_KINDS.has(source.kind) ? NAMES.includeDeviceAudio : NAMES.includeSystemAudio}</label>
-      </Popover>}
     </div>
-    <div ref={micField} className="cr-capture-field" {...fieldHandlers('microphone')}>
-      <button ref={micRef} type="button" className="cr-btn cr-capture-trigger mic-trigger" disabled={busy}
-        title={microphoneUnavailable ? 'Selected microphone unavailable. Reconnect it or choose another input.' : undefined}
-        aria-expanded={menu === 'microphone'} aria-controls={menu === 'microphone' ? `${ids}-microphone` : undefined} onClick={() => onMenu(menu === 'microphone' ? null : 'microphone')}>
-        <Icon name={microphone && !muted ? 'mic' : 'micOff'} strokeWidth={1.7}/><span>{micLabel}</span><Icon name="chevron" strokeWidth={2}/>
-      </button>
-      {menu === 'microphone' && <Popover id={`${ids}-microphone`} anchor={micTrigger} title="Microphone" refreshLabel={NAMES.refreshMicrophones} onRefresh={props.onRefreshMicrophones}>
-        <OptionList label={NAMES.microphoneOptions} options={micOptions}/>
-        {microphoneUnavailable && <p className="cr-popover-note">Reconnect the selected microphone and refresh microphones, choose another input, or select No microphone.</p>}
-        <label className="cr-popover-check"><input type="checkbox" checked={muted} onChange={event => props.onMuted(event.target.checked)}/>{NAMES.muteMicrophone}</label>
-      </Popover>}
-    </div>
-    <span className="cr-spacer"/>
-    <button type="button" className="cr-btn cr-dark-pill cr-record" title={`Start recording (${record.label})`} aria-keyshortcuts={record.aria} disabled={recordDisabled} aria-disabled={recordBusy || undefined} onClick={recordBusy ? undefined : onRecord}>
-      <span className="cr-record-dot" aria-hidden="true"/>{recordLabel}
-    </button>
+    {/* Under the bar it belongs to, so the reason and the way forward read together. */}
+    {recordMoreError && <div className="cr-record-more-error" role="alert">
+      <Icon name="warning" strokeWidth={1.8}/>
+      <p id={`${ids}-error`}>{recordMoreError}</p>
+      {onNewRecording && <button type="button" className="cr-btn cr-pill" aria-disabled={recordBusy || undefined} onClick={recordBusy ? undefined : onNewRecording}>
+        <Icon name="plus" strokeWidth={1.9}/>{NAMES.newRecording}
+      </button>}
+      {onDismissRecordMoreError && <button type="button" className="cr-btn cr-round-button cr-ghost cr-record-more-dismiss" aria-label={NAMES.dismissError} title={NAMES.dismissError} onClick={onDismissRecordMoreError}>
+        <Icon name="close" strokeWidth={1.8}/>
+      </button>}
+    </div>}
   </div>;
 }

@@ -3,7 +3,7 @@ import type { FocusEvent, KeyboardEvent, ReactNode } from 'react';
 import type { Segment } from '../backend';
 import { Icon } from '../icons';
 import { activeSegment, activeWord, findMatches, formatTime, playheadSegment, segmentSeekMs, transcriptItems, wordSeekMs } from '../review';
-import { prefersReducedMotion } from '../ui/usePresence';
+import { prefersReducedMotion, usePresence } from '../ui/usePresence';
 import { NAMES } from './types';
 import type { TranscriptPaneProps } from './types';
 import './workspace.css';
@@ -110,7 +110,7 @@ function visibleIn(element: Element, box: Element) {
 }
 
 /** The transcript column (decisions 4, 10 and 12). */
-export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false, discardTake, onDiscardTake }: TranscriptPaneProps) {
+export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false, findRequest = 0 }: TranscriptPaneProps) {
   const recording = mode === 'recording';
   const segments = transcript.segments;
   const liveIndex = recording ? liveTake?.index ?? 1 : undefined;
@@ -221,6 +221,18 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
   const matchRow = matchIndex >= 0 ? matches[matchIndex] : -1;
   const matchSet = useMemo(() => new Set(matches), [matches]);
   useEffect(() => { if (finding) findInput.current?.focus(); }, [finding]);
+  // Ctrl/⌘+F opens Find, or takes focus back to its field when it is open.
+  const lastFindRequest = useRef(findRequest);
+  useEffect(() => {
+    if (findRequest === lastFindRequest.current) return;
+    lastFindRequest.current = findRequest;
+    if (recording) return;
+    if (findOpen) { findInput.current?.focus(); findInput.current?.select(); } else setFinding(true);
+  }, [findRequest, findOpen, recording]);
+  // The bar slides open and closed (search spec); it stays mounted while it closes.
+  const findPresence = usePresence(finding, 180);
+  const lastQuery = useRef(query);
+  if (finding) lastQuery.current = query;
   useEffect(() => {
     if (matchRow < 0) return;
     setFollowing(false);
@@ -244,14 +256,14 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
         <Icon name="search" strokeWidth={1.8}/>
       </button>}
     </div>
-    {finding && <div className="cr-find" id={findId}>
+    {findPresence.present && <div className="cr-find-reveal" data-state={finding ? findPresence.phase : 'exiting'} inert={!finding || undefined}><div className="cr-find-clip"><div className="cr-find" id={findId}>
       <Icon name="search" strokeWidth={1.9}/>
-      <input ref={findInput} type="search" aria-label={NAMES.findInTranscript} placeholder="Find in transcript" value={query} onKeyDown={findKeyDown}
+      <input ref={findInput} type="search" aria-label={NAMES.findInTranscript} placeholder="Find in transcript" value={finding ? query : lastQuery.current} onKeyDown={findKeyDown}
         onChange={event => { setQuery(event.target.value); setCursor(0); }}/>
       <span className="cr-find-count" role="status">{needle ? matches.length ? `${matchIndex + 1} of ${matches.length}` : NAMES.noMatches : ''}</span>
       <button type="button" className="cr-btn cr-find-step" aria-label="Previous match" disabled={!matches.length} onClick={() => step(-1)}><Icon name="chevron" strokeWidth={2} style={{ transform: 'rotate(-90deg)' }}/></button>
       <button type="button" className="cr-btn cr-find-step" aria-label="Next match" disabled={!matches.length} onClick={() => step(1)}><Icon name="chevron" strokeWidth={2} style={{ transform: 'rotate(90deg)' }}/></button>
-    </div>}
+    </div></div></div>}
     <div ref={scroller} className="cr-transcript-scroll" onScroll={scrolled} onWheel={reading} onTouchMove={reading} onKeyDown={keyDown} onFocus={focused} onBlur={blurred}>
       {items.length ? items.map(item => item.kind === 'divider'
         ? <Divider key={`take-${item.take}`} take={item.take} startMs={item.startMs} live={item.live}/>
@@ -266,9 +278,8 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
       {liveError && <p className="cr-transcript-note" role="status"><Icon name="warning" strokeWidth={1.8}/>{liveError}</p>}
       {error && <div className="cr-transcript-error">
         <p><Icon name="warning" strokeWidth={1.8}/>{error}</p>
-        {(onRetry || (discardTake && onDiscardTake)) && <div className="cr-transcript-error-actions">
-          {onRetry && <button type="button" className="cr-btn cr-pill" disabled={retryDisabled} aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onRetry}><Icon name="refresh" strokeWidth={1.8}/>{NAMES.retryTranscription}</button>}
-          {discardTake && onDiscardTake && <button type="button" className="cr-btn cr-pill" aria-haspopup="dialog" aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onDiscardTake}><Icon name="close" strokeWidth={1.8}/>{NAMES.discardTake(discardTake)}</button>}
+        {onRetry && <div className="cr-transcript-error-actions">
+          <button type="button" className="cr-btn cr-pill" disabled={retryDisabled} aria-disabled={retryBusy || undefined} onClick={retryBusy ? undefined : onRetry}><Icon name="refresh" strokeWidth={1.8}/>{NAMES.retryTranscription}</button>
         </div>}
       </div>}
       <div className="cr-transcript-end" data-follow-end aria-hidden="true"/>

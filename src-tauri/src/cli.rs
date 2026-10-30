@@ -202,11 +202,11 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "info",
         usage: "SESSION_ID",
-        about: "Print one session as JSON: name, status, durationMs, takes and folder paths.",
+        about: "Print one session as JSON: name, status, durationMs, takes, videos and folder paths.",
         positionals: &["SESSION_ID"],
         required: 1,
         options: &[],
-        notes: "",
+        notes: "videos lists each take video as {take,startMs,durationMs} on the session timeline (formatVersion 2); without it, video.mp4 plays the whole timeline. Take 1's video is video.mp4 in the session folder, take N's is takes/N/video.mp4.",
     },
     Spec {
         name: "transcript",
@@ -253,7 +253,7 @@ const SPECS: &[Spec] = &[
                 "Write the PNG here instead of the session's exports folder; fails if PATH exists",
             ),
         ],
-        notes: "For several frames in one call, use cue frames.",
+        notes: "MS is session time: the frame comes from the take video it falls in, at that video's size. For several frames in one call, use cue frames.",
     },
     Spec {
         name: "frames",
@@ -272,7 +272,7 @@ const SPECS: &[Spec] = &[
                 "Write into DIR (created if missing) instead of the session's exports folder",
             ),
         ],
-        notes: "Every frame is written to a new file; existing files are never overwritten.",
+        notes: "Each frame comes from the take video its time falls in. Every frame is written to a new file; existing files are never overwritten.",
     },
     Spec {
         name: "clip",
@@ -289,7 +289,7 @@ const SPECS: &[Spec] = &[
                 "Write the MP4 here instead of the session's exports folder; fails if PATH exists",
             ),
         ],
-        notes: "",
+        notes: "A clip comes from one take video: a range that crosses into the next take's video is refused, naming where that video starts; export one clip on each side.",
     },
     Spec {
         name: "rename",
@@ -325,11 +325,11 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "discard-take",
         usage: "SESSION_ID INDEX",
-        about: "Drop take INDEX when it cannot be added to the recording, so the session can be recorded more and transcribed again. Prints the session JSON. Takes the recording lock.",
+        about: "Kept for scripts: takes keep their own videos now, so no take waits to be added and every take is refused. Takes the recording lock.",
         positionals: &["SESSION_ID", "INDEX"],
         required: 2,
         options: &[],
-        notes: "Only a take still waiting to be added (status swapping) can be dropped; take 1 never can. The take becomes interrupted and keeps its files in takes/INDEX.",
+        notes: "A take of an older session that still waited to be added is upgraded when CueReview starts, or by cue transcribe: it plays from its own video, or inside video.mp4 when it was already added. While video.mp4 cannot be read it keeps waiting.",
     },
     Spec {
         name: "setup",
@@ -1077,6 +1077,17 @@ mod tests {
         assert!(refused.unwrap_err().contains("already using"));
     }
 
+    #[test]
+    fn frame_help_names_the_take_video() {
+        let frame = help_text("frame --help");
+        assert!(
+            frame.contains("the frame comes from the take video it falls in"),
+            "{frame}"
+        );
+        assert!(help_text("frames --help").contains("the take video its time falls in"));
+        assert!(help_text("clip --help").contains("crosses into the next take's video is refused"));
+        assert!(help_text("info --help").contains("takes/N/video.mp4"));
+    }
     #[test]
     fn discard_take_names_a_later_take() {
         assert_eq!(

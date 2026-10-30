@@ -1309,13 +1309,60 @@ pub fn preview(source_id: &str) -> Result<String, String> {
 }
 
 type Wav = hound::WavWriter<BufWriter<File>>;
+/// A pause between two packets longer than this is a real gap (a device glitch, or system audio
+/// while nothing plays) and becomes silence; anything shorter is clock jitter or drift.
+const AUDIO_GAP: f64 = 0.05;
+/// A clock further than this from the wall clock means broken timestamps, not drift.
+const AUDIO_MAX_DRIFT: f64 = 0.05;
+/// Half the taps of the resampler's windowed-sinc filter.
+const SINC_HALF: usize = 16;
+/// Fractional positions per sample in the resampler's filter table.
+const SINC_PHASES: usize = 1024;
+
+/// Packets delivered without a real gap between them.
+#[derive(Clone, Copy, Debug)]
+struct AudioRun {
+    /// Index in the file of the run's first sample.
+    from: u64,
+    /// Samples the device delivered in the run.
+    len: u64,
+    /// Take seconds, by the timestamps, at which the run starts and ends.
+    start: f64,
+    end: f64,
+}
+
+/// Writes one track. Samples go to the file back to back as the device delivers them: the
+/// packets' capture timestamps only place each run of packets in the take, find real gaps and
+/// measure the device's clock against the wall clock, which `finish` corrects in one resample.
+/// Placing each packet by its timestamp would leave a short hole wherever the device runs slow,
+/// heard as crackle.
 struct AudioWriter {
     wav: Option<Wav>,
-    frames: u64,
+    path: PathBuf,
     rate: u32,
-    anchor: Option<(cpal::StreamInstant, f64)>,
+    /// Samples written, silence included.
+    frames: u64,
+    /// The first packet's capture time.
+    origin: Option<cpal::StreamInstant>,
+    /// Take seconds minus capture seconds since `origin`.
+    offset: f64,
+    /// The previous packet's capture seconds since `origin`, and its samples.
+    last: Option<(f64, u64)>,
+    runs: Vec<AudioRun>,
 }
 impl AudioWriter {
+    fn new(wav: Wav, path: &Path, rate: u32) -> Self {
+        Self {
+            wav: Some(wav),
+            path: path.to_owned(),
+            rate,
+            frames: 0,
+            origin: None,
+            offset: 0.0,
+            last: None,
+            runs: Vec::new(),
+        }
+    }
     fn pad(&mut self, target: u64) -> Result<(), hound::Error> {
         if let Some(wav) = self.wav.as_mut() {
             for _ in self.frames..target {
@@ -1333,28 +1380,54 @@ impl AudioWriter {
         epoch: Instant,
         muted: bool,
     ) -> Result<f32, hound::Error> {
-        let frames = samples.len() / channels;
-        let elapsed = epoch.elapsed().as_secs_f64();
+        let origin = *self.origin.get_or_insert(timestamp.capture);
+        let at = timestamp
+            .capture
+            .duration_since(&origin)
+            .unwrap_or_default()
+            .as_secs_f64();
         let latency = timestamp
             .callback
             .duration_since(&timestamp.capture)
             .unwrap_or_default()
             .as_secs_f64();
-        let anchor = *self
-            .anchor
-            .get_or_insert((timestamp.capture, (elapsed - latency).max(0.0)));
-        let target = anchor.1
-            + timestamp
-                .capture
-                .duration_since(&anchor.0)
-                .unwrap_or_default()
-                .as_secs_f64();
-        let target = (target * self.rate as f64).round() as u64;
-        let skip = self.frames.saturating_sub(target).min(frames as u64) as usize;
-        self.pad(target)?;
+        let start = (epoch.elapsed().as_secs_f64() - latency).max(0.0);
+        self.packet(samples, channels, at, start, muted)
+    }
+    /// Writes one packet captured `at` seconds after the first; `start` is the first packet's
+    /// time in the take. Returns the packet's RMS level.
+    fn packet(
+        &mut self,
+        samples: &[f32],
+        channels: usize,
+        at: f64,
+        start: f64,
+        muted: bool,
+    ) -> Result<f32, hound::Error> {
+        let rate = self.rate as f64;
+        let frames = samples.len() / channels;
+        let gap = match self.last {
+            None => {
+                self.offset = start - at;
+                true
+            }
+            Some((previous, length)) => at - previous - length as f64 / rate > AUDIO_GAP,
+        };
+        let begins = at + self.offset;
+        if gap {
+            // Silence up to the run's place by the wall clock, so live snapshots read the track
+            // roughly in place; `finish` places every run exactly.
+            self.pad((begins * rate).round().max(0.0) as u64)?;
+            self.runs.push(AudioRun {
+                from: self.frames,
+                len: 0,
+                start: begins,
+                end: begins,
+            });
+        }
         let mut square = 0.0;
         if let Some(wav) = self.wav.as_mut() {
-            for frame in samples.chunks_exact(channels).skip(skip) {
+            for frame in samples.chunks_exact(channels) {
                 let sample = if muted {
                     0.0
                 } else {
@@ -1364,17 +1437,188 @@ impl AudioWriter {
                 square += sample * sample;
             }
         }
-        self.frames += (frames - skip) as u64;
+        self.frames += frames as u64;
+        self.last = Some((at, frames as u64));
+        if let Some(run) = self.runs.last_mut() {
+            run.len += frames as u64;
+            run.end = begins + frames as f64 / rate;
+        }
         Ok((square / frames.max(1) as f32).sqrt().min(1.0))
     }
+    /// Wall-clock samples per delivered sample over the runs, by their timestamps. `None` with
+    /// less than a second of audio, and for timestamps no real clock could produce.
+    fn ratio(&self) -> Option<f64> {
+        let delivered: u64 = self.runs.iter().map(|run| run.len).sum();
+        if delivered < self.rate as u64 {
+            return None;
+        }
+        let span: f64 = self.runs.iter().map(|run| run.end - run.start).sum();
+        let ratio = span * self.rate as f64 / delivered as f64;
+        ((ratio - 1.0).abs() <= AUDIO_MAX_DRIFT).then_some(ratio)
+    }
+    /// Ends the track exactly `duration` long: each run resampled by the device's measured clock
+    /// error and placed at its start by the wall clock, silence between the runs and after the
+    /// last one.
     fn finish(&mut self, duration: Duration) -> Result<(), String> {
-        self.pad((duration.as_secs_f64() * self.rate as f64).round() as u64)
-            .map_err(|e| e.to_string())?;
-        if let Some(wav) = self.wav.take() {
-            wav.finalize().map_err(|e| e.to_string())?;
+        let rate = self.rate as f64;
+        let total = (duration.as_secs_f64() * rate).round() as u64;
+        let ratio = self.ratio();
+        if ratio.is_none() && self.runs.len() <= 1 && self.frames <= total {
+            self.pad(total).map_err(|e| e.to_string())?;
+            if let Some(wav) = self.wav.take() {
+                wav.finalize().map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
+        let ratio = ratio.unwrap_or(1.0);
+        let Some(wav) = self.wav.take() else {
+            return Ok(());
+        };
+        let spec = wav.spec();
+        wav.finalize().map_err(|e| e.to_string())?;
+        let part = self.path.with_extension("wav.part");
+        // A failed rewrite (a full disk, say) leaves the track as recorded and no part file.
+        if let Err(e) = self
+            .rewrite(&part, spec, total, ratio)
+            .and_then(|()| fs::rename(&part, &self.path).map_err(|e| e.to_string()))
+        {
+            let _ = fs::remove_file(&part);
+            return Err(e);
+        }
+        self.frames = total;
+        Ok(())
+    }
+    /// Writes the finished track to `part`: each run resampled by `ratio` and placed at its start,
+    /// silence around them, `total` samples in all.
+    fn rewrite(
+        &self,
+        part: &Path,
+        spec: hound::WavSpec,
+        total: u64,
+        ratio: f64,
+    ) -> Result<(), String> {
+        let rate = self.rate as f64;
+        let table = sinc_table(ratio.min(1.0));
+        {
+            let mut reader = hound::WavReader::open(&self.path).map_err(|e| e.to_string())?;
+            let mut input = reader
+                .samples::<f32>()
+                .map(|sample| sample.map_err(|e| e.to_string()));
+            let mut output = hound::WavWriter::create(part, spec).map_err(|e| e.to_string())?;
+            let mut write = |sample: f32| output.write_sample(sample).map_err(|e| e.to_string());
+            let places: Vec<u64> = self
+                .runs
+                .iter()
+                .map(|run| ((run.start * rate).round().max(0.0) as u64).min(total))
+                .collect();
+            let (mut written, mut read) = (0u64, 0u64);
+            for (index, run) in self.runs.iter().enumerate() {
+                let place = places[index].max(written);
+                while written < place {
+                    write(0.0)?;
+                    written += 1;
+                }
+                while read < run.from {
+                    input.next().transpose()?;
+                    read += 1;
+                }
+                let until = places.get(index + 1).copied().unwrap_or(total).max(written);
+                let count = ((run.len as f64 * ratio).round() as u64).min(until - written);
+                let mut samples = (&mut input).take(run.len as usize);
+                resample(&mut samples, run.len, ratio, &table, count, &mut write)?;
+                for sample in samples {
+                    sample?;
+                }
+                read += run.len;
+                written += count;
+            }
+            while written < total {
+                write(0.0)?;
+                written += 1;
+            }
+            output.finalize().map_err(|e| e.to_string())?;
         }
         Ok(())
     }
+}
+
+/// The windowed-sinc filter table: for each fractional position, the weights of the
+/// `2 * SINC_HALF` nearest input samples, low-passed at `cutoff` of the input's Nyquist frequency,
+/// Blackman-windowed and each row normalised to unit gain.
+fn sinc_table(cutoff: f64) -> Vec<f32> {
+    use std::f64::consts::PI;
+    let taps = 2 * SINC_HALF;
+    let mut table = vec![0f32; (SINC_PHASES + 1) * taps];
+    for (phase, row) in table.chunks_exact_mut(taps).enumerate() {
+        let fraction = phase as f64 / SINC_PHASES as f64;
+        let weights: Vec<f64> = (0..taps)
+            .map(|tap| {
+                let t = fraction + (SINC_HALF - 1) as f64 - tap as f64;
+                let sinc = if t == 0.0 {
+                    cutoff
+                } else {
+                    (PI * cutoff * t).sin() / (PI * t)
+                };
+                let u = PI * t / SINC_HALF as f64;
+                sinc * (0.42 + 0.5 * u.cos() + 0.08 * (2.0 * u).cos())
+            })
+            .collect();
+        let sum: f64 = weights.iter().sum();
+        for (slot, weight) in row.iter_mut().zip(weights) {
+            *slot = (weight / sum) as f32;
+        }
+    }
+    table
+}
+
+/// Writes `count` samples of `input` (`len` samples long) resampled by `ratio` output samples
+/// per input sample through `table` (`sinc_table(ratio.min(1.0))`), holding only the filter's
+/// window of input in memory.
+fn resample(
+    input: &mut impl Iterator<Item = Result<f32, String>>,
+    len: u64,
+    ratio: f64,
+    table: &[f32],
+    count: u64,
+    write: &mut impl FnMut(f32) -> Result<(), String>,
+) -> Result<(), String> {
+    let taps = 2 * SINC_HALF;
+    let mut window = std::collections::VecDeque::with_capacity(taps + 1);
+    let (mut base, mut read) = (0i64, 0u64);
+    for index in 0..count {
+        let position = index as f64 / ratio;
+        let whole = position.floor();
+        let phase = ((position - whole) * SINC_PHASES as f64).round() as usize;
+        let first = whole as i64 - SINC_HALF as i64 + 1;
+        while base + (window.len() as i64) < first + taps as i64 && read < len {
+            window.push_back(input.next().transpose()?.unwrap_or(0.0));
+            read += 1;
+        }
+        while base < first && !window.is_empty() {
+            window.pop_front();
+            base += 1;
+        }
+        let row = &table[phase * taps..(phase + 1) * taps];
+        let mut sample = 0.0f32;
+        for (tap, weight) in row.iter().enumerate() {
+            let at = first + tap as i64;
+            if at >= base && ((at - base) as usize) < window.len() {
+                sample += window[(at - base) as usize] * weight;
+            }
+        }
+        write(sample)?;
+    }
+    Ok(())
+}
+
+/// Keeps the loudest packet level until the status reads it, so a word between two reads still
+/// shows. A non-negative `f32`'s bits order as the number does.
+fn hold_level(level: &AtomicU32, rms: f32) {
+    level.fetch_max(rms.max(0.0).to_bits(), Ordering::Relaxed);
+}
+/// The loudest level since the last read, and a fresh start for the next.
+fn take_level(level: &AtomicU32) -> f32 {
+    f32::from_bits(level.swap(0, Ordering::Relaxed))
 }
 
 struct AudioTrack {
@@ -1459,12 +1703,11 @@ fn audio_track(
         },
     )
     .map_err(|e| e.to_string())?;
-    let writer = Arc::new(Mutex::new(AudioWriter {
-        wav: Some(wav),
-        frames: 0,
-        rate: config.sample_rate.0,
-        anchor: None,
-    }));
+    let writer = Arc::new(Mutex::new(AudioWriter::new(
+        wav,
+        path,
+        config.sample_rate.0,
+    )));
     let writer2 = writer.clone();
     let error2 = error.clone();
     let input = move |data: &[f32], info: &cpal::InputCallbackInfo| {
@@ -1476,7 +1719,7 @@ fn audio_track(
                 epoch,
                 !loopback && muted.load(Ordering::Relaxed),
             ) {
-                Ok(rms) => level.store(rms.to_bits(), Ordering::Relaxed),
+                Ok(rms) => hold_level(&level, rms),
                 Err(e) => fail(&error, format!("Audio write failed: {e}")),
             }
         }
@@ -1885,8 +2128,10 @@ impl ActiveCapture {
             .unwrap_or_else(|| self.epoch.elapsed())
             .as_millis() as u64
     }
-    pub fn audio_level(&self) -> f32 {
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+    /// The loudest microphone level since the last call, which starts the next hold: the status
+    /// poll is its only caller.
+    pub fn take_audio_level(&self) -> f32 {
+        take_level(&self.level)
     }
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
@@ -3820,41 +4065,247 @@ mod tests {
         assert!(!devices[0].available);
         assert!(devices[0].name.contains("waiting for device"));
     }
-    #[test]
-    fn audio_gaps_and_tail_are_silent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.wav");
-        let wav = hound::WavWriter::create(
-            &path,
-            hound::WavSpec {
+    /// A synthetic audio device for `AudioWriter`: 10 ms packets from `start` to `until` take
+    /// seconds, its clock running `speed` times the wall clock, its timestamps jittering by up to
+    /// `jitter` seconds, delivering nothing in `gaps` and muted in `muted`. It plays a quiet tone
+    /// with a loud 1 kHz burst 10 ms long at `marker`.
+    struct Device {
+        start: f64,
+        until: f64,
+        speed: f64,
+        jitter: f64,
+        gaps: Vec<(f64, f64)>,
+        muted: Option<(f64, f64)>,
+        marker: f64,
+    }
+    const TRACK_RATE: u32 = 8000;
+    impl Device {
+        fn steady(until: f64) -> Self {
+            Self {
+                start: 0.0,
+                until,
+                speed: 1.0,
+                jitter: 0.0,
+                gaps: Vec::new(),
+                muted: None,
+                marker: f64::MAX,
+            }
+        }
+        fn signal(&self, t: f64) -> f32 {
+            use std::f64::consts::TAU;
+            if (self.marker..self.marker + 0.01).contains(&t) {
+                (TAU * 1000.0 * t).sin() as f32
+            } else {
+                (0.2 * (TAU * 220.0 * t + 0.3).sin()) as f32
+            }
+        }
+        /// Records a take of `duration` seconds and returns its finished track.
+        fn record(&self, duration: f64) -> Vec<f32> {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mic.wav");
+            let spec = hound::WavSpec {
                 channels: 1,
-                sample_rate: 1000,
+                sample_rate: TRACK_RATE,
                 bits_per_sample: 32,
                 sample_format: hound::SampleFormat::Float,
+            };
+            let mut writer = AudioWriter::new(
+                hound::WavWriter::create(&path, spec).unwrap(),
+                &path,
+                TRACK_RATE,
+            );
+            let rate = TRACK_RATE as f64 * self.speed;
+            let (mut sample, mut seed) = (0u64, 7u64);
+            loop {
+                let t = self.start + sample as f64 / rate;
+                if t >= self.until {
+                    break;
+                }
+                let packet: Vec<f32> = (0..80)
+                    .map(|i| self.signal(self.start + (sample + i) as f64 / rate))
+                    .collect();
+                sample += 80;
+                if self.gaps.iter().any(|(from, to)| (*from..*to).contains(&t)) {
+                    continue;
+                }
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let jitter = ((seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 2.0 * self.jitter;
+                let muted = self.muted.is_some_and(|(from, to)| (from..to).contains(&t));
+                writer
+                    .packet(&packet, 1, t - self.start + jitter, self.start, muted)
+                    .unwrap();
+            }
+            writer.finish(Duration::from_secs_f64(duration)).unwrap();
+            hound::WavReader::open(&path)
+                .unwrap()
+                .samples()
+                .map(Result::unwrap)
+                .collect()
+        }
+    }
+    /// The take second at which the burst starts in `track`, searching from `after`.
+    fn burst(track: &[f32], after: f64) -> f64 {
+        let from = (after * TRACK_RATE as f64) as usize;
+        let at = from + track[from..].iter().position(|s| s.abs() > 0.6).unwrap();
+        at as f64 / TRACK_RATE as f64
+    }
+    fn seconds(track: &[f32], from: f64, to: f64) -> &[f32] {
+        &track[(from * TRACK_RATE as f64) as usize..(to * TRACK_RATE as f64) as usize]
+    }
+    #[test]
+    fn drifting_jittering_audio_has_no_holes() {
+        for speed in [0.99, 0.9933, 1.01] {
+            let device = Device {
+                start: 0.25,
+                speed,
+                jitter: 0.002,
+                ..Device::steady(16.0)
+            };
+            let track = device.record(16.0);
+            assert_eq!(track.len(), 16 * TRACK_RATE as usize, "speed {speed}");
+            // Placing packets by their timestamps left a zero wherever the device ran slow.
+            let holes = seconds(&track, 0.26, 15.99)
+                .iter()
+                .filter(|s| **s == 0.0)
+                .count();
+            assert_eq!(holes, 0, "speed {speed}");
+            assert!(seconds(&track, 0.0, 0.24).iter().all(|s| *s == 0.0));
+        }
+    }
+    #[test]
+    fn drifting_audio_is_resampled_to_the_take_length() {
+        // A slow device had holes and a fast one had samples dropped: both keep every sample.
+        for speed in [0.99, 1.01] {
+            let device = Device {
+                start: 0.1,
+                speed,
+                jitter: 0.002,
+                marker: 15.0,
+                ..Device::steady(20.0)
+            };
+            let track = device.record(20.0);
+            assert_eq!(track.len(), 20 * TRACK_RATE as usize, "speed {speed}");
+            let at = burst(&track, 14.5);
+            assert!((at - 15.0).abs() < 0.005, "speed {speed}: burst at {at}");
+        }
+    }
+    #[test]
+    fn a_gap_over_50_ms_stays_silence() {
+        let device = Device {
+            speed: 0.995,
+            gaps: vec![(5.0, 7.0)],
+            marker: 8.0,
+            ..Device::steady(10.0)
+        };
+        let track = device.record(10.0);
+        assert_eq!(track.len(), 10 * TRACK_RATE as usize);
+        assert!(seconds(&track, 5.01, 6.99).iter().all(|s| s.abs() < 1e-3));
+        let at = burst(&track, 7.5);
+        assert!((at - 8.0).abs() < 0.005, "burst at {at}");
+    }
+    #[test]
+    fn a_gap_in_the_first_second_keeps_a_drifting_track_in_place() {
+        let device = Device {
+            speed: 0.99,
+            jitter: 0.002,
+            gaps: vec![(0.5, 2.5)],
+            marker: 10.0,
+            ..Device::steady(12.0)
+        };
+        let track = device.record(12.0);
+        assert_eq!(track.len(), 12 * TRACK_RATE as usize);
+        assert!(seconds(&track, 0.51, 2.49).iter().all(|s| s.abs() < 1e-3));
+        let at = burst(&track, 9.5);
+        assert!((at - 10.0).abs() < 0.005, "burst at {at}");
+    }
+    #[test]
+    fn a_long_gap_after_a_short_run_keeps_what_follows_in_place() {
+        let device = Device {
+            jitter: 0.002,
+            gaps: vec![(1.2, 61.2)],
+            marker: 62.0,
+            ..Device::steady(64.0)
+        };
+        let track = device.record(64.0);
+        assert_eq!(track.len(), 64 * TRACK_RATE as usize);
+        assert!(seconds(&track, 1.21, 61.19).iter().all(|s| s.abs() < 1e-3));
+        let at = burst(&track, 61.5);
+        assert!((at - 62.0).abs() < 0.005, "burst at {at}");
+    }
+    /// Resamples `input` by `ratio` into `count` samples.
+    fn resampled(input: &[f32], ratio: f64, count: u64) -> Vec<f32> {
+        let mut output = Vec::new();
+        resample(
+            &mut input.iter().map(|s| Ok(*s)),
+            input.len() as u64,
+            ratio,
+            &sinc_table(ratio.min(1.0)),
+            count,
+            &mut |s| {
+                output.push(s);
+                Ok(())
             },
         )
         .unwrap();
-        let mut writer = AudioWriter {
-            wav: Some(wav),
-            frames: 0,
-            rate: 1000,
-            anchor: None,
-        };
-        writer.pad(25).unwrap();
-        writer.wav.as_mut().unwrap().write_sample(0.5f32).unwrap();
-        writer.frames += 1;
-        writer.finish(Duration::from_millis(50)).unwrap();
-        let samples: Vec<f32> = hound::WavReader::open(path)
-            .unwrap()
-            .samples()
-            .map(Result::unwrap)
+        output
+    }
+    #[test]
+    fn resampling_by_one_returns_the_input() {
+        let input: Vec<f32> = (0..1000)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0)
             .collect();
-        assert_eq!(samples.len(), 50);
-        assert_eq!(samples[25], 0.5);
-        assert!(samples[..25]
-            .iter()
-            .chain(samples[26..].iter())
-            .all(|s| *s == 0.0));
+        let output = resampled(&input, 1.0, 1000);
+        assert!(input.iter().zip(&output).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+    #[test]
+    fn resampling_a_sine_keeps_its_amplitude_and_scales_its_frequency() {
+        use std::f64::consts::TAU;
+        let input: Vec<f32> = (0..4000)
+            .map(|i| (TAU * 0.05 * i as f64).sin() as f32)
+            .collect();
+        for ratio in [0.98, 1.0067, 1.02] {
+            let count = (4000.0 * ratio) as u64;
+            let output = resampled(&input, ratio, count);
+            assert_eq!(output.len() as u64, count);
+            for (j, sample) in output.iter().enumerate().take(count as usize - 40).skip(40) {
+                let expected = (TAU * 0.05 * j as f64 / ratio).sin() as f32;
+                assert!(
+                    (sample - expected).abs() < 2e-3,
+                    "ratio {ratio}, sample {j}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn muted_audio_is_silent_and_keeps_its_length() {
+        let device = Device {
+            muted: Some((2.0, 3.0)),
+            ..Device::steady(4.0)
+        };
+        let track = device.record(4.0);
+        assert_eq!(track.len(), 4 * TRACK_RATE as usize);
+        assert!(seconds(&track, 2.01, 2.99).iter().all(|s| *s == 0.0));
+        assert!(seconds(&track, 0.5, 1.5).iter().all(|s| *s != 0.0));
+        assert!(seconds(&track, 3.01, 3.99).iter().all(|s| *s != 0.0));
+    }
+    #[test]
+    fn a_track_with_too_little_audio_to_measure_is_padded() {
+        let track = Device::steady(0.5).record(0.75);
+        assert_eq!(track.len(), 6000);
+        assert!(seconds(&track, 0.5, 0.75).iter().all(|s| *s == 0.0));
+    }
+    #[test]
+    fn the_level_is_the_loudest_since_it_was_read() {
+        let level = AtomicU32::new(0);
+        for rms in [0.01, 0.2, 0.05] {
+            hold_level(&level, rms);
+        }
+        assert_eq!(take_level(&level), 0.2);
+        assert_eq!(take_level(&level), 0.0);
+        hold_level(&level, 0.03);
+        assert_eq!(take_level(&level), 0.03);
     }
     #[test]
     fn snapshot_has_a_finite_latest_30_second_prefix() {
@@ -3874,12 +4325,9 @@ mod tests {
         for sample in 0..40_000 {
             wav.write_sample(sample as f32 / 40_000.0).unwrap();
         }
-        let writer = Arc::new(Mutex::new(AudioWriter {
-            wav: Some(wav),
-            frames: 40_000,
-            rate: 1000,
-            anchor: None,
-        }));
+        let mut state = AudioWriter::new(wav, &path, 1000);
+        state.frames = 40_000;
+        let writer = Arc::new(Mutex::new(state));
         assert_eq!(
             snapshot_track(&path, &writer, &target).unwrap(),
             (10_000, 40_000)

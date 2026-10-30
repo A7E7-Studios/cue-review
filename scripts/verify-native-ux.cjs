@@ -41,11 +41,11 @@ async function setTheme(theme){
  await dialog.getByRole('button',{name:'Close settings',exact:true}).click();await dialog.waitFor({state:'detached'});
 }
 // Windows has no native decorations: a 44px custom title bar with 46×44 window controls, and
-// drag regions only on empty bar areas, never on a control or the search field (decision 9).
+// drag regions only on empty bar areas, never on a control (decision 9).
 async function windowChrome(){
  const bar=titleBar();await bar.waitFor();
  for(const name of ['Minimize window','Close window','Settings'])await bar.getByRole('button',{name,exact:true}).waitFor();
- await bar.getByRole('button',{name:/^(Hide|Show) sidebar$/}).waitFor();await bar.getByRole('searchbox',{name:'Search recordings',exact:true}).waitFor();
+ await bar.getByRole('button',{name:/^(Hide|Show) sidebar$/}).waitFor();assert(await bar.getByRole('searchbox').count()===0,'The title bar still has a search field.');
  const layout=await bar.evaluate(header=>{
   const box=header.getBoundingClientRect();
   const controls=[...header.querySelectorAll('button')].filter(button=>/ window$/.test(button.getAttribute('aria-label')||'')).map(button=>{const r=button.getBoundingClientRect();return{name:button.getAttribute('aria-label'),width:r.width,height:r.height,right:innerWidth-r.right};});
@@ -66,7 +66,7 @@ async function windowChrome(){
 }
 // Shortcut hints stay hidden until hover; the name is unchanged and aria-keyshortcuts carries the key (decision 7).
 async function shortcutHint(){
- const button=sidebar().getByRole('button',{name:'New recording',exact:true});const hint=button.locator('kbd');
+ const button=sidebar().getByRole('button',{name:'New session',exact:true});const hint=button.locator('kbd');
  await page.getByRole('heading',{level:1}).hover();await page.waitForTimeout(250);
  const hidden=await hint.evaluate(kbd=>getComputedStyle(kbd).opacity);
  await button.hover();await page.waitForTimeout(250);
@@ -76,7 +76,7 @@ async function shortcutHint(){
  result.checks.shortcutHint={hidden,shown,keys,label:(await hint.textContent()).trim()};
 }
 async function compact(){
- await idle();await sidebar().getByRole('button',{name:'New recording',exact:true}).click();
+ await idle();await sidebar().getByRole('button',{name:'New session',exact:true}).click();
  const initial=await size();
  ownsRecording=true;
  await page.getByRole('button',{name:'Record',exact:true}).click();await page.getByRole('button',{name:'Stop',exact:true}).waitFor();recordingId=(await invoke('get_recording_status')).sessionId;
@@ -118,7 +118,7 @@ async function review(){
  const handoff=await invoke('get_agent_handoff',{id:sid});if(clipboard.replace(/\r\n/g,'\n').trim()!==handoff.replace(/\r\n/g,'\n').trim())throw Error('Native clipboard handoff mismatch');
  assert(result.checks.clipboardRestored,'The clipboard text was not restored: '+(result.clipboardRestoreError||'it differs'));
  assert(handoff.includes('--segments')&&handoff.includes('--per-segment'),'Handoff lacks the recommended workflow');result.checks.clipboard=true;
- const rateButton=page.getByRole('button',{name:/^Playback speed /});while((await page.locator('video').evaluate(v=>v.playbackRate))!==1)await rateButton.click();await rateButton.click();result.checks.playbackRate=await page.locator('video').evaluate(v=>v.playbackRate);if(result.checks.playbackRate!==1.5)throw Error('Speed failed');
+ const rateButton=page.getByRole('button',{name:/^Playback speed /});const rateWidth=(await rateButton.boundingBox()).width;await rateButton.click();await page.getByRole('menu',{name:'Playback speed',exact:true}).getByRole('menuitemradio',{name:'1.5×',exact:true}).click();result.checks.playbackRate=await page.locator('video').evaluate(v=>v.playbackRate);if(result.checks.playbackRate!==1.5)throw Error('Speed failed');result.checks.speedButtonWidth=[rateWidth,(await rateButton.boundingBox()).width];if(Math.abs(result.checks.speedButtonWidth[0]-result.checks.speedButtonWidth[1])>.5)throw Error(`The speed button changed width: ${result.checks.speedButtonWidth}`);await rateButton.click();await page.getByRole('menuitemradio',{name:'1× Normal',exact:true}).click();
  await page.getByRole('button',{name:'Play',exact:true}).click();await page.waitForTimeout(350);await page.getByRole('button',{name:'Pause',exact:true}).click();if((await page.locator('video').evaluate(v=>v.currentTime))<=seek)throw Error('Playback did not advance');result.checks.playback=true;
  restoreSession=original;restoreProject=project;const newSession=original.name+' [UX checked]',newProject=project.name+' [UX checked]';
  await page.getByRole('heading',{level:1}).getByRole('button').click();await page.getByRole('textbox',{name:'Name',exact:true}).fill(newSession);await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByRole('heading',{level:1,name:newSession}).waitFor();

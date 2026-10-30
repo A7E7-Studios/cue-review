@@ -13,8 +13,8 @@ code:
 
 ## Purpose
 
-The bar across the top of the window: the app's name, the sidebar toggle, search, Settings and, on
-Windows, Minimize, Maximize and Close. Its toggle hides and shows the sidebar.
+The bar across the top of the window: the app's name, the sidebar toggle, Settings and, on Windows,
+Minimize, Maximize and Close. Its toggle hides and shows the sidebar.
 
 ## Requirements
 

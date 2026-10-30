@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { CaptureSource } from '../backend';
 import { CaptureControls, placePopover } from './CaptureControls';
+import type { CaptureControlsViewProps } from './CaptureControls';
 import type { CaptureControlsProps, CaptureMenu } from './types';
 
 const sources: CaptureSource[] = [
@@ -14,7 +15,7 @@ const sources: CaptureSource[] = [
 ];
 const microphones = [{ id: 'mic1', name: 'Studio microphone' }, { id: 'mic2', name: 'Headset microphone' }];
 
-function Harness(overrides: Partial<CaptureControlsProps> & { initialMenu?: CaptureMenu | null }) {
+function Harness({ platform = 'windows', ...overrides }: Partial<CaptureControlsViewProps> & { initialMenu?: CaptureMenu | null }) {
   const [menu, setMenu] = useState<CaptureMenu | null>(overrides.initialMenu ?? null);
   const [sourceId, setSourceId] = useState('display');
   const [microphoneId, setMicrophoneId] = useState<string | undefined>('mic1');
@@ -24,7 +25,7 @@ function Harness(overrides: Partial<CaptureControlsProps> & { initialMenu?: Capt
     onSystemAudio: vi.fn(), onMuted: vi.fn(), onRefreshSources: vi.fn(), onRefreshMicrophones: vi.fn(),
     locked: false, busy: false, recordLabel: 'Record', recordDisabled: false, onRecord: vi.fn(), ...overrides,
   };
-  return <><CaptureControls {...props} platform="windows"/><button>Elsewhere</button></>;
+  return <><CaptureControls {...props} platform={platform}/><button>Elsewhere</button></>;
 }
 
 describe('CaptureControls', () => {
@@ -135,6 +136,82 @@ describe('CaptureControls', () => {
     expect(onRecord).toHaveBeenCalledTimes(1);
     rerender(<Harness recordLabel="Please wait…" recordDisabled/>);
     expect(screen.getByRole('button', { name: 'Please wait…' })).toBeDisabled();
+  });
+});
+
+describe('CaptureControls as the recording bar', () => {
+  const closed = 'This window is no longer available';
+  it('is one named bar holding the pickers and Record in a draft', () => {
+    render(<Harness/>);
+    const bar = within(screen.getByRole('group', { name: 'Recording bar' }));
+    expect(bar.getByRole('button', { name: 'Display 1' })).toBeEnabled();
+    expect(bar.getByRole('button', { name: 'Studio microphone' })).toBeEnabled();
+    const record = bar.getByRole('button', { name: 'Record' });
+    expect(record).toHaveClass('cr-record');
+    expect(record).toHaveAttribute('title', 'Start recording (Ctrl+R)');
+  });
+  it('offers Record more in review with both pickers to choose', async () => {
+    const user = userEvent.setup();
+    const onRecord = vi.fn();
+    const onSystemAudio = vi.fn();
+    render(<Harness review recordLabel="Record more" onRecord={onRecord} onSystemAudio={onSystemAudio}/>);
+    const bar = within(screen.getByRole('group', { name: 'Recording bar' }));
+    const source = bar.getByRole('button', { name: 'Display 1' });
+    // The source picker opens as in a draft, with nothing saying it is locked.
+    expect(source).toBeEnabled();
+    expect(source).not.toHaveAttribute('aria-disabled');
+    expect(source).not.toHaveAttribute('aria-describedby');
+    expect(source).toHaveAttribute('title', 'Display 1');
+    await user.click(source);
+    expect(source).toHaveAttribute('aria-expanded', 'true');
+    await user.click(screen.getByRole('checkbox', { name: 'Include system audio' }));
+    expect(onSystemAudio).toHaveBeenCalledWith(true);
+    await user.click(within(screen.getByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'Design review window' }));
+    expect(bar.getByRole('button', { name: 'Design review window' })).toHaveFocus();
+    // Tab order: the source, the microphone, then Record more.
+    await user.tab();
+    expect(bar.getByRole('button', { name: 'Studio microphone' })).toHaveFocus();
+    await user.tab();
+    expect(bar.getByRole('button', { name: 'Record more' })).toHaveFocus();
+    await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
+    await user.click(within(screen.getByRole('group', { name: 'Microphone options' })).getByRole('button', { name: 'Headset microphone' }));
+    expect(bar.getByRole('button', { name: 'Headset microphone' })).toHaveFocus();
+    const more = bar.getByRole('button', { name: 'Record more' });
+    expect(more).toHaveAttribute('aria-keyshortcuts', 'Control+R');
+    expect(more).toHaveAttribute('title', 'Record more (Ctrl+R): continue this session as a new take');
+    await user.click(more);
+    expect(onRecord).toHaveBeenCalledTimes(1);
+  });
+  it('locks both pickers while Record more is busy', () => {
+    render(<Harness review locked busy recordLabel="Record more"/>);
+    expect(screen.getByRole('button', { name: 'Display 1' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Studio microphone' })).toBeDisabled();
+  });
+  it('shows the macOS shortcut for Record more', () => {
+    render(<Harness review recordLabel="Record more" platform="macos"/>);
+    const more = screen.getByRole('button', { name: 'Record more' });
+    expect(more).toHaveAttribute('aria-keyshortcuts', 'Meta+R');
+    expect(more).toHaveAttribute('title', 'Record more (⌘R): continue this session as a new take');
+  });
+  it('shows why Record more failed under the bar, with New recording and Dismiss', async () => {
+    const user = userEvent.setup();
+    const handlers = { onNewRecording: vi.fn(), onDismissRecordMoreError: vi.fn() };
+    const { rerender } = render(<Harness review recordLabel="Record more" recordMoreError={closed} {...handlers}/>);
+    const alert = within(screen.getByRole('group', { name: 'Recording bar' })).getByRole('alert');
+    expect(alert).toHaveTextContent('no longer available');
+    expect(screen.getByRole('button', { name: 'Record more' })).toHaveAccessibleDescription(closed);
+    await user.click(within(alert).getByRole('button', { name: 'New recording' }));
+    await user.click(within(alert).getByRole('button', { name: 'Dismiss error' }));
+    expect(handlers.onNewRecording).toHaveBeenCalledTimes(1);
+    expect(handlers.onDismissRecordMoreError).toHaveBeenCalledTimes(1);
+    // Busy for a moment: New recording stays focusable but does nothing.
+    rerender(<Harness review recordLabel="Record more" recordMoreError={closed} recordBusy {...handlers}/>);
+    const start = within(alert).getByRole('button', { name: 'New recording' });
+    expect(start).toHaveAttribute('aria-disabled', 'true');
+    await user.click(start);
+    expect(handlers.onNewRecording).toHaveBeenCalledTimes(1);
+    rerender(<Harness review recordLabel="Record more" {...handlers}/>);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
 

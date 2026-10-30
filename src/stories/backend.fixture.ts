@@ -1,11 +1,10 @@
 import type { backend as RealBackend, CaptureSource, Language, LanguageModel, Marker, Microphone, Project, RecordingStatus, Session, Settings, SetupStatus } from '../backend';
-import { date, previewImage, sections, sessions, SOURCE_GONE, stuckTakeError, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript } from './fixtures';
+import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript, WINDOW_CLOSED } from './fixtures';
 
 const sampleVideo = new URL('./sample-capture.webm', import.meta.url).href;
 // 'takes' opens the library session with two takes; 'recording-take' records its take 2.
-// 'stuck-take': take 2 could not be added to video.mp4 and waits to be retried or discarded.
-// 'source-gone': the library session's window has closed, so Record more is refused.
-export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'stuck-take' | 'source-gone';
+// 'window-closed': the window listed as Design review has closed, so Record more refuses it.
+export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'window-closed';
 let projects: Project[] = [];
 let recordings: Session[] = [];
 let markers: Marker[] = [];
@@ -39,10 +38,10 @@ const find = (id: string) => {
   if (!session) throw new Error('This sample recording no longer exists. Reset the story to restore it.');
   return session;
 };
-const recordTake = (session: Session, microphoneId: string | null, systemAudio: boolean) => {
+const recordTake = (session: Session, sourceId: string, microphoneId: string | null, systemAudio: boolean) => {
   const takes = session.takes?.length ? session.takes : [{ index: 1, offsetMs: 0, durationMs: session.durationMs, status: 'ready' as const, folder: '.', systemAudio: !!session.systemAudio, microphoneId: session.microphoneId }];
   const index = takes.length + 1;
-  session.takes = [...takes, { index, offsetMs: session.durationMs, durationMs: 0, status: 'recording', folder: `takes/${index}`, systemAudio, microphoneId: microphoneId ?? undefined }];
+  session.takes = [...takes, { index, offsetMs: session.durationMs, durationMs: 0, status: 'recording', folder: `takes/${index}`, sourceId, systemAudio, microphoneId: microphoneId ?? undefined }];
   session.status = 'recording';
   status = { state: 'recording', sessionId: session.id, elapsedMs: 0, takeIndex: index, takeOffsetMs: session.durationMs };
 };
@@ -56,22 +55,17 @@ export function configureScenario(next: Scenario) {
   sequence = 0;
   status = { state: 'idle' };
   if (next === 'recording' || next === 'processing') {
-    recordings[0] = { ...recordings[0], status: next, sourceId: 'display', microphoneId: 'microphone' };
-    status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
+    recordings[0] = { ...recordings[0], status: next, sourceId: 'monitor:1', microphoneId: 'microphone' };
+    status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.0126, liveTranscript: clone(transcript) };
   }
   // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
-  if (next === 'takes' || next === 'recording-take' || next === 'source-gone') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
-  if (next === 'stuck-take') {
-    const session: Session = { ...clone(twoTakeSession), videoPath: sampleVideo, durationMs: takeTwoStartMs, status: 'error', error: stuckTakeError };
-    session.takes![1].status = 'swapping';
-    recordings[0] = session;
-  }
+  if (next === 'takes' || next === 'recording-take' || next === 'window-closed') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
   if (next === 'recording-take') {
     const session = recordings[0];
     session.durationMs = takeTwoStartMs;
     session.takes = session.takes!.slice(0, 1);
-    recordTake(session, 'microphone', false);
-    status = { ...status, elapsedMs: 8000, audioLevel: 0.46, liveTranscript: clone(takeTwoLiveTranscript) };
+    recordTake(session, 'monitor:1', 'microphone', false);
+    status = { ...status, elapsedMs: 8000, audioLevel: 0.0126, liveTranscript: clone(takeTwoLiveTranscript) };
   }
 }
 configureScenario('fresh');
@@ -83,17 +77,18 @@ export const backend = {
   transcript: async (id: string) => {
     const session = recordings.find(item => item.id === id);
     if (!session?.takes?.length) return clone(transcript);
-    // While take 2 records, or when it never joined video.mp4, the saved transcript ends with take 1.
+    // While take 2 records, or when it was interrupted, the saved transcript ends with take 1.
     const takeOne = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
     const second = session.takes.find(take => take.index === 2);
     if (second?.status === 'recording') return clone({ ...twoTakeTranscript, segments: takeOne, takes: [{ index: 1, startMs: 0 }] });
-    if (second?.status === 'swapping' || second?.status === 'interrupted') return clone({ ...twoTakeTranscript, segments: takeOne, takes: undefined });
+    if (second?.status === 'interrupted') return clone({ ...twoTakeTranscript, segments: takeOne, takes: undefined });
     return clone(twoTakeTranscript);
   },
   markers: async () => clone(markers),
   status: async () => clone(status),
   sources: async (): Promise<CaptureSource[]> => [
-    { id: 'display', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
+    { id: 'monitor:1', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
+    { id: 'window:design', name: 'Design review — Figma', kind: 'window', available: scenario !== 'unavailable' },
     { id: 'quest', name: 'Quest 3', kind: 'quest', available: scenario !== 'unavailable', detail: scenario === 'unavailable' ? 'Reconnect this device to resume its preview.' : undefined },
     { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false },
   ],
@@ -107,20 +102,11 @@ export const backend = {
     status = { state: 'recording', sessionId: session.id };
     return clone(session);
   },
-  recordMore: async (id: string, microphoneId: string | null, systemAudio: boolean) => {
+  recordMore: async (id: string, sourceId: string, microphoneId: string | null, systemAudio: boolean) => {
     const session = find(id);
     if (session.status !== 'ready' || status.state !== 'idle') throw new Error('Finish the current recording or processing job first.');
-    if (scenario === 'source-gone') throw new Error(SOURCE_GONE);
-    recordTake(session, microphoneId, systemAudio);
-    return clone(session);
-  },
-  discardTake: async (id: string, index: number) => {
-    const session = find(id);
-    const take = session.takes?.find(item => item.index === index);
-    if (index < 2) throw new Error('Take 1 is the original recording and cannot be discarded.');
-    if (take?.status !== 'swapping') throw new Error(`Take ${index} is already part of the recording and cannot be discarded.`);
-    take.status = 'interrupted';
-    session.status = 'ready'; session.error = undefined;
+    if (scenario === 'window-closed' && sourceId === 'window:design') throw new Error(WINDOW_CLOSED);
+    recordTake(session, sourceId, microphoneId, systemAudio);
     return clone(session);
   },
   stop: async () => {

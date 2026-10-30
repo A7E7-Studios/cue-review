@@ -143,7 +143,7 @@ describe('SettingsDialog', () => {
     const rows = list.getAllByRole('term').map(term => [term.textContent, term.nextElementSibling?.querySelector('[aria-hidden]')?.textContent, term.nextElementSibling?.querySelector('.settings-sr-only')?.textContent]);
     expect(rows).toEqual([
       ['Record, stop or record more', record, `${modifier} R`],
-      ['New recording', fresh, `${modifier} N`],
+      ['New session', fresh, `${modifier} N`],
       ['Search recordings', search, `${modifier} K`],
       ['Play or pause', 'Space', 'Space'],
       ['Seek back or forward 5 seconds', '←→', 'Left arrow or Right arrow'],
