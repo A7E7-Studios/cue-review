@@ -53,6 +53,7 @@ transcript placement by offset.
 | A take that was waiting to be joined | `takes::tests::recovery_upgrades_a_take_waiting_to_be_joined`, new |
 | A session saved by a newer CueReview | `store::tests::a_session_of_a_newer_format_is_refused`, new |
 | Playing across a take boundary, Seeking into another take | `src/App.test.tsx::take playback …`, new |
+| Opening a search result in a later take | `src/App.test.tsx::take playback opens a search result in the take video its line falls in`, new |
 | Recording more from the bar, Record more is refused | `src/App.test.tsx::record more …`, changed; `CaptureControls.test.tsx`, changed |
 | A frame from a later take | `agent::tests::actual_frames_come_from_each_take_video` (ignored, FFmpeg), new; `cli::tests::frame_help_names_the_take_video`, new |
 | A clip across a take boundary | `agent::tests::a_clip_across_a_take_boundary_is_refused`, new |
@@ -65,6 +66,7 @@ transcript placement by offset.
 |---|---|---|
 | Recording more from another source, Stopping a take | desk | record a take from Display 1, Record more from a window of another size; both videos exist in their folders, the session plays through both |
 | Playing across a take boundary, Seeking into another take | desk | play over the boundary, click a take-2 word, drag the scrubber back into take 1 |
+| Opening a search result in a later take | desk | search for a line of take 2 and open it: the session shows that moment of take 2's video, paused |
 | Recording more from the bar, Record more is refused | desk | the bar in review opens its source picker; a closed window's refusal reads under the bar |
 | A frame from a later take | desk | `cue frame` at a time in take 2 shows take 2's window at its own size |
 

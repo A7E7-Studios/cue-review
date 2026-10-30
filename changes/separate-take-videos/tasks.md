@@ -19,7 +19,7 @@
 ## 3. The app (after 1)
 
 - [x] 3.1 `videoAt` and the take video list in `media.ts`; test: src/app/media.test.ts::videoAt picks the take video by session time
-- [x] 3.2 The player switches take videos; test: src/App.test.tsx::take playback plays on from one take's video into the next, src/App.test.tsx::take playback seeks into another take's video from the scrubber and the transcript
+- [x] 3.2 The player switches take videos; test: src/App.test.tsx::take playback plays on from one take's video into the next, src/App.test.tsx::take playback seeks into another take's video from the scrubber and the transcript, src/App.test.tsx::take playback opens a search result in the take video its line falls in
 - [x] 3.3 The review bar unlocked, Record more passing its source; Discard take goes; test: src/App.test.tsx::record more records more from the bar under the playback controls, with the source and microphone chosen there
 - [x] 3.4 Looks for the changed recording-dock scenarios; check: Recording more from the bar
 
