@@ -3,7 +3,9 @@ title: Prefer displays and make macOS camera capture usable
 capabilities:
   - capture/source-selection
   - capture/camera-capture
-review: unreviewed
+review: changes-requested
+follow-ups:
+  - macos-recording-controls
 ---
 # Prefer displays and make macOS camera capture usable
 
