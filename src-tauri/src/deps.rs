@@ -237,9 +237,8 @@ type Downloader<'a> = &'a dyn Fn(&SpeechModel, &Path, &dyn Fn(u64) -> bool) -> R
 fn claim(state: &Mutex<Fetch>, wanted: &SpeechModel) -> bool {
     let mut fetch = locked(state);
     if fetch.running {
-        if fetch.model != wanted.name {
-            fetch.cancel = true;
-        }
+        // Choosing the model being fetched again takes back an earlier stop.
+        fetch.cancel = fetch.model != wanted.name;
         return false;
     }
     *fetch = Fetch {
@@ -259,10 +258,17 @@ fn fetch_loop(
     download: Downloader<'_>,
     state: &Mutex<Fetch>,
 ) -> Result<(), String> {
-    let result = loop {
+    loop {
         let model = language_model(chosen());
         if model.installed_in(models) {
-            break Ok(());
+            // Released under the lock that a refused claim takes, after
+            // asking once more: a language chosen meanwhile is fetched too.
+            let mut fetch = locked(state);
+            if language_model(chosen()).installed_in(models) {
+                fetch.running = false;
+                return Ok(());
+            }
+            continue;
         }
         {
             let mut fetch = locked(state);
@@ -277,14 +283,15 @@ fn fetch_loop(
             !fetch.cancel
         });
         if let Err(error) = outcome {
-            if language_model(chosen()).name == model.name {
-                locked(state).error = Some(error.clone());
-                break Err(error);
+            let mut fetch = locked(state);
+            // A download stopped for another language is no failure.
+            if !fetch.cancel && language_model(chosen()).name == model.name {
+                fetch.error = Some(error.clone());
+                fetch.running = false;
+                return Err(error);
             }
         }
-    };
-    locked(state).running = false;
-    result
+    }
 }
 /// The model's download, with failures said plainly.
 fn download_model(
@@ -315,6 +322,13 @@ fn plain_download_error(error: &str) -> String {
     } else {
         format!("The model could not be saved: {error}")
     }
+}
+/// The size of `model`'s partial download when another process is writing it:
+/// it changed within the last 30 s.
+fn growing_partial(model: &Path) -> Option<u64> {
+    let partial = model.with_extension("download").metadata().ok()?;
+    let age = partial.modified().ok()?.elapsed().unwrap_or_default();
+    (age < Duration::from_secs(30)).then_some(partial.len())
 }
 /// Removes partial downloads that a closed app left behind.
 fn sweep_partial(models: &Path) {
@@ -380,6 +394,9 @@ fn status_of(models: &Path, language: &str, fetch: &Fetch) -> LanguageModel {
     } else if fetch.running {
         // A download of the other language's model moves on to this one next.
         ("downloading", if ours { fetch.received } else { 0 }, None)
+    } else if let Some(received) = growing_partial(&model.path_in(models)) {
+        // The app downloads it while `cue setup` asks.
+        ("downloading", received, None)
     } else if ours && fetch.error.is_some() {
         ("failed", 0, fetch.error.clone())
     } else {
@@ -801,6 +818,32 @@ mod tests {
         assert!(!fetch.running);
         assert_eq!(status_of(dir.path(), "de", &fetch).state, "ready");
         assert_eq!(status_of(dir.path(), "en", &fetch).state, "missing");
+    }
+
+    #[test]
+    fn choosing_the_fetched_language_again_keeps_its_download() {
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let order = std::cell::RefCell::new(Vec::new());
+        // English, German, English again, all within one read of small.en.
+        let during = |name: &'static str| {
+            if name == "small.en" && order.borrow().len() == 1 {
+                assert!(!claim(&state, &SMALL));
+                assert!(!claim(&state, &SMALL_EN));
+            }
+        };
+        assert!(claim(&state, &SMALL_EN));
+        fetch_loop(dir.path(), &|| "en", &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small.en"]);
+        assert!(SMALL_EN.installed_in(dir.path()));
+        assert!(locked(&state).error.is_none());
+        // Another process's download, still growing, reads as downloading.
+        fs::write(dir.path().join("ggml-small.download"), b"part").unwrap();
+        let status = status_of(dir.path(), "de", &locked(&state));
+        assert_eq!(
+            (status.state.as_str(), status.received_bytes),
+            ("downloading", 4)
+        );
     }
 
     #[test]

@@ -1813,6 +1813,22 @@ describe('local setup recovery and request races', () => {
     expect(await screen.findByText('German model')).toBeVisible();
     expect(screen.getByText('German model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB');
   });
+  it('shows the tools from a full setup reply even when a newer model read came first', async () => {
+    const model: LanguageModel = { language: 'en', model: 'small.en', state: 'downloading', receivedBytes: 100_000_000, totalBytes: 487_614_201 };
+    setup = { ...readySetup, modelReady: false, languageModel: model };
+    const user = await ready();
+    await user.click(screen.getByRole('button', { name: NAMES.settings }));
+    expect(await screen.findByRole('button', { name: NAMES.installTranscription })).toBeVisible();
+    // Check again: the full read is slow; the light read of the model answers first.
+    let full!: (value: SetupStatus) => void;
+    backend.setup.mockImplementation(() => new Promise<SetupStatus>(resolve => { full = resolve; }));
+    backend.languageModel.mockResolvedValue({ ...model, receivedBytes: 300_000_000 });
+    await user.click(screen.getByRole('button', { name: NAMES.checkAgain }));
+    await waitFor(() => expect(screen.getByText('English model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB'), { timeout: 3000 });
+    await act(async () => full({ ...readySetup, languageModel: { ...model, receivedBytes: 200_000_000 } }));
+    expect(screen.queryByRole('button', { name: NAMES.installTranscription })).not.toBeInTheDocument();
+    expect(screen.getByText('English model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB');
+  });
   it('ignores an old source preview that arrives after the user selects another source', async () => {
     let resolveOld!: (value: { id: string; url: string }) => void;
     backend.preview.mockImplementation((sourceId: string, id: string) => sourceId === 'display1' ? new Promise<{ id: string; url: string }>(resolve => { resolveOld = resolve; }) : Promise.resolve({ id, url: 'http://127.0.0.1:9999/quest' }));
