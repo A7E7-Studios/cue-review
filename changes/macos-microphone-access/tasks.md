@@ -9,7 +9,7 @@
 
 ## 2. Verification and delivery
 
-- [ ] 2.1 Run required Rust suites and package verification; test: docs/VERIFICATION.md
-- [ ] 2.2 Verify real microphone samples, normal Stop and finalized audio playback using isolated data; check: An installed macOS app records the selected microphone
-- [ ] 2.3 Complete independent review, required gate and CI checks; test: node tools/gate/gate.mjs --local --pr <n>
-- [ ] 2.4 Install the verified build and deliver the change; check: An installed macOS app records the selected microphone
+- [x] 2.1 Run required Rust suites and package verification; test: docs/VERIFICATION.md
+- [x] 2.2 Verify real microphone samples, normal Stop and finalized audio playback using isolated data; check: An installed macOS app records the selected microphone
+- [x] 2.3 Complete independent review, required gate and CI checks; test: node tools/gate/gate.mjs --local --pr <n>
+- [x] 2.4 Install the verified build and deliver the change; check: An installed macOS app records the selected microphone
