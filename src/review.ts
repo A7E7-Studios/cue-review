@@ -50,6 +50,17 @@ export function activeSegment(segments: Segment[], ms: number): number {
   if(nearest!==-1)return nearest;
   return segments.findIndex(segment => segment.words.some(hasSeekAnchor) ? activeWord(segment.words,ms)!==-1 : segment.startMs <= ms && ms < segment.endMs);
 }
+/**
+ * The row the playhead belongs to: the active segment, else the last one whose seek point it has
+ * passed (it sits in a pause), else -1 when the playhead is before the first sentence.
+ */
+export function playheadSegment(segments: Segment[], ms: number): number {
+  const active = activeSegment(segments, ms);
+  if (active !== -1) return active;
+  let last = -1;
+  segments.forEach((segment, index) => { if (segmentSeekMs(segment) <= ms) last = index; });
+  return last;
+}
 /** What a segment says: its words when it has them, otherwise its text. */
 export function segmentText(segment: Segment): string {
   return segment.words.length ? segment.words.map(word => word.text).join(' ') : segment.text;

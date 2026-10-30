@@ -329,6 +329,7 @@ export const NAMES = {
   seekTo: (time: string) => `Seek to ${time}`,
   seekToWord: (word: string, time: string) => `Seek to ${word} at ${time}`,
   returnToPlayback: 'Return to playback',
+  backToLive: 'Back to live',
   retryTranscription: 'Retry transcription',
   discardTake: (take: number) => `Discard take ${take}`,
 
