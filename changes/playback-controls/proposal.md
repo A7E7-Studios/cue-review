@@ -47,7 +47,7 @@ the transcript, then turned into a sidebar icon. The owner named YouTube as the 
 
 ## Calls for the owner
 
-- Leaving focus brings the sidebar back only if it showed before focus; a sidebar the person had
+- Leaving focus docks the sidebar again only if it was docked before focus; a sidebar the person had
   hidden stays hidden. Restoring it regardless would undo the person's own choice.
 - Showing the sidebar with its own toggle while focused also ends focus, so the transcript returns
   with it; otherwise the layout would be half-focused with no pressed control to explain it. A

@@ -295,7 +295,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     if (!media || mode !== 'review') return;
     try { if (media.paused) await media.play(); else media.pause(); } catch (problem) { report(problem); }
   }, [mode, report]);
-  // Focus video hides the sidebar and the transcript; leaving it shows the sidebar again if it showed before.
+  // Focus video hides the sidebar and the transcript; leaving it docks the sidebar again if it was docked before.
   const toggleFocus = () => {
     if (focusVideo) { setFocusVideo(false); return; }
     // Focus clears the docked preference at any width, so a window that widens meanwhile shows no
