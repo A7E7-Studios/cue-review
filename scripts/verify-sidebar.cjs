@@ -180,8 +180,9 @@ const rowText = () => page.evaluate(() => {
     await search.fill('quest');
     await searchWindow.getByRole('option', { name: /Quest performance/ }).first().waitFor();
     await search.fill('moment');
-    await searchWindow.locator('[role=option][data-group="In transcripts"]').first().waitFor({ timeout: 15000 });
-    const lines = await searchWindow.locator('.search-result-time').count();
+    const transcriptLines = searchWindow.getByRole('group', { name: 'In transcripts', exact: true }).getByRole('option');
+    await transcriptLines.first().waitFor({ timeout: 15000 });
+    const lines = await transcriptLines.count();
     assert(lines > 0, 'Search found no transcript line for a word only the transcripts contain.');
     await page.screenshot({ path: path.join(output, 'search-transcript-lines.png') });
     await search.fill('zebra-not-said');
