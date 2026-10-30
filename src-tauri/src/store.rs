@@ -129,6 +129,17 @@ fn located(mut session: Session, folder: &Path) -> Session {
     session
 }
 
+/// [`located`], for a session whose format this build knows.
+fn readable(session: Session, folder: &Path) -> Result<Session, String> {
+    if session.format_version > FORMAT_VERSION {
+        return Err(format!(
+            "This recording was saved by a newer CueReview (session format {}). Update CueReview to open it.",
+            session.format_version
+        ));
+    }
+    Ok(located(session, folder))
+}
+
 fn valid_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control) {
@@ -420,7 +431,7 @@ impl Store {
     }
     pub fn session(&self, id: &str) -> Result<Session, String> {
         let folder = self.session_dir(id)?;
-        read_json(&folder.join("session.json")).map(|session| located(session, &folder))
+        read_json(&folder.join("session.json")).and_then(|session| readable(session, &folder))
     }
     /// Writes `s` as the session's metadata under its write lock. Prefer
     /// [`Store::update_session`] when the change is based on a fresh read.
@@ -447,8 +458,9 @@ impl Store {
             };
             let path = folder.join("session.json");
             if path.is_file() {
-                let session: Session = match read_json(&path) {
-                    Ok(session) => located(session, &folder),
+                let session = match read_json(&path).and_then(|session| readable(session, &folder))
+                {
+                    Ok(session) => session,
                     Err(error) => {
                         eprintln!("Skipped {}: {error}", path.display());
                         continue;
@@ -491,6 +503,8 @@ impl Store {
             microphone_id: config.microphone_id.clone(),
             system_audio: config.system_audio,
             takes: Vec::new(),
+            format_version: 1,
+            videos: Vec::new(),
             source_identity: None,
         };
         self.save_session(&s)?;
@@ -1150,6 +1164,32 @@ mod tests {
         assert!(repaired.error.unwrap().contains("retry transcription"));
         // Marked sessions can be deleted now.
         store.delete_session(&recording.id).unwrap();
+    }
+    #[test]
+    fn a_session_of_a_newer_format_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let newer = ready_session(&store, None);
+        let file = store.session_dir(&newer.id).unwrap().join("session.json");
+        let mut value: serde_json::Value = read_json(&file).unwrap();
+        value["formatVersion"] = 3.into();
+        write_json(&file, &value).unwrap();
+        let before = fs::read(&file).unwrap();
+        let error = store.session(&newer.id).unwrap_err();
+        assert!(
+            error.contains("saved by a newer CueReview (session format 3)"),
+            "{error}"
+        );
+        assert!(error.contains("Update CueReview"));
+        assert!(store.update_session(&newer.id, |_| Ok(())).is_err());
+        // Listing leaves it out; startup recovery leaves its file alone.
+        assert!(store.sessions(None).unwrap().is_empty());
+        store.recover_interrupted().unwrap();
+        assert_eq!(fs::read(&file).unwrap(), before);
+        // Format 2 is read.
+        value["formatVersion"] = 2.into();
+        write_json(&file, &value).unwrap();
+        assert_eq!(store.session(&newer.id).unwrap().format_version, 2);
     }
     #[test]
     fn listing_skips_a_torn_session_and_lists_the_rest() {

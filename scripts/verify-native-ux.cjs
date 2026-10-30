@@ -41,11 +41,11 @@ async function setTheme(theme){
  await dialog.getByRole('button',{name:'Close settings',exact:true}).click();await dialog.waitFor({state:'detached'});
 }
 // Windows has no native decorations: a 44px custom title bar with 46×44 window controls, and
-// drag regions only on empty bar areas, never on a control or the search field (decision 9).
+// drag regions only on empty bar areas, never on a control (decision 9).
 async function windowChrome(){
  const bar=titleBar();await bar.waitFor();
  for(const name of ['Minimize window','Close window','Settings'])await bar.getByRole('button',{name,exact:true}).waitFor();
- await bar.getByRole('button',{name:/^(Hide|Show) sidebar$/}).waitFor();await bar.getByRole('searchbox',{name:'Search recordings',exact:true}).waitFor();
+ await bar.getByRole('button',{name:/^(Hide|Show) sidebar$/}).waitFor();assert(await bar.getByRole('searchbox').count()===0,'The title bar still has a search field.');
  const layout=await bar.evaluate(header=>{
   const box=header.getBoundingClientRect();
   const controls=[...header.querySelectorAll('button')].filter(button=>/ window$/.test(button.getAttribute('aria-label')||'')).map(button=>{const r=button.getBoundingClientRect();return{name:button.getAttribute('aria-label'),width:r.width,height:r.height,right:innerWidth-r.right};});

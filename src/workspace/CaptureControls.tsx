@@ -25,8 +25,6 @@ export function placePopover(anchor: { left: number; top: number; bottom: number
 }
 
 const TYPEAHEAD_MS = 700;
-/** Why the source picker is locked in review: a take records the session's own source. */
-export const SOURCE_LOCKED = 'Record more records this session\'s own source';
 const DEVICE_KINDS = new Set(['android', 'quest']);
 
 function useForwardedRef<T>(local: RefObject<T | null>, external?: Ref<T>) {
@@ -115,7 +113,7 @@ export interface CaptureControlsViewProps extends CaptureControlsProps {
  * shows under the bar with New recording and Dismiss.
  */
 export function CaptureControls(props: CaptureControlsViewProps) {
-  const { sources, source, microphones, microphoneId, microphoneUnavailable, systemAudio, muted, menu, onMenu, locked, sourceLocked = false, busy, review = false,
+  const { sources, source, microphones, microphoneId, microphoneUnavailable, systemAudio, muted, menu, onMenu, locked, busy, review = false,
     recordLabel, recordDisabled, recordBusy = false, onRecord, recordMoreError, onNewRecording, onDismissRecordMoreError, platform } = props;
   const sourceTrigger = useRef<HTMLButtonElement>(null);
   const micTrigger = useRef<HTMLButtonElement>(null);
@@ -129,7 +127,6 @@ export function CaptureControls(props: CaptureControlsViewProps) {
   const record = shortcut('r', platform);
   const microphone = microphones.find(item => item.id === microphoneId);
   const micLabel = microphoneUnavailable ? NAMES.microphoneUnavailable : muted && microphoneId ? NAMES.muted : microphone?.name || NAMES.noMicrophone;
-  const sourceDisabled = locked || sourceLocked;
   const trigger = (which: CaptureMenu) => which === 'source' ? sourceTrigger.current : micTrigger.current;
   const choose = (which: CaptureMenu, action: () => void) => { action(); onMenu(null); trigger(which)?.focus(); };
 
@@ -143,7 +140,7 @@ export function CaptureControls(props: CaptureControlsViewProps) {
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
   }, [menu]);
-  useEffect(() => { if ((sourceDisabled && menu === 'source') || (busy && menu === 'microphone')) latestMenu.current(null); }, [sourceDisabled, busy, menu]);
+  useEffect(() => { if ((locked && menu === 'source') || (busy && menu === 'microphone')) latestMenu.current(null); }, [locked, busy, menu]);
 
   const fieldHandlers = (which: CaptureMenu) => ({
     onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
@@ -174,14 +171,10 @@ export function CaptureControls(props: CaptureControlsViewProps) {
   return <div className="cr-capture-slot" role="group" aria-label={NAMES.recordingBar}>
     <div className="cr-capture">
       <div ref={sourceField} className="cr-capture-field" {...fieldHandlers('source')}>
-        {/* A locked source stays focusable (aria-disabled), so keyboard and screen reader users reach it and hear why. */}
-        <button ref={sourceRef} type="button" className="cr-btn cr-capture-trigger source-trigger" title={sourceLocked ? SOURCE_LOCKED : source?.name}
-          disabled={locked && !sourceLocked} aria-disabled={sourceLocked || undefined} aria-describedby={sourceLocked ? `${ids}-locked` : undefined}
-          aria-expanded={sourceLocked ? undefined : menu === 'source'} aria-controls={menu === 'source' ? `${ids}-source` : undefined}
-          onClick={sourceLocked ? undefined : () => onMenu(menu === 'source' ? null : 'source')}>
+        <button ref={sourceRef} type="button" className="cr-btn cr-capture-trigger source-trigger" title={source?.name} disabled={locked}
+          aria-expanded={menu === 'source'} aria-controls={menu === 'source' ? `${ids}-source` : undefined} onClick={() => onMenu(menu === 'source' ? null : 'source')}>
           <Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">{source?.name || 'Choose source'}</span><Icon name="chevron" strokeWidth={2}/>
         </button>
-        {sourceLocked && <span id={`${ids}-locked`} className="cr-capture-reason">{SOURCE_LOCKED}</span>}
         {menu === 'source' && <Popover id={`${ids}-source`} anchor={sourceTrigger} title="Capture source" refreshLabel={NAMES.refreshCaptureDevices} onRefresh={props.onRefreshSources}>
           <OptionList label={NAMES.captureSources} options={sourceOptions}/>
           {source?.detail && <p className="cr-popover-note">{source.detail}</p>}

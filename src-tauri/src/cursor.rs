@@ -64,25 +64,27 @@
 //!
 //! # Queries
 //!
-//! [`load`] stitches the takes of a session onto the combined timeline,
+//! [`load`] stitches the takes of a session onto the session timeline,
 //! adding each take's `offset_ms`, and ends each take with a gap. A take
 //! starts with the button state of its first sample, so only later
 //! transitions are presses. [`CursorTrack::at`] returns the nearest previous
 //! sample, unless it is a gap or older than [`STALE_MS`].
 //! [`CursorTrack::clicks`] lists presses.
 //!
-//! [`CursorPoint::x`]/[`CursorPoint::y`] are fractions of the session video,
-//! measured at the pointer's pixel center, and `px`/`py` are its pixels. The
-//! session video is take 1's canvas rounded down to even sizes (`finalize`
-//! scales by `trunc(iw/2)*2`). A later take of another size is re-encoded by
-//! [`crate::takes`] to fit that frame (`scale=…,pad=W:H:padX:padY`), and its
-//! `capture-timing.json` records
+//! [`CursorPoint::x`]/[`CursorPoint::y`] are fractions of the take's video,
+//! measured at the pointer's pixel center, and `px`/`py` are its pixels. A
+//! take's video is its canvas rounded down to even sizes (`finalize` scales
+//! by `trunc(iw/2)*2`). A take with a video of its own (see
+//! [`crate::takes::videos`]) is measured against its own canvas. A take that
+//! a session saved before takes kept their own videos joined into take 1's
+//! video was re-encoded to fit that frame (`scale=…,pad=W:H:padX:padY`), and
+//! its `capture-timing.json` records
 //! `"normalize": {"scale", "padX", "padY", "baseWidth", "baseHeight"}`. Its
 //! points then follow its pixels: through its own `finalize` size, times
 //! `scale`, plus `padX`/`padY` from the top-left corner, as fractions of
 //! `baseWidth`×`baseHeight`. A take without a valid `normalize` entry is
-//! assumed to be scaled to the session video without padding, so its
-//! fractions are of its own canvas.
+//! assumed to be scaled to take 1's video without padding, so its fractions
+//! are of its own canvas.
 //!
 //! `in_video` is false outside the canvas (which covers any padding), outside
 //! the session video, and when the pointer was not over the source: on
@@ -165,7 +167,7 @@ const BUTTONS: u8 = LEFT | RIGHT | MIDDLE;
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorPoint {
-    /// Milliseconds on the combined session timeline.
+    /// Milliseconds on the session timeline.
     pub t_ms: u64,
     /// Horizontal position as a fraction of the video width: 0 is the left
     /// edge and 1 the right edge. Outside 0..=1 when the pointer is outside.
@@ -487,7 +489,7 @@ struct Entry {
     point: Option<CursorPoint>,
 }
 
-/// All cursor samples of one session, on the combined session timeline.
+/// All cursor samples of one session, on the session timeline.
 #[derive(Clone, Debug, Default)]
 pub struct CursorTrack {
     entries: Vec<Entry>,
@@ -611,7 +613,14 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
     // Legacy sessions, or a takes list without take 1, get take 1 from the
     // root. Folders come from the take index only, never from `Take.folder`,
     // so a damaged session.json cannot point a reader outside the session.
-    let mut takes: Vec<(u64, u64, PathBuf)> = takes::list(session)
+    // A take with a video of its own is measured against its own frame; a
+    // take joined into video.mp4 (format 1) against take 1's, as joined.
+    let own_video: Vec<u32> = takes::videos(session)
+        .iter()
+        .map(|video| video.take)
+        .filter(|take| *take >= 2)
+        .collect();
+    let mut takes: Vec<(u64, u64, PathBuf, bool)> = takes::list(session)
         .iter()
         .filter(|take| take.status != TakeStatus::Interrupted)
         .map(|take| {
@@ -619,6 +628,7 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
                 take.offset_ms,
                 take.duration_ms,
                 takes::take_dir(folder, take.index),
+                own_video.contains(&take.index),
             )
         })
         .collect();
@@ -628,8 +638,8 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
         .and_then(|take| take_canvas(&take.2, read_timing(&take.2).as_ref(), None));
     let mut found = false;
     let mut placed = Vec::new();
-    for (index, (offset_ms, duration_ms, dir)) in takes.iter().enumerate() {
-        let (offset_ms, duration_ms) = (*offset_ms, *duration_ms);
+    for (index, (offset_ms, duration_ms, dir, own)) in takes.iter().enumerate() {
+        let (offset_ms, duration_ms, own) = (*offset_ms, *duration_ms, *own);
         let Some((header, samples)) = fs::read_to_string(dir.join(FILE_NAME))
             .ok()
             .and_then(|text| decode(&text))
@@ -647,8 +657,12 @@ fn stitch(folder: &Path, session: &Session) -> Option<CursorTrack> {
             offset_ms,
             end_ms: own_end.into_iter().chain(next).min(),
             canvas,
-            video: video_size(base.unwrap_or(canvas)),
-            normalize: timing.as_ref().and_then(Normalize::from_timing),
+            video: video_size(if own { canvas } else { base.unwrap_or(canvas) }),
+            normalize: if own {
+                None
+            } else {
+                timing.as_ref().and_then(Normalize::from_timing)
+            },
             samples,
         });
     }
@@ -1251,6 +1265,71 @@ mod tests {
             .iter()
             .map(|point| (point.px, point.py, point.in_video))
             .collect()
+    }
+
+    #[test]
+    fn a_take_with_its_own_video_maps_to_its_own_size() {
+        // Take 2 at 1280x720 after a 1920x1080 take 1, with a video of its
+        // own: measured against its own frame, never scaled or padded, even
+        // with a stale `normalize` entry in its timing.
+        let samples = vec![
+            sample(100, position(640, 360, 0)),
+            sample(200, position(1279, 719, 0)),
+            sample(300, position(1280, 0, 0)),
+        ];
+        let files = [
+            (
+                ".",
+                Header::new("display", Some((1920, 1080))),
+                vec![sample(10, position(1, 1, 0))],
+            ),
+            (
+                "takes/2",
+                Header::new("display", Some((1280, 720))),
+                samples,
+            ),
+        ];
+        let takes = vec![
+            take(1, 0, 1_000, ".", TakeStatus::Ready),
+            take(2, 1_000, 5_000, "takes/2", TakeStatus::Ready),
+        ];
+        let (_root, store, id) = session_with(takes, 6_000, &files);
+        let dir = store.session_dir(&id).unwrap().join("takes/2");
+        fs::write(
+            dir.join("capture-timing.json"),
+            r#"{"canvasWidth":1280,"canvasHeight":720,"normalize":{"scale":1.5,"padX":0,"padY":0,"baseWidth":1920,"baseHeight":1080}}"#,
+        )
+        .unwrap();
+        store
+            .update_session(&id, |session| {
+                session.format_version = crate::models::FORMAT_VERSION;
+                session.videos = vec![
+                    crate::models::TakeVideo {
+                        take: 1,
+                        start_ms: 0,
+                        duration_ms: 1_000,
+                    },
+                    crate::models::TakeVideo {
+                        take: 2,
+                        start_ms: 1_000,
+                        duration_ms: 5_000,
+                    },
+                ];
+                Ok(())
+            })
+            .unwrap();
+        let track = load(&store, &id).unwrap();
+        let points: Vec<_> = [1_100, 1_200, 1_300]
+            .iter()
+            .map(|at| track.at(*at).unwrap())
+            .collect();
+        assert_eq!(
+            summary(&points),
+            [(640, 360, true), (1279, 719, true), (1280, 0, false)]
+        );
+        assert_eq!((points[0].x, points[0].y), (0.5004, 0.5007));
+        // Take 1 keeps its own 1920x1080 frame.
+        assert_eq!(track.at(10).unwrap().px, 1);
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import type { Segment, Transcript } from '../backend';
 import { TranscriptPane } from '../workspace/TranscriptPane';
 import type { TranscriptPaneProps } from '../workspace/types';
-import { stuckTakeError, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from './fixtures';
+import { takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from './fixtures';
 
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const PHRASES = [
@@ -27,7 +27,7 @@ const longSegments: Segment[] = Array.from({ length: 480 }, (_, index) => {
 const longTranscript: Transcript = { segments: longSegments, takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 800000 }, { index: 3, startMs: 1800000 }] };
 const DURATIONS = { review: 134000, long: longSegments.length * 5000 };
 
-type Scenario = 'review' | 'recording-take-2' | 'recording-long' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'stuck-take' | 'empty' | 'long';
+type Scenario = 'review' | 'recording-take-2' | 'recording-long' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'empty' | 'long';
 interface Args { scenario: Scenario; playing: boolean }
 
 function Column({ scenario, playing: initiallyPlaying }: Args) {
@@ -52,8 +52,6 @@ function Column({ scenario, playing: initiallyPlaying }: Args) {
     processing: { ...base, mode: 'review', transcript: { segments: [] }, status: 'processing', emptyMessage: 'Transcribing…' },
     error: { ...base, mode: 'review', transcript: { segments: [] }, error: 'Speech model not found. Install transcription in Settings, then retry.', onRetry: () => setNotice('Retry selected.') },
     'error-after-take': { ...base, mode: 'review', transcript: { ...twoTakeTranscript, segments: takeOneSegments, takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: takeTwoStartMs }] }, error: 'Take 2 could not be transcribed: the audio track is missing.', onRetry: () => setNotice('Retry selected.') },
-    // Take 2 never joined video.mp4: the transcript ends with take 1, and the take can be discarded.
-    'stuck-take': { ...base, mode: 'review', transcript: { segments: takeOneSegments }, error: stuckTakeError, onRetry: () => setNotice('Retry selected.'), discardTake: 2, onDiscardTake: () => setNotice('Discard take 2 selected.') },
     empty: { ...base, mode: 'review', transcript: { segments: [] }, emptyMessage: 'No speech was detected in this recording.' },
   }[scenario] as TranscriptPaneProps;
   return <div style={{ height: '100vh', display: 'flex', justifyContent: 'flex-end', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
@@ -70,7 +68,7 @@ const meta = {
   title: 'Workspace/Transcript',
   component: Column,
   args: { scenario: 'review', playing: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'stuck-take', 'empty', 'long'] } },
+  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'empty', 'long'] } },
   render: args => <Column key={args.scenario} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Column>;
@@ -86,8 +84,6 @@ export const RecordingBeforeWords: Story = { args: { scenario: 'recording-take-2
 export const Processing: Story = { args: { scenario: 'processing' } };
 export const Error: Story = { args: { scenario: 'error' } };
 export const ErrorAfterTake: Story = { args: { scenario: 'error-after-take' } };
-export const StuckTake: Story = { args: { scenario: 'stuck-take' } };
-export const StuckTakeDark: Story = { args: { scenario: 'stuck-take' }, globals: { theme: 'dark' } };
 export const Empty: Story = { args: { scenario: 'empty' } };
 export const LongTranscript: Story = { args: { scenario: 'long' } };
 export const LongTranscriptPlaying: Story = { args: { scenario: 'long', playing: true } };

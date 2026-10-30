@@ -30,12 +30,48 @@ pub struct Session {
     /// recorded before takes existed: their root files are take 1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<Take>,
-    /// What `source_id` named when the session was first recorded. Record
-    /// more checks it again, because a window handle or display number can
-    /// name something else later. `None` for sessions recorded before this
-    /// existed and for sources other than Windows windows and displays.
+    /// `session.json`'s format: 1 (written as no field) when one video,
+    /// `video.mp4`, holds the whole timeline; 2 once `videos` lists the take
+    /// videos. A reader refuses a format it does not know.
+    #[serde(
+        default = "format_one",
+        rename = "formatVersion",
+        skip_serializing_if = "is_format_one"
+    )]
+    pub format_version: u32,
+    /// The take videos on the timeline, in order (format 2). Empty in format
+    /// 1, where `video.mp4` plays from 0 for `duration_ms`. A take on the
+    /// timeline without an entry of its own plays inside the entry before it:
+    /// the takes joined into `video.mp4` before takes kept their own videos.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub videos: Vec<TakeVideo>,
+    /// What `source_id` named when the session was first recorded, since a
+    /// window handle or display number can name something else later. `None`
+    /// for sessions recorded before this existed and for sources other than
+    /// Windows windows and displays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_identity: Option<SourceIdentity>,
+}
+
+/// The newest `session.json` format this build reads and writes.
+pub const FORMAT_VERSION: u32 = 2;
+fn format_one() -> u32 {
+    1
+}
+fn is_format_one(version: &u32) -> bool {
+    *version == 1
+}
+
+/// One take's video on the session timeline. Its file is derived from
+/// `take`, never stored: `video.mp4` in the session folder for take 1,
+/// `takes/<N>/video.mp4` after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeVideo {
+    pub take: u32,
+    /// Where the video starts on the session timeline.
+    pub start_ms: u64,
+    pub duration_ms: u64,
 }
 
 /// A Windows window or display as it was at first capture, serialized with a
@@ -83,7 +119,10 @@ pub enum TakeStatus {
     Recording,
     /// Capture stopped; the take's own media is being finalized.
     Finalizing,
-    /// The combined `video.mp4` is being rebuilt to include this take.
+    /// Waiting to be joined into `video.mp4`: only in sessions saved before
+    /// takes kept their own videos, until [`crate::takes::recover`] (at
+    /// startup) or [`crate::takes::upgrade`] (in Retry or `cue transcribe`)
+    /// upgrades it.
     Swapping,
     /// The take's audio is being transcribed.
     Transcribing,
@@ -100,15 +139,15 @@ pub enum TakeStatus {
 pub struct Take {
     /// 1-based take number, shown as "Take N".
     pub index: u32,
-    /// Where this take starts on the combined session timeline.
+    /// Where this take starts on the session timeline.
     pub offset_ms: u64,
     pub duration_ms: u64,
     pub status: TakeStatus,
     /// Folder relative to the session folder, for example `"takes/2"`.
     /// Take 1 of a legacy session uses `"."`.
     pub folder: String,
-    /// Source of this take. `None` means the session's `source_id`, which
-    /// Record more always reuses.
+    /// Source of this take. `None` means the session's `source_id`: take 1,
+    /// and takes recorded before Record more could choose another source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
     /// Microphone this take recorded, `None` for none.
@@ -119,7 +158,7 @@ pub struct Take {
     pub system_audio: bool,
 }
 
-/// Start of a take on the combined transcript timeline, used for the
+/// Start of a take on the session timeline, used for the
 /// "Take N · m:ss" divider. A transcript lists one mark per take, in order,
 /// with take 1 at 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +204,7 @@ pub struct Transcript {
     pub language: Option<String>,
     pub status: Option<String>,
     pub error: Option<String>,
-    /// Where each take starts on the combined timeline. Empty for sessions
+    /// Where each take starts on the session timeline. Empty for sessions
     /// with a single take.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<TakeMark>,
@@ -212,7 +251,7 @@ pub struct RecordingStatus {
     /// The take being recorded or processed, when the session has takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_index: Option<u32>,
-    /// Where that take starts on the combined session timeline.
+    /// Where that take starts on the session timeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_offset_ms: Option<u64>,
 }
@@ -357,6 +396,29 @@ mod tests {
         );
         let restored: Session = serde_json::from_value(value).unwrap();
         assert_eq!(restored.takes, session.takes);
+        // Format 1 writes no formatVersion and no videos; format 2 both.
+        let value = serde_json::to_value(&session).unwrap();
+        assert!(value.get("formatVersion").is_none() && value.get("videos").is_none());
+        assert_eq!(session.format_version, 1);
+        session.format_version = FORMAT_VERSION;
+        session.videos = vec![TakeVideo {
+            take: 2,
+            start_ms: 134000,
+            duration_ms: 8000,
+        }];
+        let value = serde_json::to_value(&session).unwrap();
+        assert_eq!(value["formatVersion"], json!(2));
+        assert_eq!(
+            value["videos"],
+            json!([{"take":2,"startMs":134000,"durationMs":8000}])
+        );
+        let restored: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            (restored.format_version, restored.videos),
+            (2, session.videos.clone())
+        );
+        session.format_version = 1;
+        session.videos.clear();
         assert!(serde_json::to_value(&session)
             .unwrap()
             .get("sourceIdentity")

@@ -2,7 +2,11 @@ import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 
 export interface Project { id: string; name: string; createdAt: string }
 export type TakeStatus = 'recording' | 'finalizing' | 'swapping' | 'transcribing' | 'ready' | 'error' | 'interrupted';
-/** One continuous capture inside a session. Take N lives in `takes/<N>/`; the legacy root files are take 1. `sourceId` is absent when it is the session's source, `microphoneId` when the take has none. */
+/**
+ * One continuous capture inside a session. Take N lives in `takes/<N>/`; the root files are take 1. `sourceId` is the
+ * source the take recorded (absent on older takes, which recorded the session's source), `microphoneId` absent when the
+ * take has none. `swapping` appears only in sessions saved before takes kept their own videos.
+ */
 export interface Take { index: number; offsetMs: number; durationMs: number; status: TakeStatus; folder: string; sourceId?: string; microphoneId?: string; systemAudio: boolean }
 /** Start of a take on the combined timeline, for the "Take N · m:ss" divider. */
 export interface TakeMark { index: number; startMs: number }
@@ -10,8 +14,14 @@ export interface TakeMark { index: number; startMs: number }
 export type SourceIdentity =
   | { kind: 'window'; title: string; process: string; class: string; pid?: number; processCreatedMs?: number }
   | { kind: 'display'; device: string; left: number; top: number; right: number; bottom: number };
-/** `takes` is absent for sessions recorded before takes existed; `sourceIdentity` for sessions recorded before identities and for other sources. */
-export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; sourceIdentity?: SourceIdentity; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[] }
+/** A take's own video on the session timeline. Take 1's is `videoPath`, take N's `<folderPath>/takes/<N>/video.mp4`. */
+export interface TakeVideo { take: number; startMs: number; durationMs: number }
+/**
+ * `takes` is absent for sessions recorded before takes existed; `sourceIdentity` for sessions recorded before identities
+ * and for other sources. `videos` (format 2) lists the take videos by start; without it the session has one video,
+ * `videoPath`, from 0 for `durationMs`, the whole timeline's length.
+ */
+export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; sourceIdentity?: SourceIdentity; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[]; formatVersion?: number; videos?: TakeVideo[] }
 export interface Word { text: string; startMs: number; endMs: number; seekMs?: number }
 export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
 export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string; takes?: TakeMark[] }
@@ -50,14 +60,8 @@ export const backend = {
   status: () => call<RecordingStatus>('get_recording_status'),
   start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
   stop: () => call<Session>('stop_recording'),
-  /** Continue a ready session as a new take, locked to its source. A null microphone records without one, as in `start`. */
-  recordMore: (id: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('record_more', { id, microphoneId, systemAudio, muted }),
-  /**
-   * Drop take `index` (2 or later) while it is stuck `swapping`: it becomes `interrupted` and keeps its
-   * folder, and the session settles, usually to ready. Resolves to the updated session; the transcript's
-   * take marks are updated too, so read it again.
-   */
-  discardTake: (id: string, index: number) => call<Session>('discard_take', { id, index }),
+  /** Continue a ready session as a new take of any source, with its own video. A null microphone records without one, as in `start`. */
+  recordMore: (id: string, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('record_more', { id, sourceId, microphoneId, systemAudio, muted }),
   transcript: (id: string) => call<Transcript>('get_transcript', { id }),
   /**
    * Starts the live preview of `sourceId`. `onError` hears that the stream failed and stopped;

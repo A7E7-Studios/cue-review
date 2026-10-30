@@ -113,7 +113,7 @@ fn execute(store: &Store, command: Command) -> Result<(), String> {
                 system_audio,
                 fps: 30,
             };
-            // What the source is now, so a later Record more can check it.
+            // What the source is now, since its id can name something else later.
             let identity = capture::source_identity(&config.source_id);
             let mut session = store.create_session(project.as_deref(), name.as_deref(), &config)?;
             if identity.is_some() {

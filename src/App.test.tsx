@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import App from './App';
 import type { AppProps } from './App';
 import type { Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
-import { SOURCE_GONE } from './stories/fixtures';
+import { WINDOW_CLOSED } from './stories/fixtures';
 import { NAMES, RETIRED_NAMES } from './workspace/types';
 
 const mocks = vi.hoisted(() => ({
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     projects: vi.fn(), sessions: vi.fn(), session: vi.fn(), transcript: vi.fn(), markers: vi.fn(), addMarker: vi.fn(), setup: vi.fn(), status: vi.fn(),
     sources: vi.fn(), microphones: vi.fn(), preview: vi.fn(), stopPreview: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), renameSession: vi.fn(),
     moveSession: vi.fn(), reorderProjects: vi.fn(), deleteProject: vi.fn(), deleteSession: vi.fn(), start: vi.fn(), stop: vi.fn(), recordMore: vi.fn(),
-    discardTake: vi.fn(), handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
+    handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
   },
   windowApi: {
     minimize: vi.fn(), toggleMaximize: vi.fn(), isMaximized: vi.fn(), onResized: vi.fn(), close: vi.fn(), startDragging: vi.fn(),
@@ -32,7 +32,7 @@ let transcript: Transcript;
 const backend = mocks.backend;
 const windowApi = mocks.windowApi;
 const timestamp = '2026-10-27T10:42:00Z';
-const newSession = (id = 's1'): Session => ({ id, projectId: 'p1', name: 'Review Alpha', createdAt: timestamp, durationMs: 10000, status: 'ready', videoPath: 'C:/recordings/video.mp4', sourceId: 'display1', microphoneId: 'mic1' });
+const newSession = (id = 's1'): Session => ({ id, projectId: 'p1', name: 'Review Alpha', createdAt: timestamp, durationMs: 10000, status: 'ready', videoPath: 'C:/recordings/video.mp4', folderPath: 'C:/recordings', sourceId: 'display1', microphoneId: 'mic1' });
 const readySetup: SetupStatus = { ready: true, issues: [], modelReady: true, dependencies: ['ffmpeg', 'ffprobe', 'whisper-cli', 'whisper-vad-speech-segments', 'adb', 'scrcpy'].map(name => ({ name, available: true })) };
 
 beforeEach(() => {
@@ -61,7 +61,6 @@ beforeEach(() => {
   backend.start.mockImplementation(async (projectId: string | null) => { const session = { ...newSession('s2'), projectId, name: 'New recording', autoTitle: true, status: 'recording' as const }; sessions.push(session); status = { state: 'recording', sessionId: 's2', elapsedMs: 3000, audioLevel: .4 }; return session; });
   backend.stop.mockImplementation(async () => { const next = { ...sessions.find(item => item.id === 's2')!, status: 'processing' as const }; sessions = sessions.map(item => item.id === next.id ? next : item); status = { state: 'processing', sessionId: next.id }; return next; });
   backend.recordMore.mockRejectedValue('Record more is not set up in this test.');
-  backend.discardTake.mockRejectedValue('Discarding a take is not set up in this test.');
   backend.handoff.mockResolvedValue('Review local session s1. Transcript and frame instructions.');
   backend.openFolder.mockResolvedValue(undefined); backend.mute.mockResolvedValue(undefined); backend.retry.mockResolvedValue(undefined); backend.installTranscription.mockResolvedValue(undefined);
   backend.settings.mockResolvedValue({});
@@ -93,6 +92,13 @@ const newSection = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(screen.getByRole('menuitem', { name: NAMES.newSection }));
 };
 const transcriptPane = () => within(screen.getByRole('region', { name: NAMES.transcript }));
+/** A text field beside the app, for the shortcuts and menus that leave text fields alone. */
+function textField() {
+  const field = document.body.appendChild(document.createElement('input'));
+  field.type = 'search';
+  onTestFinished(() => field.remove());
+  return field;
+}
 async function open(user: TestUser, name: string | RegExp = /Review Alpha/) {
   await user.click(sidebar().getByRole('button', { name }));
 }
@@ -122,13 +128,22 @@ async function chooseMicrophone(user: TestUser, id: string) {
 async function chooseSource(user: TestUser, name: string) {
   await user.click(within(screen.getByRole('group', { name: NAMES.captureSources })).getByRole('button', { name }));
 }
-/** A session whose take 2 is recording, as record_more returns it. */
-function takeTwo(session: Session, takeStatus: 'recording' | 'swapping' | 'ready' = 'recording'): Session {
-  return { ...session, status: takeStatus === 'ready' ? 'ready' : takeStatus === 'recording' ? 'recording' : 'processing', takes: [
+/** A session whose take 2 is recording, as record_more returns it; once ready, take 2 has its own video (format 2). */
+function takeTwo(session: Session, takeStatus: 'recording' | 'finalizing' | 'ready' = 'recording'): Session {
+  const ready = takeStatus === 'ready';
+  return { ...session, status: ready ? 'ready' : takeStatus === 'recording' ? 'recording' : 'processing', takes: [
     { index: 1, offsetMs: 0, durationMs: 10000, status: 'ready', folder: '.', systemAudio: false, microphoneId: 'mic1' },
     { index: 2, offsetMs: 10000, durationMs: takeStatus === 'recording' ? 0 : 10000, status: takeStatus, folder: 'takes/2', systemAudio: false, microphoneId: 'mic1' },
-  ], durationMs: takeStatus === 'ready' ? 20000 : 10000 };
+  ], durationMs: ready ? 20000 : 10000, ...ready && { formatVersion: 2, videos: [{ take: 1, startMs: 0, durationMs: 10000 }, { take: 2, startMs: 10000, durationMs: 10000 }] } };
 }
+/** record_more's mock: take 2 of the session starts recording. */
+const recordTakeTwo = async (id: string) => {
+  const next = takeTwo(sessions.find(item => item.id === id)!);
+  sessions = sessions.map(item => item.id === id ? next : item);
+  status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 };
+  return structuredClone(next);
+};
+const figma = { id: 'window:42', name: 'Design review — Figma', kind: 'window' as const, available: true };
 
 describe('keyboard interaction', () => {
   it('pauses an exclusive camera preview during startup and recording, then restores it after a failed start', async () => {
@@ -225,12 +240,12 @@ describe('keyboard interaction', () => {
   });
   it('means Record more in review and Stop while that take records', async () => {
     backend.recordMore.mockImplementation(async (id: string) => { sessions = sessions.map(item => item.id === id ? takeTwo(item) : item); status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 }; return takeTwo(newSession(id)); });
-    backend.stop.mockImplementation(async () => { const next = takeTwo(newSession(), 'swapping'); sessions = [next]; status = { state: 'processing', sessionId: 's1', takeIndex: 2, takeOffsetMs: 10000 }; return next; });
+    backend.stop.mockImplementation(async () => { const next = takeTwo(newSession(), 'finalizing'); sessions = [next]; status = { state: 'processing', sessionId: 's1', takeIndex: 2, takeOffsetMs: 10000 }; return next; });
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
     const user = await review();
     await user.keyboard('{Control>}r{/Control}');
     expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toBeVisible();
-    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic1', false, false);
+    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'display1', 'mic1', false, false);
     await user.keyboard('{Control>}r{/Control}');
     await transcriptPane().findByText('Processing');
     expect(backend.stop).toHaveBeenCalledOnce(); expect(backend.start).not.toHaveBeenCalled();
@@ -253,7 +268,7 @@ describe('keyboard interaction', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled());
     await user.keyboard('{Control>}r{/Control}');
     await waitFor(() => expect(backend.recordMore).toHaveBeenCalledTimes(2));
-    expect(backend.recordMore).toHaveBeenLastCalledWith('s1', 'mic1', false, false);
+    expect(backend.recordMore).toHaveBeenLastCalledWith('s1', 'display1', 'mic1', false, false);
   });
   it('starts a new recording with Ctrl+N, except while recording', async () => {
     const user = await review();
@@ -276,7 +291,7 @@ describe('keyboard interaction', () => {
   });
   it('ignores shortcuts in editable fields and open pickers, and never turns a modifier combination into a bare key', async () => {
     const user = await ready();
-    screen.getByRole('searchbox', { name: NAMES.searchRecordings }).focus();
+    textField().focus();
     await user.keyboard('{Control>}r{/Control}{Control>}n{/Control}');
     await user.click(screen.getByRole('button', { name: 'Display 1' }));
     expect(screen.getByRole('group', { name: NAMES.captureSources })).toBeVisible();
@@ -302,21 +317,197 @@ describe('keyboard interaction', () => {
     fireEvent.keyDown(document.body, { key: 'ArrowLeft' });
     expect(media.currentTime).toBe(0);
   });
-  it('focuses search with Ctrl+K, filters the sidebar by name and clears it with Escape', async () => {
-    sessions = [newSession(), { ...newSession('s2'), projectId: null, name: 'Quest navigation' }];
+  it('opens search from the sidebar and with Ctrl+K', async () => {
+    sessions = [newSession(), { ...newSession('s2'), projectId: null, name: 'Quest navigation', createdAt: '2026-10-28T10:00:00Z' }];
     const user = await ready();
-    const field = screen.getByRole('searchbox', { name: NAMES.searchRecordings });
-    await user.keyboard('{Control>}k{/Control}');
+    await user.click(sidebar().getByRole('button', { name: NAMES.search }));
+    let dialog = screen.getByRole('dialog', { name: NAMES.search });
+    const field = within(dialog).getByRole('combobox', { name: NAMES.searchRecordings });
     expect(field).toHaveFocus();
-    await user.type(field, 'quest');
-    expect(sidebar().queryByRole('button', { name: 'Review Alpha' })).not.toBeInTheDocument();
-    expect(sidebar().getByRole('button', { name: 'Quest navigation' })).toBeVisible();
-    await user.type(field, 'zebra');
-    expect(sidebar().getByText(NAMES.noMatches)).toBeVisible();
+    // Before typing: the most recent recordings, newest first.
+    expect(within(dialog).getAllByRole('option').map(option => option.textContent)).toEqual([expect.stringContaining('Quest navigation'), expect.stringContaining('Review Alpha')]);
     await user.keyboard('{Escape}');
-    expect(field).toHaveValue('');
-    expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(sidebar().getByRole('button', { name: NAMES.search })).toHaveFocus();
+    // Ctrl+K from a text field too.
+    textField().focus();
+    await user.keyboard('{Control>}k{/Control}');
+    dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'here');
+    await waitFor(() => expect(within(dialog).getByRole('option', { name: /Review Alpha.*Look here.*0:01/ })).toBeVisible());
     expect(backend.start).not.toHaveBeenCalled();
+  });
+  it('opens a transcript line at its time', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    const line = await within(dialog).findByRole('option', { name: /Look here/ });
+    await waitFor(() => expect(line).toHaveAttribute('aria-selected', 'true'));
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    const media = document.querySelector('video')!;
+    fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(1);
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+  it('opens a line of the recording that is already open at its time', async () => {
+    const user = await review();
+    const media = document.querySelector('video')!;
+    media.currentTime = 7;
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The same video: it seeks there at once, paused.
+    expect(media.currentTime).toBe(1);
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:01');
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+  it('closes the narrow window\'s sidebar when a line of the open recording is chosen', async () => {
+    window.innerWidth = 900;
+    const user = await ready();
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await user.click(sidebar().getByRole('button', { name: NAMES.search }));
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(document.querySelector('.app')).not.toHaveAttribute('data-sidebar', 'overlay'));
+    expect(document.querySelector('video')!.currentTime).toBe(1);
+  });
+  it('opens a line of the shown recording at its time while another load runs', async () => {
+    const user = await review();
+    const media = document.querySelector('video')!;
+    // The video has its metadata already; it does not load again for the same source.
+    Object.defineProperty(media, 'readyState', { configurable: true, get: () => HTMLMediaElement.HAVE_METADATA });
+    media.currentTime = 7;
+    // The recording's row is clicked again: its load is in flight when the line is chosen.
+    let finish!: () => void;
+    backend.session.mockImplementationOnce((id: string) => new Promise(resolve => { finish = () => resolve(sessions.find(item => item.id === id)!); }));
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await act(async () => { finish(); });
+    await waitFor(() => expect(media.currentTime).toBe(1));
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:01');
+  });
+  it('applies only the latest of two lines chosen while loads run', async () => {
+    transcript = { segments: [
+      { id: 'line1', text: 'Look here', startMs: 1000, endMs: 2000, words: [{ text: 'Look', startMs: 1000, endMs: 1500 }, { text: 'here', startMs: 1500, endMs: 2000 }] },
+      { id: 'line2', text: 'Look there', startMs: 3000, endMs: 4000, words: [] },
+    ] };
+    const user = await ready();
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:01' });
+    const media = document.querySelector('video')!;
+    Object.defineProperty(media, 'readyState', { configurable: true, get: () => HTMLMediaElement.HAVE_METADATA });
+    const pending: (() => void)[] = [];
+    const slow = (id: string) => new Promise<Session>(resolve => { pending.push(() => resolve(sessions.find(item => item.id === id)!)); });
+    backend.session.mockImplementationOnce(slow).mockImplementationOnce(slow).mockImplementationOnce(slow);
+    // A load runs (the row clicked again) while two lines are chosen, one after the other.
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    for (const line of [/Look here/, /Look there/]) {
+      await user.keyboard('{Control>}k{/Control}');
+      const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+      await user.type(within(dialog).getByRole('combobox'), 'look');
+      await user.click(await within(dialog).findByRole('option', { name: line }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+    // The loads finish in order; only the last choice applies, and the clock agrees with the video.
+    // A frame passes between them, as it would in the app.
+    for (const finish of pending) await act(async () => { finish(); await new Promise(resolve => setTimeout(resolve, 50)); });
+    await waitFor(() => expect(media.currentTime).toBe(3));
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:03');
+  });
+  it('says when a recording opened from search cannot be played', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    fireEvent.error(document.querySelector('video')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be played');
+  });
+  it('drops a search result\'s time when its load fails', async () => {
+    const user = await review();
+    const media = document.querySelector('video')!;
+    Object.defineProperty(media, 'readyState', { configurable: true, get: () => HTMLMediaElement.HAVE_METADATA });
+    media.currentTime = 7;
+    // A load runs (the row clicked again), then the result's own load fails.
+    let finish!: () => void;
+    backend.session.mockImplementationOnce((id: string) => new Promise(resolve => { finish = () => resolve(sessions.find(item => item.id === id)!); }));
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    backend.session.mockRejectedValueOnce('The recording is busy.');
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('alert')).toHaveTextContent('The recording is busy.');
+    await act(async () => { finish(); });
+    // A later update of the same recording (a rename) does not jump to the stale line.
+    await user.click(screen.getByRole('button', { name: NAMES.recordingOptions }));
+    await user.click(screen.getByRole('menuitem', { name: NAMES.rename }));
+    const field = await screen.findByLabelText(NAMES.nameField);
+    await waitFor(() => expect(field).toHaveFocus());
+    fireEvent.change(field, { target: { value: 'Renamed' } });
+    await user.click(screen.getByRole('button', { name: NAMES.save }));
+    await waitFor(() => expect(backend.renameSession).toHaveBeenCalledWith('s1', 'Renamed'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(media.currentTime).toBe(7);
+  });
+  it('searches each transcript as it is when search opens', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    let dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The transcript changes (a retry, or `cue transcribe`) while the recording's status and length stay.
+    transcript = { segments: [{ id: 'line1', text: 'Watch there', startMs: 1000, endMs: 4000, words: [] }] };
+    await user.keyboard('{Control>}k{/Control}');
+    dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'watch');
+    expect(await within(dialog).findByRole('option', { name: /Watch there/ })).toBeVisible();
+  });
+  it('does not open search while recording', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    await user.keyboard('{Control>}k{/Control}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(sidebar().getByRole('button', { name: NAMES.search })).toBeDisabled();
+  });
+  it('brings the transcript back for Ctrl+F in focus', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    (document.activeElement as HTMLElement).blur();
+    await user.keyboard('{Control>}f{/Control}');
+    const field = await transcriptPane().findByRole('searchbox', { name: NAMES.findInTranscript });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'false');
+  });
+  it('finds in the transcript with Ctrl+F', async () => {
+    const user = await review();
+    (document.activeElement as HTMLElement).blur();
+    await user.keyboard('{Control>}f{/Control}');
+    const field = transcriptPane().getByRole('searchbox', { name: NAMES.findInTranscript });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, 'look');
+    expect(transcriptPane().getByRole('status')).toHaveTextContent('1 of 1');
   });
 });
 
@@ -410,7 +601,7 @@ describe('project and session workflows', () => {
     expect(fireEvent.contextMenu(screen.getByRole('region', { name: NAMES.recordingVideo }))).toBe(false);
     expect(fireEvent.contextMenu(screen.getByRole('button', { name: NAMES.settings }))).toBe(false);
     expect(fireEvent.contextMenu(document.body)).toBe(false);
-    expect(fireEvent.contextMenu(screen.getByRole('searchbox', { name: NAMES.searchRecordings }))).toBe(true);
+    expect(fireEvent.contextMenu(textField())).toBe(true);
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
   it('creates a section directly from a recording menu and moves only that recording', async () => {
@@ -559,16 +750,6 @@ describe('playback controls', () => {
     expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
     expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
   });
-  it('keeps focus when a search shows the sidebar, and hides it again with its toggle', async () => {
-    const user = await review();
-    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
-    await user.type(screen.getByRole('searchbox', { name: NAMES.searchRecordings }), 'alpha');
-    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
-    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
-    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
-    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'true');
-  });
   it('keeps both sidebars hidden in focus when a narrow window widens', async () => {
     window.innerWidth = 900;
     const user = await ready();
@@ -710,12 +891,6 @@ describe('layout', () => {
       await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
       expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
     } finally { delete document.documentElement.dataset.motion; }
-  });
-  it('shows the sidebar when a search starts while it is hidden', async () => {
-    window.innerWidth = 900;
-    const user = await ready();
-    await user.type(screen.getByRole('searchbox', { name: NAMES.searchRecordings }), 'alpha');
-    expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
   });
   it('puts the collapse control in the sidebar panel only on macOS, beside the toolbar', async () => {
     const user = await ready({ platform: 'macos' });
@@ -1052,22 +1227,21 @@ describe('recording and processing', () => {
 });
 
 describe('record more', () => {
-  it('unloads the video before recording a take, shows it live, and reloads the video with a cache-buster once processing ends', async () => {
-    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  it('pauses the video before recording a take, shows it live, and plays the new take once processing ends', async () => {
     const user = await review();
     const media = document.querySelector('video')!;
     expect(media).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+    const pause = vi.mocked(HTMLMediaElement.prototype.pause); pause.mockClear();
     backend.recordMore.mockImplementationOnce(async (id: string) => {
-      expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
-      expect(media.hasAttribute('src')).toBe(false);
-      expect(load).toHaveBeenCalled();
-      sessions = sessions.map(item => item.id === id ? takeTwo(item) : item);
-      status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 };
-      return takeTwo(newSession(id));
+      // No file is replaced, so the video stays loaded; it pauses, so its sound is not recorded.
+      expect(pause.mock.contexts).toContain(media);
+      expect(media).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+      return recordTakeTwo(id);
     });
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
     expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toHaveTextContent(/^00:00$/);
-    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic1', false, false);
+    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'display1', 'mic1', false, false);
+    // The stage shows the source live while the take records.
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('button', { name: NAMES.copyForAgent })).toBeDisabled();
     expect(screen.getByRole('button', { name: NAMES.newSession })).toBeDisabled();
@@ -1085,15 +1259,13 @@ describe('record more', () => {
     expect(screen.getByRole('button', { name: 'Seek to here at 0:02' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('timer', { name: NAMES.takeTimer(2) })).toHaveTextContent('00:03');
 
-    // Stop returns while the take is still being appended to video.mp4.
-    backend.stop.mockImplementationOnce(async () => { const next = takeTwo(newSession(), 'swapping'); sessions = [next]; status = { state: 'processing', sessionId: 's1', takeIndex: 2, takeOffsetMs: 10000 }; return next; });
+    // Stop returns while take 2's video is still being finished.
+    backend.stop.mockImplementationOnce(async () => { const next = takeTwo(newSession(), 'finalizing'); sessions = [next]; status = { state: 'processing', sessionId: 's1', takeIndex: 2, takeOffsetMs: 10000 }; return next; });
     await user.click(screen.getByRole('button', { name: NAMES.stop }));
     await transcriptPane().findByText('Processing');
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('heading', { name: 'Finishing your recording' })).toBeVisible();
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeDisabled();
-    // A take still being added is not stuck: only an error offers to discard it.
-    expect(screen.queryByRole('button', { name: NAMES.discardTake(2) })).not.toBeInTheDocument();
     await poll();
     expect(document.querySelector('video')).toBeNull();
 
@@ -1101,24 +1273,26 @@ describe('record more', () => {
     transcript = { takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 10000 }], segments: [...transcript.segments, { id: 't2-line1', startMs: 11000, endMs: 12500, text: 'More words', words: [{ text: 'More', startMs: 11000, endMs: 11600 }, { text: 'words', startMs: 11600, endMs: 12500 }] }] };
     status = { state: 'idle' };
     await poll();
-    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4?v=2-20000'));
+    // Take 1's video loads as it was, with no version; the timeline runs over both takes.
+    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
+    expect(screen.getByLabelText(NAMES.playbackPosition)).toHaveAttribute('max', '20000');
     expect(transcriptPane().getByText('Take 2 · 0:10')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Seek to More at 0:11' })).not.toHaveAttribute('aria-disabled');
+    // A word of the new take plays the new take's own video.
+    await user.click(screen.getByRole('button', { name: 'Seek to More at 0:11' }));
+    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/takes/2/video.mp4');
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
     expect(screen.getByRole('button', { name: NAMES.copyForAgent })).toBeEnabled();
   });
-  it('keeps the recording playable and restores playback when Record more fails', async () => {
-    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  it('keeps the recording loaded where it was when Record more fails', async () => {
     const user = await review();
     await user.click(screen.getByRole('button', { name: 'Seek to here at 0:02' }));
-    const media = document.querySelector('video');
+    const media = document.querySelector('video')!;
     backend.recordMore.mockRejectedValueOnce('Record more needs a playable recording.');
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
     expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
-    await waitFor(() => expect(document.querySelector('video')).not.toBe(media));
-    const restored = document.querySelector('video')!;
-    expect(restored).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
-    fireEvent.loadedMetadata(restored); expect(restored.currentTime).toBe(2.5);
+    expect(document.querySelector('video')).toBe(media);
+    expect(media).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+    expect(media.currentTime).toBe(2.5);
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
   });
   it('refuses Record more with an unavailable microphone and leaves the video loaded', async () => {
@@ -1136,199 +1310,257 @@ describe('record more', () => {
     expect(document.querySelector('video')).toBe(media);
     expect(media).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
   });
-  it('restores a take that is recording after a restart, with the saved takes before its live tail', async () => {
-    sessions = [takeTwo(newSession())];
+  it('keeps Record more off while the bar\'s source is unavailable, and says why under the bar', async () => {
+    backend.sources.mockResolvedValue([{ id: 'display1', name: 'Display 1', kind: 'display', available: true }, { id: 'quest-offline', name: 'Quest disconnected', kind: 'quest', available: false, detail: 'Reconnect the USB cable and authorize USB debugging on the headset, then refresh.' }]);
+    const user = await review();
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    await user.click(bar.getByRole('button', { name: 'Display 1' }));
+    await chooseSource(user, NAMES.unavailableSource('Quest disconnected'));
+    expect(bar.getByRole('button', { name: NAMES.recordMore })).toBeDisabled();
+    (document.activeElement as HTMLElement).blur();
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await bar.findByRole('alert')).toHaveTextContent('authorize USB debugging');
+    expect(backend.recordMore).not.toHaveBeenCalled();
+    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+  });
+  it('restores a take that is recording after a restart, with its own source and the saved takes before its live tail', async () => {
+    const session = takeTwo(newSession());
+    session.takes![1].sourceId = 'quest1';
+    sessions = [session];
     status = { state: 'recording', sessionId: 's1', elapsedMs: 4000, takeIndex: 2, takeOffsetMs: 10000, liveTranscript: { segments: [{ startMs: 11000, endMs: 12000, text: 'Again', words: [{ text: 'Again', startMs: 11000, endMs: 12000 }] }] } };
     render(<App platform="windows"/>);
     expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toHaveTextContent('00:04');
     expect(await screen.findByRole('button', { name: 'Seek to Again at 0:11' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: 'Seek to here at 0:02' })).toHaveAttribute('aria-disabled', 'true');
     expect(transcriptPane().getByText('Take 2 · recording')).toBeVisible();
+    expect(await within(screen.getByRole('group', { name: NAMES.recordingControls })).findByRole('button', { name: 'Quest USB' })).toBeDisabled();
   });
-  it('does not load the video while a take is still being appended to it', async () => {
-    sessions = [{ ...takeTwo(newSession(), 'swapping'), status: 'error', error: 'Take 2 is not on the timeline yet. Retry to finish it.' }];
-    const user = await ready();
-    await open(user);
-    expect(await screen.findByRole('button', { name: NAMES.retryTranscription })).toBeEnabled();
-    expect(document.querySelector('video')).toBeNull();
-    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: NAMES.retryTranscription }));
-    expect(backend.retry).toHaveBeenCalledWith('s1');
-    sessions = [takeTwo(newSession(), 'ready')]; status = { state: 'idle' };
-    await poll();
-    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4?v=2-20000'));
-  });
-  it('discards a take that cannot be added once confirmed, then reloads the transcript and the video', async () => {
-    const stuck: Session = { ...takeTwo(newSession(), 'swapping'), status: 'error', error: "video.mp4 lasts 12000 ms, which matches neither the recording before take 2 (10000 ms) nor the recording with it (20000 ms). The take's files are kept in takes/2; discard the take to keep using the recording." };
-    sessions = [stuck];
-    const user = await ready(); await open(user);
-    const discard = await transcriptPane().findByRole('button', { name: NAMES.discardTake(2) });
-    expect(transcriptPane().getByRole('button', { name: NAMES.retryTranscription })).toBeEnabled();
-    expect(document.querySelector('video')).toBeNull();
-    expect(screen.getByRole('heading', { name: 'Take 2 is not in the video yet' })).toBeVisible();
-
-    // Cancel changes nothing and hands focus back to the button.
-    await user.click(discard);
-    const dialog = screen.getByRole('alertdialog', { name: NAMES.discardTakeDialog(2) });
-    expect(dialog).toHaveAccessibleDescription('Its recording stays in the session folder but is removed from the timeline.');
-    expect(within(dialog).getByRole('button', { name: NAMES.cancel })).toHaveFocus();
-    await user.click(within(dialog).getByRole('button', { name: NAMES.cancel }));
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
-    expect(discard).toHaveFocus();
-    expect(backend.discardTake).not.toHaveBeenCalled();
-
-    // Confirming drops take 2: the transcript is read again and video.mp4 loads under a new version.
-    backend.discardTake.mockImplementationOnce(async () => {
-      const next: Session = structuredClone({ ...stuck, status: 'ready', error: undefined });
-      next.takes![1].status = 'interrupted';
-      sessions = [next];
-      transcript = { segments: [{ id: 'line1', text: 'Kept words', startMs: 1000, endMs: 4000, words: [{ text: 'Kept', startMs: 1000, endMs: 1800 }, { text: 'words', startMs: 2500, endMs: 3500 }] }] };
-      return next;
-    });
-    const reads = backend.transcript.mock.calls.length;
-    await user.click(discard);
-    await user.click(within(screen.getByRole('alertdialog', { name: NAMES.discardTakeDialog(2) })).getByRole('button', { name: NAMES.discardTake(2) }));
-    expect(backend.discardTake).toHaveBeenCalledWith('s1', 2);
-    expect(await screen.findByRole('button', { name: 'Seek to Kept at 0:01' })).toBeVisible();
-    expect(backend.transcript).toHaveBeenCalledTimes(reads + 1);
-    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4?v=2-10000');
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: NAMES.discardTake(2) })).not.toBeInTheDocument();
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    // The button has gone with the error: focus moves to Record more, which works again.
-    const more = screen.getByRole('button', { name: NAMES.recordMore });
-    expect(more).toBeEnabled();
-    expect(more).toHaveFocus();
-    expect(await screen.findByText('Take 2 discarded')).toBeVisible();
-  });
-  it('keeps the discard confirmation open with the refusal, and the video unloaded', async () => {
-    sessions = [{ ...takeTwo(newSession(), 'swapping'), status: 'error', error: 'Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.' }];
-    let refuse!: (reason: string) => void;
-    backend.discardTake.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
-    const user = await ready(); await open(user);
-    const discard = await transcriptPane().findByRole('button', { name: NAMES.discardTake(2) });
-    await user.click(discard);
-    const dialog = screen.getByRole('alertdialog', { name: NAMES.discardTakeDialog(2) });
-    await user.click(within(dialog).getByRole('button', { name: NAMES.discardTake(2) }));
-    // While it works, the choice is locked and Escape does not close the dialog.
-    expect(within(dialog).getByRole('button', { name: 'Discarding…' })).toBeDisabled();
-    expect(within(dialog).getByRole('button', { name: NAMES.cancel })).toBeDisabled();
-    await user.keyboard('{Escape}');
-    expect(dialog).toBeInTheDocument();
-    await act(async () => refuse('Finish recording and processing before changing this recording.'));
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Finish recording and processing before changing this recording.');
-    expect(within(dialog).getByRole('button', { name: NAMES.discardTake(2) })).toBeEnabled();
-    expect(document.querySelector('video')).toBeNull();
-    await user.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
-    expect(discard).toHaveFocus();
-    expect(transcriptPane().getByText('Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.')).toBeVisible();
-  });
-  it('records more from the bar under the playback controls, with its microphone and the session\'s locked source', async () => {
-    backend.recordMore.mockImplementation(async (id: string) => { sessions = sessions.map(item => item.id === id ? takeTwo(item) : item); status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 }; return takeTwo(newSession(id)); });
-    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  it('records more from the bar under the playback controls, with the source and microphone chosen there', async () => {
+    backend.sources.mockResolvedValue([{ id: 'display1', name: 'Display 1', kind: 'display', available: true }, figma]);
+    backend.recordMore.mockImplementation(recordTakeTwo);
+    // Recorded from Quest: opening it leaves the bar on the app's own choice.
+    sessions = [{ ...newSession(), sourceId: 'quest1' }];
     const user = await review();
     // The playback row holds no Record more; the recording bar under it does.
     expect(within(screen.getByRole('group', { name: NAMES.playback })).queryByRole('button', { name: NAMES.recordMore })).not.toBeInTheDocument();
     const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
     const source = bar.getByRole('button', { name: 'Display 1' });
-    expect(source).toHaveAttribute('aria-disabled', 'true');
-    expect(source).toHaveAccessibleDescription('Record more records this session\'s own source');
-    // Focusable, so the keyboard reaches it, but it opens no picker.
-    source.focus(); await user.keyboard('{Enter}');
-    expect(source).toHaveFocus();
-    expect(screen.queryByRole('group', { name: NAMES.captureSources })).not.toBeInTheDocument();
+    expect(source).not.toHaveAttribute('aria-disabled');
+    // The source picker opens as in a new recording, with system audio beside the sources.
+    await user.click(source);
+    await chooseSource(user, figma.name);
+    await user.click(bar.getByRole('button', { name: figma.name }));
+    await user.click(screen.getByLabelText(NAMES.includeSystemAudio)); await user.keyboard('{Escape}');
     await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
     await chooseMicrophone(user, 'mic2');
     await user.click(bar.getByRole('button', { name: NAMES.recordMore }));
     expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toBeVisible();
-    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic2', false, false);
-    // While the take records, the dock takes the bar's place.
+    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'window:42', 'mic2', true, false);
+    // While the take records, the dock takes the bar's place and names the window it records.
     expect(screen.queryByRole('group', { name: NAMES.recordingBar })).not.toBeInTheDocument();
-    expect(screen.getByRole('group', { name: NAMES.recordingControls })).toBeVisible();
+    const dock = within(screen.getByRole('group', { name: NAMES.recordingControls }));
+    expect(dock.getByRole('button', { name: figma.name })).toBeDisabled();
   });
-  it('names the session\'s source in the bar as the original source once it is no longer listed', async () => {
-    sessions = [{ ...newSession(), sourceId: 'window:42' }];
-    await review();
-    const source = within(screen.getByRole('group', { name: NAMES.recordingBar })).getByRole('button', { name: 'Original source' });
-    expect(source).toHaveAttribute('aria-disabled', 'true');
-    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
-  });
-  it('never names the session\'s source after a listed window or display that may only share its id', async () => {
-    // After a restart a window handle or display number can name something else, and the listing cannot tell.
-    backend.sources.mockResolvedValue([
-      { id: 'monitor:1', name: 'Display 1 — DELL U2720Q', kind: 'display', available: true },
-      { id: 'window:42', name: 'Inbox — Mail', kind: 'window', available: true, detail: 'Mail.exe' },
-    ]);
-    const identity = { kind: 'window' as const, title: 'Design review — Figma', process: 'Figma.exe', class: 'Chrome_WidgetWin_1', pid: 4120 };
-    const screenTwo = { kind: 'display' as const, device: '\\\\.\\DISPLAY2', left: 0, top: 0, right: 2560, bottom: 1440 };
-    sessions = [{ ...newSession(), sourceId: 'window:42', sourceIdentity: identity }, { ...newSession('s3'), name: 'Review Beta', sourceId: 'monitor:1', sourceIdentity: screenTwo },
-      { ...newSession('s4'), name: 'Review Gamma', sourceId: 'monitor:1' }];
+  it('shows a refusal under the recording bar, with another source or New recording as the way forward', async () => {
+    backend.sources.mockResolvedValue([{ id: 'display1', name: 'Display 1', kind: 'display', available: true }, figma]);
     const user = await review();
-    const bar = () => within(screen.getByRole('group', { name: NAMES.recordingBar }));
-    // A window is named by the title the session stored, not by the window that has its handle now.
-    expect(bar().getByRole('button', { name: 'Design review — Figma' })).toHaveAttribute('aria-disabled', 'true');
-    expect(bar().queryByRole('button', { name: 'Inbox — Mail' })).not.toBeInTheDocument();
-    // A display is named by the device the session stored, not by the display that has its number now.
-    await open(user, /Review Beta/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
-    expect(bar().getByRole('button', { name: 'Display 2' })).toHaveAttribute('aria-disabled', 'true');
-    expect(bar().queryByRole('button', { name: /DELL/ })).not.toBeInTheDocument();
-    // Without a stored identity it is the original source.
-    await open(user, /Review Gamma/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
-    expect(bar().getByRole('button', { name: 'Original source' })).toHaveAttribute('aria-disabled', 'true');
-    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
-  });
-  it('shows a source that is gone under the recording bar, with New recording as the way forward', async () => {
-    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
-    const user = await review();
-    backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
-    await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
     const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    await user.click(bar.getByRole('button', { name: 'Display 1' }));
+    await chooseSource(user, figma.name);
+    // The window closed after it was listed.
+    backend.recordMore.mockRejectedValueOnce(WINDOW_CLOSED);
+    await user.click(bar.getByRole('button', { name: NAMES.recordMore }));
     const message = await bar.findByRole('alert');
-    expect(message).toHaveTextContent(SOURCE_GONE);
+    expect(message).toHaveTextContent(WINDOW_CLOSED);
     // Under the bar only, not repeated in the workspace banner; Record more is described by it.
     expect(screen.getAllByRole('alert')).toEqual([message]);
-    expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(SOURCE_GONE);
-    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
+    expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(WINDOW_CLOSED);
+    // The video stays playable.
+    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+    expect(screen.getByRole('button', { name: NAMES.play })).toBeEnabled();
 
     // Dismissing hides it; the next refusal brings it back.
     await user.click(within(message).getByRole('button', { name: NAMES.dismissError }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription('Record more (Ctrl+R): continue this session as a new take');
-    backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
+    backend.recordMore.mockRejectedValueOnce(WINDOW_CLOSED);
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
     const again = await bar.findByRole('alert');
 
-    // New recording opens a draft, where another source can be chosen.
+    // New recording opens a draft instead.
     await user.click(within(again).getByRole('button', { name: NAMES.newRecording }));
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(NAMES.newRecording);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: NAMES.record })).toHaveFocus();
     expect(backend.start).not.toHaveBeenCalled();
-    // Coming back to the recording starts without the old message.
+    // Coming back to the recording starts without the old message, and another source records more.
     await open(user); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const reopened = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    await user.click(reopened.getByRole('button', { name: figma.name }));
+    await chooseSource(user, 'Display 1');
+    backend.recordMore.mockImplementationOnce(recordTakeTwo);
+    await user.click(reopened.getByRole('button', { name: NAMES.recordMore }));
+    expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toBeVisible();
+    expect(backend.recordMore).toHaveBeenLastCalledWith('s1', 'display1', 'mic1', false, false);
   });
   it('keeps focus on Record more while its take starts and after a refusal', async () => {
-    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
     let refuse!: (reason: string) => void;
     backend.recordMore.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
     const user = await review();
+    const media = document.querySelector('video');
     const more = screen.getByRole('button', { name: NAMES.recordMore });
     more.focus(); await user.keyboard('{Enter}');
-    // The video is unloaded meanwhile, but the pill is only busy: it stays focusable and ignores activation.
-    expect(document.querySelector('video')).toBeNull();
+    // The video stays loaded meanwhile, and the pill is only busy: it stays focusable and ignores activation.
+    expect(document.querySelector('video')).toBe(media);
     expect(more).toBeEnabled();
     expect(more).toHaveAttribute('aria-disabled', 'true');
     expect(more).toHaveFocus();
     await user.keyboard('{Enter}');
     expect(backend.recordMore).toHaveBeenCalledOnce();
-    await act(async () => refuse(SOURCE_GONE));
-    expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent(SOURCE_GONE);
+    await act(async () => refuse(WINDOW_CLOSED));
+    expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent(WINDOW_CLOSED);
     expect(more).not.toHaveAttribute('aria-disabled');
     expect(more).toHaveFocus();
-    expect(more).toHaveAccessibleDescription(SOURCE_GONE);
-    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
+    expect(more).toHaveAccessibleDescription(WINDOW_CLOSED);
+    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+  });
+});
+
+describe('take playback', () => {
+  // Take 1 from a display and take 2 from a window, each in its own video.
+  const twoTakes = () => {
+    sessions = [takeTwo(newSession(), 'ready')];
+    sessions[0].takes![1].sourceId = figma.id;
+    transcript = { takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 10000 }], segments: [...transcript.segments, { id: 't2-line1', startMs: 11000, endMs: 12500, text: 'More words', words: [{ text: 'More', startMs: 11000, endMs: 11600 }, { text: 'words', startMs: 11600, endMs: 12500 }] }] };
+  };
+  const TAKE_ONE = 'asset://C:/recordings/video.mp4';
+  const TAKE_TWO = 'asset://C:/recordings/takes/2/video.mp4';
+  const position = () => screen.getByLabelText(NAMES.playbackPosition);
+  /** jsdom media never plays: this says whether the element is paused, as a playing video would. */
+  const setPaused = (media: HTMLMediaElement, paused: boolean) => Object.defineProperty(media, 'paused', { configurable: true, get: () => paused });
+  /** The video reaches its end: it pauses as ended, then fires ended. */
+  const finish = (media: HTMLMediaElement) => {
+    Object.defineProperty(media, 'ended', { configurable: true, get: () => true });
+    setPaused(media, true); fireEvent.pause(media); fireEvent.ended(media);
+    Object.defineProperty(media, 'ended', { configurable: true, get: () => false });
+  };
+
+  it('plays on from one take\'s video into the next', async () => {
+    twoTakes();
+    const user = await review();
+    const media = document.querySelector('video')!;
+    expect(media).toHaveAttribute('src', TAKE_ONE);
+    fireEvent.loadedMetadata(media);
+    // The time and the scrubber run over the session, not take 1's video alone.
+    expect(position()).toHaveAttribute('max', '20000');
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('/ 0:20');
+    const play = vi.mocked(HTMLMediaElement.prototype.play);
+    await user.click(screen.getByRole('button', { name: NAMES.play }));
+    fireEvent.play(media); setPaused(media, false);
+    media.currentTime = 9.5; fireEvent.timeUpdate(media);
+    expect(position()).toHaveValue('9500');
+
+    // Take 1's video ends: the same player loads take 2's and plays it from its start.
+    play.mockClear();
+    finish(media);
+    expect(document.querySelector('video')).toBe(media);
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    expect(position()).toHaveValue('10000');
+    media.currentTime = 7; fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(0);
+    expect(play.mock.contexts).toEqual([media]);
+    fireEvent.play(media); setPaused(media, false);
+    media.currentTime = 1.5; fireEvent.timeUpdate(media);
+    expect(position()).toHaveValue('11500');
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:11 / 0:20');
+    expect(screen.getByRole('button', { name: 'Seek to More at 0:11' })).toHaveAttribute('aria-current', 'true');
+
+    // The last take's end ends playback.
+    finish(media);
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    expect(screen.getByRole('button', { name: NAMES.play })).toBeEnabled();
+    expect(play.mock.calls).toHaveLength(1);
+
+    // Paused at take 1's end by a seek, the next take shows without playing.
+    fireEvent.change(position(), { target: { value: '9999' } });
+    fireEvent.loadedMetadata(media);
+    finish(media);
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    fireEvent.loadedMetadata(media);
+    expect(play.mock.calls).toHaveLength(1);
+  });
+  it('seeks into another take\'s video from the scrubber and the transcript', async () => {
+    twoTakes();
+    const user = await review();
+    const media = document.querySelector('video')!;
+    fireEvent.loadedMetadata(media);
+    // Playing take 1.
+    fireEvent.play(media); setPaused(media, false);
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear();
+
+    // A word of take 2 loads take 2's video at that moment, and playback goes on.
+    await user.click(screen.getByRole('button', { name: 'Seek to More at 0:11' }));
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    expect(position()).toHaveValue('11000');
+    // Until it has loaded, the old video's time does not move the playhead.
+    media.currentTime = 0; fireEvent.timeUpdate(media);
+    expect(position()).toHaveValue('11000');
+    fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(1);
+    expect(play).toHaveBeenCalledOnce();
+
+    // Inside the loaded take, the scrubber moves its own video.
+    fireEvent.change(position(), { target: { value: '12000' } });
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    expect(media.currentTime).toBe(2);
+
+    // The scrubber back into take 1 shows take 1's video again, still playing.
+    fireEvent.change(position(), { target: { value: '2500' } });
+    expect(media).toHaveAttribute('src', TAKE_ONE);
+    fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(2.5);
+    expect(position()).toHaveValue('2500');
+    expect(play).toHaveBeenCalledTimes(2);
+
+    // Pausing while another take's video loads keeps it paused once it is in.
+    await user.click(screen.getByRole('button', { name: 'Seek to More at 0:11' }));
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    // A new source leaves the element paused, with no pause event.
+    setPaused(media, true);
+    await user.click(screen.getByRole('button', { name: NAMES.pause }));
+    expect(screen.getByRole('button', { name: NAMES.play })).toBeEnabled();
+    fireEvent.loadedMetadata(media);
+    expect(play).toHaveBeenCalledTimes(2);
+    fireEvent.change(position(), { target: { value: '2500' } });
+    fireEvent.loadedMetadata(media);
+
+    // Paused, a seek into take 2 shows that moment without playing.
+    setPaused(media, true); fireEvent.pause(media);
+    fireEvent.change(position(), { target: { value: '15000' } });
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(5);
+    expect(play).toHaveBeenCalledTimes(2);
+  });
+  it('opens a search result in the take video its line falls in', async () => {
+    twoTakes();
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'more words');
+    const line = await within(dialog).findByRole('option', { name: /More words/ });
+    await waitFor(() => expect(line).toHaveAttribute('aria-selected', 'true'));
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: 'Seek to More at 0:11' });
+    const media = document.querySelector('video')!;
+    // Take 1's video loads first; the line at 0:11 is in take 2's, shown paused at that moment.
+    fireEvent.loadedMetadata(media);
+    expect(media).toHaveAttribute('src', TAKE_TWO);
+    fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(1);
+    expect(position()).toHaveValue('11000');
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
   });
 });
 
@@ -1563,7 +1795,7 @@ describe('local setup recovery and request races', () => {
 describe('reload keys, device readiness and request races', () => {
   it('never lets Ctrl+R or F5 reach the webview, in a field, a picker or a dialog, and records with the physical R key', async () => {
     const user = await ready();
-    const search = screen.getByRole('searchbox', { name: NAMES.searchRecordings });
+    const search = textField();
     expect(press(search, { key: 'r', code: 'KeyR', ctrlKey: true })).toBe(true);
     expect(press(search, { key: 'F5', code: 'F5' })).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Display 1' }));
@@ -1602,7 +1834,7 @@ describe('reload keys, device readiness and request races', () => {
     await waitFor(() => expect(more).toBeEnabled());
     await user.click(more);
     expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toBeVisible();
-    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic1', false, false);
+    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'display1', 'mic1', false, false);
   });
 
   it('attributes a background transcription to its own recording, not to the one that is open', async () => {

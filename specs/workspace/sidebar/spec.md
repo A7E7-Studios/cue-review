@@ -68,7 +68,7 @@ menu key reaches it from the keyboard.
 - **THEN** the sidebar's menu opens with "New session" and "New section" disabled, and "New
   session" in the sidebar is dimmed
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu opens the sidebar menu with both items disabled while recording
-- **PROOF** test: src/App.test.tsx::record more unloads the video before recording a take, shows it live, and reloads the video with a cache-buster once processing ends
+- **PROOF** test: src/App.test.tsx::record more pauses the video before recording a take, shows it live, and plays the new take once processing ends
 - **PROOF** desk: open
 
 ### Requirement: Move to section is a submenu
@@ -128,7 +128,7 @@ sidebar.
 
 ### Requirement: A section heading starts a session in that section
 The app SHALL show a + at the right of a section heading while the pointer is over the heading or
-keyboard focus is in it, and not while a recording is in progress or a search filters the sidebar,
+keyboard focus is in it, and not while a recording is in progress,
 starting a new session that is filed in that section when it records, because a person often records
 straight into the section they are looking at.
 
@@ -146,9 +146,3 @@ straight into the section they are looking at.
 - **WHEN** the person points at a section heading
 - **THEN** no + appears
 - **PROOF** test: src/Sidebar.test.tsx::hides the new-session button while recording
-
-#### Scenario: The + is hidden while searching
-- **GIVEN** a search filters the sidebar
-- **WHEN** the person points at a section heading
-- **THEN** no + appears
-- **PROOF** test: src/Sidebar.test.tsx::hides the new-session button while a search filters the sidebar

@@ -66,6 +66,19 @@ test('Space activates the focused menu action', async () => {
 });
 
 describe('Float v2 sidebar', () => {
+  test('offers Search under New session, with its shortcut hidden from the name', async () => {
+    const user = userEvent.setup();
+    const onSearch = vi.fn();
+    const { rerender } = renderSidebar({ onSearch });
+    const search = screen.getByRole('button', { name: 'Search' });
+    expect(search).toHaveAttribute('aria-keyshortcuts', 'Control+K');
+    expect(search.querySelector('kbd')).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByRole('button', { name: 'New session' }).nextElementSibling).toBe(search);
+    await user.click(search);
+    expect(onSearch).toHaveBeenCalledTimes(1);
+    rerender({ locked: true });
+    expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled();
+  });
   test('puts New session alone at the top with a plus, and hides the shortcut hint from the name', () => {
     renderSidebar({platform: 'windows'});
     const tools = document.querySelector<HTMLElement>('.side-tools')!;
@@ -114,41 +127,6 @@ describe('Float v2 sidebar', () => {
     expect(screen.getByRole('button', {name:'Library review, processing'}).querySelector('.session-status-dot')).toHaveAttribute('data-status', 'processing');
     rerender({sessions: [{...session, status: 'ready'}]});
     expect(screen.getByRole('button', {name:'Library review'}).querySelector('.session-status-dot')).toBeNull();
-  });
-
-  test('filters by session name, opens collapsed sections for matches, and leaves the saved state alone', async () => {
-    const user = userEvent.setup();
-    const other: Session = {...session, id: 'other', projectId: null, name: 'Export dialog'};
-    const {rerender} = renderSidebar({sessions: [session, other]});
-    await user.click(screen.getByRole('button', {name:'Workspace'}));
-    expect(JSON.parse(localStorage.getItem('cuereview.closedSections')!)).toEqual(['work']);
-
-    rerender({sessions: [session, other], filter: '  LIBRARY '});
-    expect(screen.getByRole('button', {name:'Workspace'})).toHaveAttribute('aria-expanded', 'true');
-    expect(within(screen.getByRole('region', {name:'Section: Workspace'})).getByRole('button', {name:'Library review'})).toBeVisible();
-    expect(screen.queryByRole('button', {name:'Export dialog'})).not.toBeInTheDocument();
-    expect(screen.queryByRole('region', {name:'Recents'})).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', {name:'Workspace'}));
-    expect(screen.getByRole('button', {name:'Workspace'})).toHaveAttribute('aria-expanded', 'false');
-    expect(JSON.parse(localStorage.getItem('cuereview.closedSections')!)).toEqual(['work']);
-
-    rerender({sessions: [session, other], filter: 'export'});
-    expect(screen.queryByRole('region', {name:'Section: Workspace'})).not.toBeInTheDocument();
-    expect(within(screen.getByRole('region', {name:'Recents'})).getByRole('button', {name:'Export dialog'})).toBeVisible();
-
-    rerender({sessions: [session, other], filter: ''});
-    expect(screen.getByRole('button', {name:'Workspace'})).toHaveAttribute('aria-expanded', 'false');
-  });
-
-  test('announces No matches when the filter finds nothing', () => {
-    const {rerender} = renderSidebar();
-    const status = screen.getByRole('status');
-    expect(status).toBeEmptyDOMElement();
-    rerender({filter: 'quest'});
-    expect(status).toHaveTextContent('No matches');
-    expect(screen.queryByRole('region')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', {name:'New session'})).toBeEnabled();
   });
 
   test('renders the Hide sidebar button unless showCollapse is false', async () => {
@@ -368,12 +346,6 @@ describe('making sections and sessions from the sidebar', () => {
     await user.click(add);
     expect(onNewInSection).toHaveBeenCalledWith('work');
     expect(screen.getByRole('button', { name: 'Workspace' })).toHaveAttribute('aria-expanded', 'true');
-  });
-  test('hides the new-session button while a search filters the sidebar', () => {
-    const { rerender } = renderSidebar({ onNewInSection: vi.fn() });
-    rerender({ filter: 'library' });
-    expect(screen.getByRole('button', { name: 'Library review' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'New session in Workspace' })).not.toBeInTheDocument();
   });
   test('hides the new-session button while recording', () => {
     const { rerender } = renderSidebar({ onNewInSection: vi.fn() });

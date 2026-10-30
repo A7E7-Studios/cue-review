@@ -32,10 +32,10 @@
 .side-collapse { width: 30px; height: 26px; flex: none; margin-left: auto; padding: 0; display: grid; place-items: center; border-radius: 7px; color: var(--color-text-secondary); }
 .side-collapse:hover { background: var(--color-row-hover); color: var(--color-text); }
 
-.sidebar .side-tools { display: flex; align-items: center; gap: 6px; flex: none; min-height: 0; margin: 0; color: var(--color-text-secondary); }
+.sidebar .side-tools { display: flex; flex-direction: column; align-items: stretch; gap: 2px; flex: none; min-height: 0; margin: 0; color: var(--color-text-secondary); }
 /* A plain row, like a session row: the plus says "new", and no red dot suggests it starts recording. */
 .sidebar .side-tools .new-session {
-  flex: 1;
+  flex: none;
   min-width: 0;
   height: var(--size-new-recording);
   display: flex;

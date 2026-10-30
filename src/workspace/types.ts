@@ -14,11 +14,6 @@ export interface TitleBarProps {
   sidebarVisible: boolean;
   /** Labelled NAMES.hideSidebar or NAMES.showSidebar. */
   onToggleSidebar: () => void;
-  /** Session-name filter for the sidebar (decision 11). */
-  search: string;
-  onSearch: (value: string) => void;
-  /** Ctrl/⌘+K focuses this field. */
-  searchRef?: RefObject<HTMLInputElement | null>;
   onOpenSettings: () => void;
   /** Compact recording mode: only a drag strip, leaving room for the macOS traffic lights. */
   compact?: boolean;
@@ -26,7 +21,7 @@ export interface TitleBarProps {
   maximized?: boolean;
 }
 
-/** The existing Sidebar props, plus the search filter and the collapse control (decision 2). */
+/** The existing Sidebar props, plus the Search row and the collapse control (decision 2). */
 export interface SidebarProps {
   sections: Project[];
   sessions: Session[];
@@ -47,8 +42,8 @@ export interface SidebarProps {
   onDeleteSession: (session: Session) => void;
   onReorder: (ids: string[]) => Promise<boolean>;
   onMove: (sessionId: string, sectionId: string | null) => Promise<boolean>;
-  /** Shows only sessions whose name contains it, case-insensitively, with a NAMES.noMatches state. */
-  filter?: string;
+  /** Opens the search window; shown as the Search row under New session. */
+  onSearch?: () => void;
   /** Render the NAMES.hideSidebar button inside the sidebar (macOS panel). Defaults to true. */
   showCollapse?: boolean;
   /** macOS reserves the traffic-light row at the top of the panel. */
@@ -158,11 +153,6 @@ export interface CaptureControlsProps {
   onRefreshMicrophones: () => void;
   /** Disables the source picker (recording or busy). */
   locked: boolean;
-  /**
-   * Review: the picker shows the session's own source, because a take records the session's source.
-   * It stays focusable but inert (aria-disabled), titled and described by SOURCE_LOCKED.
-   */
-  sourceLocked?: boolean;
   /** Disables the microphone picker. */
   busy: boolean;
   /** Review: Record continues the session as a new take, and its tooltip says so. */
@@ -175,7 +165,7 @@ export interface CaptureControlsProps {
   onRecord: () => void;
   /** Why Record more failed, shown under the bar as an alert, with NAMES.newRecording and NAMES.dismissError. */
   recordMoreError?: string;
-  /** Starts a new recording instead, for a source that is gone. */
+  /** Starts a new recording instead of another take. */
   onNewRecording?: () => void;
   onDismissRecordMoreError?: () => void;
 }
@@ -207,6 +197,8 @@ export interface RecordingDockProps {
 /** The transcript column (decisions 4, 10 and 12). */
 export interface TranscriptPaneProps {
   mode: WorkspaceMode;
+  /** A new value asks for Find (Ctrl/⌘+F): it opens, or its field takes focus. */
+  findRequest?: number;
   /** The saved transcript, or during recording the live one. */
   transcript: Transcript;
   /** Playback time in review, elapsed time on the combined timeline while recording. */
@@ -225,11 +217,8 @@ export interface TranscriptPaneProps {
   error?: string;
   onRetry?: () => void;
   retryDisabled?: boolean;
-  /** Another action is under way: Retry and Discard take stay focusable but inert (aria-disabled). */
+  /** Another action is under way: Retry stays focusable but inert (aria-disabled). */
   retryBusy?: boolean;
-  /** A take stuck being added to video.mp4: the error also offers NAMES.discardTake(discardTake). */
-  discardTake?: number;
-  onDiscardTake?: () => void;
 }
 
 /** Settings → Appearance, capability statuses, technical details and the vocabulary (decision 14, C5). */
@@ -263,6 +252,13 @@ export const NAMES = {
   restoreWindow: 'Restore window',
   closeWindow: 'Close window',
   searchRecordings: 'Search recordings',
+  /** The search window and the sidebar row that opens it. */
+  search: 'Search',
+  searchPlaceholder: 'Search recordings and transcripts',
+  searchResults: 'Search results',
+  searchRecent: 'Recent',
+  searchRecordingsGroup: 'Recordings',
+  searchLinesGroup: 'In transcripts',
   settings: 'Settings',
   showSidebar: 'Show sidebar',
   hideSidebar: 'Hide sidebar',
@@ -349,7 +345,6 @@ export const NAMES = {
   returnToPlayback: 'Return to playback',
   backToLive: 'Back to live',
   retryTranscription: 'Retry transcription',
-  discardTake: (take: number) => `Discard take ${take}`,
 
   // Dialogs and notices
   settingsDialog: 'Settings',
@@ -367,7 +362,6 @@ export const NAMES = {
   recordingNameDialog: 'Recording name',
   deleteRecordingDialog: 'Delete recording?',
   deleteRecording: 'Delete recording',
-  discardTakeDialog: (take: number) => `Discard take ${take}?`,
   dismissError: 'Dismiss error',
 } as const;
 
