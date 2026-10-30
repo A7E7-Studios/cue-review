@@ -10,11 +10,11 @@ if (args.length !== 2 || args[0] !== '--target' || !/^[a-z0-9_-]+$/.test(args[1]
 const bundleDir = join(root, 'src-tauri/target', args[1], 'release/bundle');
 const fixture = join(root, '.local/verify-installed');
 const env = { ...process.env, CUEREVIEW_DATA_DIR: join(root, '.local/verify-bundle-data') };
-function run(command, argv, capture = false) {
-  const result = spawnSync(command, argv, { cwd: root, env, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit', windowsHide: true, timeout: 180_000 });
+function run(command, argv, capture = false, input) {
+  const result = spawnSync(command, argv, { cwd: root, env, input, encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit', windowsHide: true, timeout: 180_000 });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}: ${result.stderr ?? ''}`);
-  return result.stdout;
+  return capture === 'stderr' ? result.stderr : result.stdout;
 }
 function filesIn(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? filesIn(join(dir, entry.name)) : [join(dir, entry.name)]);
@@ -47,6 +47,13 @@ try {
     mountedDmg = mountpoint;
     const app = join(mountpoint, 'CueReview.app');
     run('codesign', ['--verify', '--deep', '--strict', app]);
+    const signature = run('codesign', ['--display', '--verbose=4', app], 'stderr');
+    if (!/\bflags=[^\n]*\bruntime\b/.test(signature)) throw new Error('Packaged macOS app must retain the hardened runtime.');
+    const entitlements = JSON.parse(run('plutil', ['-convert', 'json', '-o', '-', '-'], true,
+      run('codesign', ['--display', '--entitlements', '-', '--xml', app], true)));
+    for (const entitlement of ['com.apple.security.device.camera', 'com.apple.security.device.audio-input']) {
+      if (entitlements[entitlement] !== true) throw new Error(`Packaged macOS app is missing enabled entitlement ${entitlement}.`);
+    }
     resourceDir = join(app, 'Contents/Resources');
     cli = join(resourceDir, 'cue');
     for (const binary of [join(app, 'Contents/MacOS/cuereview'), join(app, 'Contents/MacOS/cue'), cli, ...['whisper-cli', 'whisper-vad-speech-segments'].map(name => join(resourceDir, 'tools/whisper-b5454', name))]) {

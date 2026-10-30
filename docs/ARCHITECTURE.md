@@ -28,9 +28,11 @@ FFmpeg process recordings flush output packets so the startup check can see enco
 waiting for buffered Matroska data. Startup rejects an exited process or output that remains below
 the readiness threshold; scrcpy uses its decoded-frame signal independently of file buffering.
 
-The hardened macOS bundle signs with the camera entitlement from `src-tauri/Entitlements.plist`.
-Its camera usage description explains the request; the entitlement permits macOS to present it,
-and the person's Camera privacy grant still controls access.
+The hardened macOS bundle signs with camera and audio-input entitlements from
+`src-tauri/Entitlements.plist`. Its camera and microphone usage descriptions explain the requests;
+the entitlements permit macOS to present them, and the person's Camera and Microphone privacy
+grants still control access. The installer smoke check inspects the signed bundle for both
+entitlements.
 
 Microphone and system audio have independent clocks. Retain capture offsets against one session origin, preserve silence and discontinuities, and align streams when producing the playback file. A recording must remain in sync when the output device is silent for several seconds. Muting a microphone must write silence without collapsing the timeline.
 

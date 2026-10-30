@@ -2,6 +2,8 @@
 title: Audio tracks
 code:
   - src-tauri/src/capture.rs
+  - src-tauri/Entitlements.plist
+  - scripts/verify-bundle.mjs
 ---
 # Audio tracks
 
@@ -59,3 +61,20 @@ track keeps its length and its place in the take.
 - **THEN** the microphone track is silent for that second
 - **AND** the track keeps the take's length
 - **PROOF** test: src-tauri/src/capture.rs::tests::muted_audio_is_silent_and_keeps_its_length
+
+### Requirement: The macOS bundle permits microphone access
+The hardened macOS app SHALL carry the audio-input entitlement and a microphone usage description,
+because selecting a microphone must allow macOS to request and honor permission to capture it.
+
+#### Scenario: An installed macOS app records the selected microphone
+- **GIVEN** the installed macOS app has microphone permission and an unmuted microphone is selected
+- **WHEN** the person records a take while sound reaches that microphone and stops it
+- **THEN** the microphone track contains the captured sound rather than only silence
+- **AND** the finalized recording plays that sound
+- **PROOF** desk: open
+
+#### Scenario: The macOS installer contains microphone and camera entitlements
+- **WHEN** the macOS installer smoke check inspects the signed app
+- **THEN** it requires both audio-input and camera entitlements to be enabled
+- **AND** an app missing either entitlement fails verification
+- **PROOF** test: scripts/verify-bundle.mjs
