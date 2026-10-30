@@ -89,6 +89,8 @@ than what the recording was called, and rarely in the order it was said.
 - **PROOF** test: src/App.test.tsx::closes the narrow window's sidebar when a line of the open recording is chosen
 - **PROOF** test: src/App.test.tsx::opens a line of the shown recording at its time while another load runs
 - **PROOF** test: src/App.test.tsx::applies only the latest of two lines chosen while loads run
+- **PROOF** test: src/App.test.tsx::drops a search result's time when its load fails
+- **PROOF** test: src/App.test.tsx::says when a recording opened from search cannot be played
 - **PROOF** test: src/search/SearchDialog.test.tsx::pins the first result again when the pinned one leaves
 - **PROOF** test: src/App.test.tsx::opens a line of the recording that is already open at its time
 - **PROOF** test: src/search/SearchDialog.test.tsx::keeps the active result while transcripts arrive

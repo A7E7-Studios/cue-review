@@ -420,6 +420,45 @@ describe('keyboard interaction', () => {
     await waitFor(() => expect(media.currentTime).toBe(3));
     expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:03');
   });
+  it('says when a recording opened from search cannot be played', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    fireEvent.error(document.querySelector('video')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be played');
+  });
+  it('drops a search result\'s time when its load fails', async () => {
+    const user = await review();
+    const media = document.querySelector('video')!;
+    Object.defineProperty(media, 'readyState', { configurable: true, get: () => HTMLMediaElement.HAVE_METADATA });
+    media.currentTime = 7;
+    // A load runs (the row clicked again), then the result's own load fails.
+    let finish!: () => void;
+    backend.session.mockImplementationOnce((id: string) => new Promise(resolve => { finish = () => resolve(sessions.find(item => item.id === id)!); }));
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    backend.session.mockRejectedValueOnce('The recording is busy.');
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    expect(await screen.findByRole('alert')).toHaveTextContent('The recording is busy.');
+    await act(async () => { finish(); });
+    // A later update of the same recording (a rename) does not jump to the stale line.
+    await user.click(screen.getByRole('button', { name: NAMES.recordingOptions }));
+    await user.click(screen.getByRole('menuitem', { name: NAMES.rename }));
+    const field = await screen.findByLabelText(NAMES.nameField);
+    await waitFor(() => expect(field).toHaveFocus());
+    fireEvent.change(field, { target: { value: 'Renamed' } });
+    await user.click(screen.getByRole('button', { name: NAMES.save }));
+    await waitFor(() => expect(backend.renameSession).toHaveBeenCalledWith('s1', 'Renamed'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(media.currentTime).toBe(7);
+  });
   it('searches each transcript as it is when search opens', async () => {
     const user = await ready();
     await user.keyboard('{Control>}k{/Control}');

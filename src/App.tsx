@@ -68,7 +68,8 @@ function sessionSourceOf(session: Session, sources: CaptureSource[]): CaptureSou
 const POLL_MS = 700;
 const POLL_MAX_MS = 10000;
 const pollDelay = (failures: number) => Math.min(POLL_MS * 2 ** failures, POLL_MAX_MS);
-type Playback = { id: string; time: number; playing: boolean };
+/** Where a reloaded or newly opened video should stand; `fromSearch` marks a search result's line, whose load is no reload. */
+type Playback = { id: string; time: number; playing: boolean; fromSearch?: boolean };
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
 const settled = (item: Session) => item.status === 'ready' || item.status === 'error';
 
@@ -195,13 +196,14 @@ export default function App({ platform: requested }: AppProps = {}) {
     });
   }, []);
 
-  const openSession = useCallback(async (id: string) => {
+  /** Opens a recording; resolves true once it is shown, false when superseded or failed. */
+  const openSession = useCallback(async (id: string): Promise<boolean> => {
     const request = ++selection.current;
     restorePlayback.current = null; setDraftSection(null); setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
-      if (request !== selection.current) return;
+      if (request !== selection.current) return false;
       shownId.current = next.id;
       setSession(next); setTranscript(text); setDraft(false); setTime(0); setPlaying(false); setDuration(next.durationMs);
       if (settled(next)) setHeldMedia(current => current === next.id ? null : current);
@@ -212,7 +214,8 @@ export default function App({ platform: requested }: AppProps = {}) {
         setMicrophoneId(take ? take.microphoneId || '' : next.microphoneId || '');
         setSystemAudio(take ? take.systemAudio : next.systemAudio || false);
       }
-    } catch (problem) { if (request === selection.current) report(problem); }
+      return true;
+    } catch (problem) { if (request === selection.current) report(problem); return false; }
     finally { if (request === selection.current) setLoading(false); }
   }, [report, dismissOverlay, setSourceId, setMicrophoneId, setSystemAudio]);
 
@@ -463,11 +466,18 @@ export default function App({ platform: requested }: AppProps = {}) {
       seek(atMs ?? 0);
       return;
     }
-    void openSession(id);
-    const time = (atMs ?? 0) / 1000;
-    // A new source applies the time when it loads; the layout effect below covers the same source.
-    restorePlayback.current = { id, time, playing: false };
-    searchSeek.current = { id, time, request: selection.current };
+    const opening = openSession(id);
+    const request = selection.current, time = (atMs ?? 0) / 1000;
+    // A new source applies a line's time when it loads (a recording starts at 0 anyway); the layout
+    // effect below covers the same source.
+    if (atMs !== undefined) restorePlayback.current = { id, time, playing: false, fromSearch: true };
+    searchSeek.current = { id, time, request };
+    void opening.then(shown => {
+      // A failed load drops what it would have applied; a superseded one leaves the newer choice's.
+      if (shown || request !== selection.current) return;
+      if (searchSeek.current?.request === request) searchSeek.current = null;
+      if (restorePlayback.current?.fromSearch && restorePlayback.current.id === id) restorePlayback.current = null;
+    });
   };
   // When the chosen recording commits, the video it shows is final. If it is the video already
   // there (the same source, shown while another load ran), it does not load again: seek it now.
@@ -703,9 +713,10 @@ export default function App({ platform: requested }: AppProps = {}) {
     onEnded: () => setPlaying(false),
     onClick: () => void togglePlay(),
     onError: () => {
-      const restoring = restorePlayback.current?.id === session?.id;
-      if (restoring) restorePlayback.current = null;
-      if (!releasing.current && !restoring) setError('This recording could not be played. Open its folder to inspect the video file.');
+      // The app's own reload of a video may fail on the way; a search result's video is no reload.
+      const restore = restorePlayback.current?.id === session?.id ? restorePlayback.current : null;
+      if (restore) restorePlayback.current = null;
+      if (!releasing.current && (!restore || restore.fromSearch)) setError('This recording could not be played. Open its folder to inspect the video file.');
     },
   };
 
