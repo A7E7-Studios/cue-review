@@ -237,6 +237,51 @@ describe('Following playback', () => {
     rerender(<TranscriptPane {...props({ timeMs: 90000 })}/>);
     expect(screen.queryByRole('button', { name: 'Return to playback' })).not.toBeInTheDocument();
   });
+  it('offers no return before the playhead reaches the first sentence', () => {
+    const late: Transcript = { ...twoTakeTranscript, segments: twoTakeTranscript.segments.slice(1) };
+    render(<TranscriptPane {...props({ transcript: late, timeMs: 1000 })}/>);
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    expect(screen.queryByRole('button', { name: 'Return to playback' })).not.toBeInTheDocument();
+  });
+  it('returns to the sentence the playhead last passed while it sits in a pause', async () => {
+    const user = userEvent.setup();
+    const scroll = vi.mocked(Element.prototype.scrollIntoView);
+    render(<TranscriptPane {...props({ timeMs: 18000 })}/>);
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    scroll.mockClear();
+    await user.click(screen.getByRole('button', { name: 'Return to playback' }));
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.contexts[0]).toHaveTextContent('The import action could be closer to the search field.');
+  });
+  it('resumes following when the reader scrolls the playing row back into view', () => {
+    render(<TranscriptPane {...props()}/>);
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    expect(screen.getByRole('button', { name: 'Return to playback' })).toBeVisible();
+    const view = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ x: 0, y: 0, width: 300, height: 400 }));
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    view.mockRestore();
+    expect(screen.queryByRole('button', { name: 'Return to playback' })).not.toBeInTheDocument();
+  });
+  it('resumes following when the reader scrolls back to the newest words while recording', () => {
+    render(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } })}/>);
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    expect(screen.getByRole('button', { name: 'Back to live' })).toBeVisible();
+    const view = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ x: 0, y: 0, width: 300, height: 400 }));
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    view.mockRestore();
+    expect(screen.queryByRole('button', { name: 'Back to live' })).not.toBeInTheDocument();
+  });
+  it('offers Back to live while recording and scrolls to the newest words', async () => {
+    const user = userEvent.setup();
+    const scroll = vi.mocked(Element.prototype.scrollIntoView);
+    render(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } })}/>);
+    fireEvent.wheel(scroller()); fireEvent.scroll(scroller());
+    expect(screen.queryByRole('button', { name: 'Return to playback' })).not.toBeInTheDocument();
+    scroll.mockClear();
+    await user.click(screen.getByRole('button', { name: 'Back to live' }));
+    expect(screen.queryByRole('button', { name: 'Back to live' })).not.toBeInTheDocument();
+    expect(scroll.mock.contexts.at(-1)).toHaveAttribute('data-follow-end');
+  });
   it('ignores its own automatic scrolls', () => {
     render(<TranscriptPane {...props()}/>);
     fireEvent.scroll(scroller());
