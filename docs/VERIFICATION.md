@@ -21,6 +21,18 @@ These do not exercise the integrated app, capture, takes recorded through the UI
 
 `cargo test --lib` and `npm test` need no tools, devices or network. The v0.2.0 additions cover:
 
+Source selection and camera recovery are covered by `src/App.test.tsx`,
+`src/workspace/MediaStage.test.tsx` and `src/app/usePreviewStream.test.tsx`: mixed discovery order,
+stable category priority, unavailable and empty lists, explicit choices across refreshes, missing
+cameras, preview-to-recording orchestration, blocked preview/recording errors, Retry, first-frame
+timeouts and stale callback isolation. `preview::tests` exercises bounded decoder stderr, a flooded
+error pipe, child teardown, the no-viewer timeout, and a real JPEG through the production parser and
+loopback response without opening a camera. Its ignored `preview_decoder_subprocess_fixture` is a
+private helper invoked by these tests, not a hardware check. Storybook's MacSourcePriority,
+MacCameraSelected and MacCameraBlocked stories use the real App with an in-memory backend; the
+blocked story's Retry restores its fixture preview. These checks do not establish real macOS camera
+permission recovery or concurrent preview and recording on physical hardware.
+
 | Area | Covered by |
 | --- | --- |
 | Takes | `takes::tests`: listing and synthesizing take 1, Record more preconditions, starting a take from its own source and restoring the session when capture fails, stopping a take onto the timeline with its own video (or `interrupted`), the take video list and the lookup by session time, a format-1 session with joined takes and the upgrade when a take gets its own video, settling on the first unfinished take, `t{N}-` ids and merging one take, the startup recovery of each take state including a finished `finalizing` take, the upgrade of a format-1 take waiting to be joined (inside `video.mp4`, from its own video, or interrupted, with its leftovers deleted), `discard-take` refusing every take. `orchestration_tests`: Record more refused while busy or without a playable video, a take recording the source it is given into its own folder, the take reported by `get_recording_status`, live snapshots placed on the session timeline, Retry transcribing only the unfinished take. `transcribe::tests`: a session with takes transcribed take by take with each outcome recorded, and take dividers saved when a take fails to transcribe. |

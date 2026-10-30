@@ -36,12 +36,15 @@ export interface MediaStageViewProps extends MediaStageProps {
   children?: ReactNode;
 }
 
+const PREVIEW_FIRST_FRAME_MS = 10_000;
+const PREVIEW_DIMENSION_POLL_MS = 250;
+
 /**
  * The video or live preview with one border, top-aligned under the title and
  * sized to fit the stage in both directions (decision 1). The controls passed as
  * children sit directly under it; unused space stays below them.
  */
-export function MediaStage({ mode, previewUrl, sourceName, previewError, onPreviewError, onRetryPreview, videoSrc, videoKey, videoRef, videoProps, empty, focused = false, children }: MediaStageViewProps) {
+export function MediaStage({ mode, previewUrl, sourceName, previewError, onPreviewError, onPreviewTimeout, onRetryPreview, videoSrc, videoKey, videoRef, videoProps, empty, focused = false, children }: MediaStageViewProps) {
   const stage = useRef<HTMLDivElement>(null);
   const controls = useRef<HTMLDivElement>(null);
   const image = useRef<HTMLImageElement>(null);
@@ -56,16 +59,19 @@ export function MediaStage({ mode, previewUrl, sourceName, previewError, onPrevi
   // A multipart preview stream may not fire `load`; read its size once frames arrive.
   useEffect(() => {
     if (!capture || !previewUrl) return;
-    let tries = 0;
+    const started = Date.now();
     const timer = window.setInterval(() => {
       const frame = image.current;
       if (frame?.naturalWidth && frame.naturalHeight) {
         setMeasured({ url: previewUrl, aspect: mediaAspect(frame.naturalWidth, frame.naturalHeight) });
         window.clearInterval(timer);
-      } else if (++tries > 40) window.clearInterval(timer);
-    }, 250);
+      } else if (Date.now() - started >= PREVIEW_FIRST_FRAME_MS) {
+        window.clearInterval(timer);
+        onPreviewTimeout?.(previewUrl);
+      }
+    }, PREVIEW_DIMENSION_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [capture, previewUrl]);
+  }, [capture, previewUrl, onPreviewTimeout]);
 
   const { onLoadedMetadata, ...forwarded } = videoProps ?? {};
   const style = { '--cr-media-aspect': String(aspect), ...(fitted ? { width: fitted.width, height: fitted.height } : {}) } as CSSProperties;
@@ -75,7 +81,7 @@ export function MediaStage({ mode, previewUrl, sourceName, previewError, onPrevi
     <section className="cr-media" aria-label={capture ? NAMES.capturePreview : NAMES.recordingVideo} data-live={live || undefined} data-fitted={fitted ? '' : undefined} style={style}>
       {capture
         ? previewUrl
-          ? <img ref={image} className="preview-image" src={previewUrl} alt={NAMES.livePreview(sourceName || 'capture source')} onLoad={event => remember(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} onError={onPreviewError}/>
+          ? <img key={previewUrl} ref={image} className="preview-image" src={previewUrl} alt={NAMES.livePreview(sourceName || 'capture source')} onLoad={event => remember(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} onError={onPreviewError}/>
           : <EmptyMedia state={fallback}/>
         : videoSrc
           ? <video key={videoKey} ref={videoRef} playsInline preload="metadata" {...forwarded} src={videoSrc}

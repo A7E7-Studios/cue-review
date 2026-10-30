@@ -148,7 +148,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const mode: WorkspaceMode = recording ? 'recording' : draft ? 'draft' : 'review';
   const locked = recording || busy;
   const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
-  const { preview, previewError, onPreviewError } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
+  const { preview, previewError, onPreviewError, onPreviewTimeout } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
   /** The video stays unloaded while a later take records or its video is finished. */
   const mediaHeld = takeInFlight(session);
   // Each take keeps its own video; one <video> plays the one the session time falls in.
@@ -754,7 +754,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       {errorBanner}
       {setupBanner}
       <MediaStage mode={mode} previewUrl={preview || undefined} sourceName={source?.name} previewError={previewError || undefined}
-        onPreviewError={onPreviewError} onRetryPreview={() => setPreviewRevision(value => value + 1)}
+        onPreviewError={onPreviewError} onPreviewTimeout={onPreviewTimeout} onRetryPreview={() => setPreviewRevision(value => value + 1)}
         videoSrc={videoSrc} videoKey={`${session?.id}:${mediaRevision}`} videoRef={video} videoProps={videoProps} empty={empty}
         focused={focusVideo && mode === 'review'}>
         {controls}

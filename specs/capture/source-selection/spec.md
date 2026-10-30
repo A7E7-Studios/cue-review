@@ -2,7 +2,6 @@
 title: Capture source selection
 code:
   - src/app/useCaptureDevices.ts
-  - src-tauri/src/capture.rs
 ---
 # Capture source selection
 
