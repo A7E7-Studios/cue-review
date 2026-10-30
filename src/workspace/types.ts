@@ -268,6 +268,7 @@ export const NAMES = {
   // Sidebar
   recordings: 'Recordings',
   newRecording: 'New recording',
+  newSession: 'New session',
   newSection: 'New section',
   /** The menu item that names a new section in a dialog. */
   newSectionItem: 'New section…',
@@ -278,6 +279,7 @@ export const NAMES = {
   recordingOptions: 'Recording options',
   recordingActions: 'Recording actions',
   sectionActions: 'Section actions',
+  sidebarActions: 'Sidebar actions',
   moveToSection: 'Move to section',
   rename: 'Rename',
   moveUp: 'Move up',

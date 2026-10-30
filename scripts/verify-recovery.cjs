@@ -93,7 +93,7 @@ async function verifyWord(word, index, label) {
   return { text: word.text, expectedMs, originalStartMs: word.startMs, actualSeconds };
 }
 async function verifyNativeSourceControls() {
-  await sidebar().getByRole('button', { name: 'New recording', exact: true }).click();
+  await sidebar().getByRole('button', { name: 'New session', exact: true }).click();
   await page.locator('.mic-trigger').click();
   await page.getByRole('group', { name: 'Microphone options', exact: true }).getByRole('button', { name: 'No microphone', exact: true }).click();
   await page.locator('.source-trigger').click();
