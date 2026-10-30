@@ -18,8 +18,8 @@ speed and Focus video, which gives the video the whole window.
 
 ### Requirement: Playback speed is chosen from a list
 The app SHALL show the playback speed on a button of fixed width that opens a list of 0.5×, 0.75×,
-1× (Normal), 1.25×, 1.5×, 1.75× and 2× with a check on the current speed, because a button that
-cycled on each click and changed width with its label hid the choices and felt unpolished.
+1× (Normal), 1.25×, 1.5×, 1.75× and 2× with a check on the current speed, because a control that
+changes width moves the controls beside it, and a list shows every choice at once.
 
 #### Scenario: A person chooses a playback speed
 - **GIVEN** a recording plays at 1×
@@ -60,8 +60,7 @@ app restarts, because a person who reviews at 1.5× reviews every recording at 1
 ### Requirement: Focus video hides both sidebars
 The app SHALL hide both the sidebar of recordings and the transcript with one Focus video toggle
 that keeps its icon and shows itself pressed, and SHALL restore both on a second press or Escape,
-because hiding only the transcript and swapping the icon for a sidebar icon read as a different
-control.
+because one toggle that keeps its icon reads as one control in two states.
 
 #### Scenario: A person focuses the video
 - **GIVEN** a recording in review with the sidebar and the transcript showing
@@ -75,7 +74,18 @@ control.
 #### Scenario: A person leaves focus
 - **GIVEN** the video is focused
 - **WHEN** the person presses Focus video again, or presses Escape
-- **THEN** the transcript returns, and the sidebar returns if it showed before focus
+- **THEN** the transcript returns, and the sidebar returns beside the sheet if it showed there
+  before focus
 - **AND** Focus video shows not pressed
 - **PROOF** test: src/App.test.tsx::restores both sidebars when focus ends
+- **PROOF** test: src/App.test.tsx::docks the sidebar again after focus even if the window narrowed meanwhile
+- **PROOF** desk: open
+
+#### Scenario: Focus ends when the sidebar or another recording takes over
+- **GIVEN** the video is focused
+- **WHEN** the person presses Show sidebar, or starts a new recording
+- **THEN** focus ends: the sidebar and the transcript show, and Focus video shows not pressed
+- **AND** a search that shows the sidebar leaves focus on, and Hide sidebar hides it again
+- **PROOF** test: src/App.test.tsx::ends focus when the sidebar is shown or the workspace leaves review
+- **PROOF** test: src/App.test.tsx::keeps focus when a search shows the sidebar, and hides it again with its toggle
 - **PROOF** desk: open

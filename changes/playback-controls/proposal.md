@@ -50,7 +50,10 @@ the transcript, then turned into a sidebar icon. The owner named YouTube as the 
 - Leaving focus brings the sidebar back only if it showed before focus; a sidebar the person had
   hidden stays hidden. Restoring it regardless would undo the person's own choice.
 - Showing the sidebar with its own toggle while focused also ends focus, so the transcript returns
-  with it; otherwise the layout would be half-focused with no pressed control to explain it.
+  with it; otherwise the layout would be half-focused with no pressed control to explain it. A
+  search that shows the sidebar leaves focus on, since the person is looking for a recording, not
+  leaving focus. Starting a new recording ends focus, which belongs to review: scenario "Focus ends
+  when the sidebar or another recording takes over".
 - Focus video stays named "Focus video" in both states and carries the pressed state
   (`aria-pressed`); the "Restore transcript" name goes. `scripts/verify-native-ux.cjs` and the
   tests move to the new name and to the speed list.

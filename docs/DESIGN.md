@@ -98,6 +98,7 @@ Use motion to explain a state change. Recording start/stop, timecode, video fram
 | --- | --- | --- |
 | Hover/selection | 120ms color change; no scale | Implemented |
 | Context menu | 120ms opacity and 3px translation, including exit | Implemented |
+| Speed list | 120ms opacity on entry; closes at once | Implemented |
 | Device popover | 120ms opacity and 4px translation | Entry implemented; exit continuity remains open |
 | Dialog | 180ms opacity and 5px translation | Implemented; background stays inert through exit |
 | Section disclosure | 180ms height reveal; chevron rotation | Implemented; collapsed content inert immediately |

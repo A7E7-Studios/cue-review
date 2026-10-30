@@ -17,5 +17,6 @@ nearest the code it changes.
 
 - [x] 2.1 Focus video keeps its icon and carries `aria-pressed`; test: src/workspace/PlaybackBar.test.tsx::shows Focus video pressed with the same icon
 - [x] 2.2 Focus hides the sidebar and the transcript; test: src/App.test.tsx::hides the sidebar and the transcript in focus
-- [x] 2.3 A second press, Escape or Show sidebar restores both, the sidebar only if it showed before; test: src/App.test.tsx::restores both sidebars when focus ends
-- [x] 2.4 Update README.md and `docs/DESIGN.md`; test: node tools/gate/gate.mjs --local
+- [x] 2.3 A second press or Escape restores both, the sidebar docked again only if it was before; test: src/App.test.tsx::docks the sidebar again after focus even if the window narrowed meanwhile
+- [x] 2.4 Show sidebar or a new recording ends focus; a search does not; test: src/App.test.tsx::ends focus when the sidebar is shown or the workspace leaves review
+- [x] 2.5 Update README.md and `docs/DESIGN.md`; test: node tools/gate/gate.mjs --local

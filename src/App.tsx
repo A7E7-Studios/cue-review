@@ -102,7 +102,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(storedSpeed);
   const [focusVideo, setFocusVideo] = useState(false);
-  /** Whether leaving focus shows the sidebar again: only when it showed before focus. */
+  /** Whether leaving focus docks the sidebar again: only when it showed beside the sheet before focus. */
   const focusRestoresSidebar = useRef(false);
 
   const video = useRef<HTMLVideoElement>(null);
@@ -293,20 +293,21 @@ export default function App({ platform: requested }: AppProps = {}) {
   // Focus video hides the sidebar and the transcript; leaving it shows the sidebar again if it showed before.
   const toggleFocus = () => {
     if (focusVideo) { setFocusVideo(false); return; }
-    focusRestoresSidebar.current = sidebarVisible;
+    // Focus changes only the docked sidebar; an overlay (a narrow window) simply closes.
+    focusRestoresSidebar.current = sidebarVisible && !sidebarOverlay;
     if (sidebarVisible) sidebar.hide();
     setFocusVideo(true);
   };
   /** Showing the sidebar while focused ends focus, so the transcript returns with it. */
   const toggleSidebar = () => {
-    if (focusVideo) { focusRestoresSidebar.current = true; setFocusVideo(false); } else sidebar.toggle();
+    if (focusVideo && !sidebarVisible) { focusRestoresSidebar.current = false; setFocusVideo(false); sidebar.show(); } else sidebar.toggle();
   };
   const wasFocused = useRef(false);
   useEffect(() => {
-    if (wasFocused.current && !focusVideo && focusRestoresSidebar.current) showSidebar();
+    if (wasFocused.current && !focusVideo && focusRestoresSidebar.current) sidebar.dock();
     if (!focusVideo) focusRestoresSidebar.current = false;
     wasFocused.current = focusVideo;
-  }, [focusVideo, showSidebar]);
+  }, [focusVideo, sidebar.dock]);
   // Focus belongs to review: a new recording or a recording in progress ends it.
   useEffect(() => { if (focusVideo && mode !== 'review') setFocusVideo(false); }, [focusVideo, mode]);
   const chooseSpeed = (next: number) => {

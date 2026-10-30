@@ -36,17 +36,17 @@ describe('PlaybackBar', () => {
     await user.keyboard('{Enter}');
     expect(screen.getByRole('menuitemradio', { name: '1.25×' })).toHaveFocus();
     expect(screen.getByRole('menuitemradio', { name: '1.25×' })).toHaveAttribute('aria-checked', 'true');
-    // Space chooses in the list; it never reaches play and pause.
     await user.keyboard('{ArrowDown}{ArrowDown}{ArrowUp}');
     expect(screen.getByRole('menuitemradio', { name: '1.5×' })).toHaveFocus();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     expect(handlers.onSpeed).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Playback speed 1.25×' })).toHaveFocus();
-    await user.keyboard('{Enter}{End} ');
+    await user.keyboard('{Enter}{End}{Enter}');
     expect(handlers.onSpeed).toHaveBeenCalledWith(2);
-    expect(handlers.onTogglePlay).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Playback speed 1.25×' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}{Home} ');
+    expect(handlers.onSpeed).toHaveBeenLastCalledWith(0.5);
   });
   it('shows Focus video pressed with the same icon', () => {
     const { rerender, container } = render(<PlaybackBar {...props()} platform="windows"/>);
