@@ -46,6 +46,11 @@ def name_face(font: TTFont, weight: int) -> None:
     names.setName(f'Figtree-{style}', 6, 3, 1, 0x409)
     names.setName('Figtree', 16, 3, 1, 0x409)
     names.setName(style, 17, 3, 1, 0x409)
+    # The style bits follow the names: Bold is the family's bold, every other weight its regular.
+    bold = style == 'Bold'
+    selection = font['OS/2'].fsSelection & ~0b1100001  # clear ITALIC, BOLD and REGULAR
+    font['OS/2'].fsSelection = selection | (0b100000 if bold else 0b1000000)
+    font['head'].macStyle = 1 if bold else 0
 
 
 def build(subset: str, weight: int) -> pathlib.Path:
