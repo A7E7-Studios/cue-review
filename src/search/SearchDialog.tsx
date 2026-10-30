@@ -48,8 +48,9 @@ const HEADINGS: Record<Group, string> = { recent: NAMES.searchRecent, recordings
  * Search over every recording (search spec): before anything is typed, the most recent recordings;
  * then the recordings whose names match and the transcript lines that match every word. Focus stays
  * in the field (a combobox); ↑ and ↓ move the active result (`aria-activedescendant`), Enter opens it.
- * Results sit in labelled groups. The active result is kept by its key, so lines arriving from a
- * transcript loaded meanwhile never change what Enter opens.
+ * Results sit in labelled groups. The active result is kept by its key, and the first result is
+ * pinned once results show, so lines arriving from a transcript loaded meanwhile never change what
+ * Enter opens.
  */
 export function SearchDialog({ open, onClose, sessions, sections, transcripts, onOpen, fallbackFocusRef }: SearchDialogProps) {
   const [query, setQuery] = useState('');
@@ -74,6 +75,7 @@ export function SearchDialog({ open, onClose, sessions, sections, transcripts, o
       ...matchingLines(sessions, transcripts, words).map((line): Result => ({ key: `l:${line.session.id}:${line.startMs}`, id: line.session.id, atMs: line.startMs, group: 'lines', title: line.session.name, detail: marked(line.text, words), time: formatTime(line.startMs) })),
     ];
   }, [query, sessions, sectionName, transcripts]);
+  useEffect(() => { if (activeKey === null && results.length) setActiveKey(results[0].key); }, [activeKey, results]);
   const found = results.findIndex(result => result.key === activeKey);
   const current = found >= 0 ? found : 0;
   const optionId = (index: number) => `${id}-option-${index}`;

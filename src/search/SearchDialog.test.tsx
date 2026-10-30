@@ -75,6 +75,18 @@ describe('SearchDialog', () => {
     await user.keyboard('{Enter}');
     expect(props.onOpen).toHaveBeenCalledWith('quest', 5000);
   });
+  it('keeps the first result for Enter while a newer recording\'s lines arrive', async () => {
+    const user = userEvent.setup();
+    const { props, rerender } = renderSearch();
+    await user.type(screen.getByRole('combobox'), 'menu');
+    expect(screen.getAllByRole('option')[0]).toHaveTextContent('The menu follows the controller.');
+    // A newer recording's line arrives ahead of it; Enter still opens the result that was first.
+    const more = new Map(transcripts).set('library', { segments: [{ startMs: 2000, endMs: 3000, text: 'The menu is hidden.', words: [] }] });
+    rerender(<SearchDialog {...props} transcripts={more}/>);
+    expect(screen.getAllByRole('option')[0]).toHaveTextContent('The menu is hidden.');
+    await user.keyboard('{Enter}');
+    expect(props.onOpen).toHaveBeenCalledWith('quest', 5000);
+  });
   it('starts empty each time it opens', async () => {
     const user = userEvent.setup();
     const { props, rerender } = renderSearch();

@@ -52,9 +52,9 @@ Claude app places it, reads cleaner than a field across the window's top.
 - **PROOF** test: src/App.test.tsx::does not open search while recording
 
 ### Requirement: Search finds names and transcript lines
-The app SHALL list, as the person types, the recordings whose name and the transcript lines that
-contain every typed word, in any order, ignoring case and accents, each line with its recording's
-name, the matching words marked and its time, because a person often remembers what was said rather
+The app SHALL list, as the person types, the recordings whose names contain every typed word, in
+any order, ignoring case and accents, and the transcript lines that do, each line with its
+recording's name, the matching words marked and its time, because a person often remembers what was said rather
 than what the recording was called, and rarely in the order it was said.
 
 #### Scenario: A person searches for a word
@@ -83,7 +83,10 @@ than what the recording was called, and rarely in the order it was said.
   time
 - **AND** choosing a recording opens it from its start
 - **AND** a line of the recording already open moves its playback there, paused
+- **AND** Enter opens the result that was first when results showed, though newer lines arrive
 - **PROOF** test: src/App.test.tsx::opens a transcript line at its time
+- **PROOF** test: src/search/SearchDialog.test.tsx::keeps the first result for Enter while a newer recording's lines arrive
+- **PROOF** test: src/App.test.tsx::closes the narrow window's sidebar when a line of the open recording is chosen
 - **PROOF** test: src/App.test.tsx::opens a line of the recording that is already open at its time
 - **PROOF** test: src/search/SearchDialog.test.tsx::keeps the active result while transcripts arrive
 - **PROOF** desk: open

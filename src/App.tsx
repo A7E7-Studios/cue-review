@@ -117,7 +117,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Why Record more failed, shown under the recording bar rather than in the workspace banner. */
   const [recordMoreError, setRecordMoreError] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
-  /** Transcripts the search window searches, by session id, with the status and length they were read at. */
+  /** The transcripts the search window searches, by session id. */
   const [searchTranscripts, setSearchTranscripts] = useState<ReadonlyMap<string, Transcript>>(() => new Map());
   /** The sessions as they are now, for the search window's reader, which starts once per opening. */
   const searchSessions = useRef<Session[]>([]);
@@ -454,8 +454,9 @@ export default function App({ platform: requested }: AppProps = {}) {
   }, [searchOpen]);
   /** A search result: the recording, standing paused at the line's time, or at its start. */
   const openResult = (id: string, atMs?: number) => {
-    if (!draft && session?.id === id) {
+    if (!draft && !loading && session?.id === id) {
       // Already open: the video does not load again, so seek it here.
+      dismissOverlay();
       video.current?.pause();
       seek(atMs ?? 0);
       return;

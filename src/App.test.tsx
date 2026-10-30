@@ -358,6 +358,21 @@ describe('keyboard interaction', () => {
     expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:01');
     expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
   });
+  it('closes the narrow window\'s sidebar when a line of the open recording is chosen', async () => {
+    window.innerWidth = 900;
+    const user = await ready();
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await user.click(sidebar().getByRole('button', { name: NAMES.search }));
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(document.querySelector('.app')).not.toHaveAttribute('data-sidebar', 'overlay'));
+    expect(document.querySelector('video')!.currentTime).toBe(1);
+  });
   it('searches each transcript as it is when search opens', async () => {
     const user = await ready();
     await user.keyboard('{Control>}k{/Control}');
