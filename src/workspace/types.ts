@@ -14,11 +14,6 @@ export interface TitleBarProps {
   sidebarVisible: boolean;
   /** Labelled NAMES.hideSidebar or NAMES.showSidebar. */
   onToggleSidebar: () => void;
-  /** Session-name filter for the sidebar (decision 11). */
-  search: string;
-  onSearch: (value: string) => void;
-  /** Ctrl/⌘+K focuses this field. */
-  searchRef?: RefObject<HTMLInputElement | null>;
   onOpenSettings: () => void;
   /** Compact recording mode: only a drag strip, leaving room for the macOS traffic lights. */
   compact?: boolean;
@@ -26,7 +21,7 @@ export interface TitleBarProps {
   maximized?: boolean;
 }
 
-/** The existing Sidebar props, plus the search filter and the collapse control (decision 2). */
+/** The existing Sidebar props, plus the Search row and the collapse control (decision 2). */
 export interface SidebarProps {
   sections: Project[];
   sessions: Session[];
@@ -47,8 +42,8 @@ export interface SidebarProps {
   onDeleteSession: (session: Session) => void;
   onReorder: (ids: string[]) => Promise<boolean>;
   onMove: (sessionId: string, sectionId: string | null) => Promise<boolean>;
-  /** Shows only sessions whose name contains it, case-insensitively, with a NAMES.noMatches state. */
-  filter?: string;
+  /** Opens the search window; shown as the Search row under New session. */
+  onSearch?: () => void;
   /** Render the NAMES.hideSidebar button inside the sidebar (macOS panel). Defaults to true. */
   showCollapse?: boolean;
   /** macOS reserves the traffic-light row at the top of the panel. */
@@ -207,6 +202,8 @@ export interface RecordingDockProps {
 /** The transcript column (decisions 4, 10 and 12). */
 export interface TranscriptPaneProps {
   mode: WorkspaceMode;
+  /** A new value asks for Find (Ctrl/⌘+F): it opens, or its field takes focus. */
+  findRequest?: number;
   /** The saved transcript, or during recording the live one. */
   transcript: Transcript;
   /** Playback time in review, elapsed time on the combined timeline while recording. */
@@ -263,6 +260,13 @@ export const NAMES = {
   restoreWindow: 'Restore window',
   closeWindow: 'Close window',
   searchRecordings: 'Search recordings',
+  /** The search window and the sidebar row that opens it. */
+  search: 'Search',
+  searchPlaceholder: 'Search recordings and transcripts',
+  searchResults: 'Search results',
+  searchRecent: 'Recent',
+  searchRecordingsGroup: 'Recordings',
+  searchLinesGroup: 'In transcripts',
   settings: 'Settings',
   showSidebar: 'Show sidebar',
   hideSidebar: 'Hide sidebar',

@@ -27,8 +27,8 @@ export const moreRecents = [
   { ...exampleSessions[3], id: 'export', name: 'Export dialog edge cases', durationMs: 96000 },
 ];
 
-type Props = { platform: Platform; selected: boolean; filter: string; showCollapse: boolean; empty: boolean; longNames: boolean; longList: boolean; locked: boolean; loading: boolean };
-function SidebarExample({ platform, selected, filter, showCollapse, empty, longNames, longList, locked, loading }: Props) {
+type Props = { platform: Platform; selected: boolean; showCollapse: boolean; empty: boolean; longNames: boolean; longList: boolean; locked: boolean; loading: boolean };
+function SidebarExample({ platform, selected, showCollapse, empty, longNames, longList, locked, loading }: Props) {
   usePlatformAttribute(platform);
   const [sections, setSections] = useState(() => empty ? [] : exampleSections.map(section => ({ ...section, name: longNames ? `${section.name} — navigation, review and accessibility improvements` : section.name })));
   const [sessions, setSessions] = useState(() => empty ? [] : [...exampleSessions, ...moreRecents, ...(longList ? Array.from({ length: 36 }, (_, index) => ({ ...exampleSessions[3], id: `recent-${index}`, name: `Review session ${index + 1}` })) : [])].map(session => ({ ...session, name: longNames ? `${session.name} with a very long description that should truncate gracefully` : session.name })));
@@ -37,7 +37,7 @@ function SidebarExample({ platform, selected, filter, showCollapse, empty, longN
   const mac = platform === 'macos';
   return <div style={{ position: 'relative', display: 'grid', gridTemplateColumns: 'var(--size-sidebar) minmax(0, 1fr)', height: 'min(720px, 100vh)', background: mac ? 'var(--color-sheet)' : 'var(--color-ground)' }}>
     {mac && <TrafficLights/>}
-    <Sidebar platform={platform} showCollapse={showCollapse} filter={filter} sections={sections} sessions={sessions} activeId={activeId} locked={locked} loading={loading} utilities={null}
+    <Sidebar platform={platform} showCollapse={showCollapse} onSearch={() => setMessage('Search selected.')} sections={sections} sessions={sessions} activeId={activeId} locked={locked} loading={loading} utilities={null}
       onCollapse={() => setMessage('Collapse action selected.')} onNew={() => { setActiveId(''); setMessage('Fresh temporary recording selected.'); }} onOpen={setActiveId}
       onRename={session => setMessage(`Rename selected: ${session.name}`)} onRenameSection={section => setMessage(`Rename selected: ${section.name}`)}
       onCreateSection={() => setSections(items => [...items, { id: `new-${items.length}`, name: 'New section', createdAt: date }])}
@@ -58,7 +58,7 @@ const meta = {
   title: 'Sidebar/Organization', component: SidebarExample,
   // Shared with Chrome.stories.tsx; not stories.
   excludeStories: ['usePlatformAttribute', 'TrafficLights', 'moreRecents'],
-  args: { platform: 'windows', selected: true, filter: '', showCollapse: false, empty: false, longNames: false, longList: false, locked: false, loading: false },
+  args: { platform: 'windows', selected: true, showCollapse: false, empty: false, longNames: false, longList: false, locked: false, loading: false },
   argTypes: { platform: { control: 'inline-radio', options: ['windows', 'macos', 'linux'] } },
   render: args => <SidebarExample key={`${args.empty}-${args.longNames}-${args.longList}-${args.selected}`} {...args}/>,
 } satisfies Meta<typeof SidebarExample>;
@@ -94,13 +94,6 @@ export const SidebarMenu: Story = {
     fireEvent.contextMenu(list, { clientX: box.left + 60, clientY: box.bottom - 120 });
     const menu = await within(canvasElement.ownerDocument.body).findByRole('menu', { name: 'Sidebar actions' });
     await expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['New session', 'New section']);
-  },
-};
-export const Filtered: Story = { args: { filter: 'e' } };
-export const NoMatches: Story = {
-  args: { filter: 'zebra' },
-  play: async ({ canvasElement }) => {
-    await expect(within(canvasElement).getByRole('status')).toHaveTextContent('No matches');
   },
 };
 export const MacOS: Story = { args: { platform: 'macos', showCollapse: true } };

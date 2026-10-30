@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
-import type { RefObject } from 'react';
 import type { Platform } from '../chrome/windowApi';
 
-// Workspace shortcuts (decision 8). Ctrl/⌘+K lives in the title bar with its field.
+// Workspace shortcuts (decision 8). Ctrl/⌘+K and Ctrl/⌘+F also work from a text field (search spec);
+// the others never fire inside one.
 
 /**
  * The letter a shortcut means. `event.key` follows the keyboard layout, so it is used when it
@@ -53,9 +53,10 @@ export interface Shortcuts {
   onTogglePlay?: () => void;
   /** ← and →, when there is something to seek. */
   onSeekBy?: (deltaMs: number) => void;
-  /** Escape in this field clears it. */
-  search?: RefObject<HTMLInputElement | null>;
-  onClearSearch?: () => void;
+  /** Ctrl/⌘+K: open search; also from a text field. */
+  onSearch?: () => void;
+  /** Ctrl/⌘+F: find in the open transcript; also from a text field. */
+  onFind?: () => void;
   /** Escape anywhere else, for example to close the sidebar overlay. */
   onEscape?: () => void;
 }
@@ -69,23 +70,22 @@ export function useShortcuts(shortcuts: Shortcuts) {
     // Capture phase on the window runs before any field, menu or dialog handler, including
     // ones that stop propagation, so a reload key never reaches the webview: not in a text
     // field, not behind a dialog, not while a picker is open, not on another layout.
-    const swallowReload = (event: KeyboardEvent) => { if (isReload(event)) event.preventDefault(); };
+    // Ctrl/⌘+F would open the webview's own find bar, also behind a dialog: it is swallowed here too.
+    const isFind = (event: KeyboardEvent) => isCommand(event, latest.current.platform, 'f');
+    const swallowReload = (event: KeyboardEvent) => { if (isReload(event) || isFind(event)) event.preventDefault(); };
     const onKey = (event: KeyboardEvent) => {
       const current = latest.current;
       const target = event.target;
       // The reload guard above prevents the default of Ctrl/⌘+R itself; that is not a component claiming the key.
-      if (event.defaultPrevented && !isReload(event)) return;
+      if (event.defaultPrevented && !isReload(event) && !isFind(event)) return;
       if (event.key === 'Escape') {
-        if (current.search?.current && target === current.search.current && current.onClearSearch) {
-          event.preventDefault();
-          if (current.search.current.value) current.onClearSearch();
-          else current.search.current.blur();
-          return;
-        }
         if (current.enabled && current.onEscape && !(target instanceof Element && target.closest(BLOCKING))) { event.preventDefault(); current.onEscape(); }
         return;
       }
-      if (!current.enabled || isEditable(target) || (target instanceof Element && target.closest(BLOCKING))) return;
+      if (!current.enabled || (target instanceof Element && target.closest(BLOCKING))) return;
+      if (isCommand(event, current.platform, 'k') && current.onSearch) { event.preventDefault(); if (!event.repeat) current.onSearch(); return; }
+      if (isFind(event)) { if (!event.repeat) current.onFind?.(); return; }
+      if (isEditable(target)) return;
       if (isCommand(event, current.platform, 'r')) { event.preventDefault(); if (!event.repeat) current.onRecord(); return; }
       if (isCommand(event, current.platform, 'n')) { event.preventDefault(); if (!event.repeat) current.onNew(); return; }
       // A modifier combination never falls through to a bare-key action.
