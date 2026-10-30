@@ -3,6 +3,7 @@ use crate::{
     deps,
     models::{Segment, Session, Transcript, Word},
     store::Store,
+    takes,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -81,11 +82,21 @@ Rename the session: {command} rename {session} 'Short descriptive name'
 Usage of any command: {command} help frames
 
 Session folder: {folder}
-The CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous. Frames and clips are written to new files and never overwrite existing ones. cursor is null or absent when no pointer track was recorded."
+The CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous. All times are session times: a session recorded in several takes keeps one video per take, and frame, frames, moments and clip read the take each time falls in, so a clip must stay within one take. Frames and clips are written to new files and never overwrite existing ones. cursor is null or absent when no pointer track was recorded."
     )
 }
 /// `cue transcribe`: transcribes a finished session again.
 pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String> {
+    // A take of an older session still waiting to be joined is upgraded
+    // first, as the app does when it starts.
+    if store
+        .session(id)?
+        .takes
+        .iter()
+        .any(|take| take.status == crate::models::TakeStatus::Swapping)
+    {
+        crate::takes::recover(store, id)?;
+    }
     transcribe_existing_with(
         store,
         id,
@@ -415,9 +426,17 @@ fn extract_frame(
     }
     Ok(())
 }
-/// Extracts, optionally marks, and measures one frame.
+/// The take video session time `at` falls in: its file, the time inside it
+/// and its length.
+fn take_video_at(dir: &Path, session: &Session, at: u64) -> Result<(PathBuf, u64, u64), String> {
+    let (video, local) =
+        takes::video_at(&takes::videos(session), at).ok_or("This session has no video.")?;
+    Ok((takes::video_file(dir, video.take), local, video.duration_ms))
+}
+/// Extracts, optionally marks, and measures the frame at session time `at`,
+/// from the video of the take it falls in.
 fn export_frame(
-    video: &Path,
+    dir: &Path,
     session: &Session,
     at: u64,
     path: PathBuf,
@@ -425,7 +444,8 @@ fn export_frame(
     track: Option<&CursorTrack>,
 ) -> Result<FrameExport, String> {
     refuse_existing(&path)?;
-    extract_frame(video, session.duration_ms, at, &path, style.max_width)?;
+    let (video, local, duration_ms) = take_video_at(dir, session, at)?;
+    extract_frame(&video, duration_ms, local, &path, style.max_width)?;
     let cursor = track.and_then(|track| track.at(at));
     let finished = (|| {
         if let (true, Some(point)) = (style.mark_cursor, &cursor) {
@@ -463,9 +483,8 @@ pub fn frame_at(
     };
     validate_range(session.duration_ms, at, None)?;
     let path = output_path(store, id, at, "png", output)?;
-    let video = store.session_dir(id)?.join("video.mp4");
     export_frame(
-        &video,
+        &store.session_dir(id)?,
         &session,
         at,
         path,
@@ -526,11 +545,11 @@ fn export_batch(
     dir: &Path,
     style: FrameStyle,
 ) -> Result<Vec<FrameExport>, String> {
-    let video = store.session_dir(&session.id)?.join("video.mp4");
+    let session_dir = store.session_dir(&session.id)?;
     let track = cursor::load(store, &session.id);
     export_all(requests, |(at, segment_id)| {
         export_frame(
-            &video,
+            &session_dir,
             session,
             *at,
             unique_name(dir, *at, "png"),
@@ -689,6 +708,27 @@ pub fn moments(
     }
     Ok(found)
 }
+/// Refuses a clip from `start` to `end` that crosses from one take video
+/// into the next; otherwise the video it comes from and its start in it.
+fn clip_source(
+    dir: &Path,
+    session: &Session,
+    start: u64,
+    end: u64,
+) -> Result<(PathBuf, u64), String> {
+    let videos = takes::videos(session);
+    let (first, local) = takes::video_at(&videos, start).ok_or("This session has no video.")?;
+    let (last, _) = takes::video_at(&videos, end.saturating_sub(1).max(start))
+        .ok_or("This session has no video.")?;
+    if last.take != first.take {
+        return Err(format!(
+            "The clip crosses from take {} into take {}, which starts at {} ms. Export one clip that ends by {} ms and one that starts there.",
+            first.take, last.take, last.start_ms, last.start_ms
+        ));
+    }
+    Ok((takes::video_file(dir, first.take), local))
+}
+/// `cue clip`: an MP4 of one take's video between two session times.
 pub fn clip(
     store: &Store,
     id: &str,
@@ -698,6 +738,7 @@ pub fn clip(
 ) -> Result<PathBuf, String> {
     let session = store.session(id)?;
     validate_range(session.duration_ms, start, Some(end))?;
+    let (video, local) = clip_source(&store.session_dir(id)?, &session, start, end)?;
     let path = output_path(store, id, start, "mp4", output)?;
     let mut cmd = deps::command("ffmpeg")?;
     let out = cmd
@@ -707,10 +748,10 @@ pub fn clip(
             "error",
             "-n",
             "-ss",
-            &format!("{:.3}", start as f64 / 1000.),
+            &format!("{:.3}", local as f64 / 1000.),
             "-i",
         ])
-        .arg(store.session_dir(id)?.join("video.mp4"))
+        .arg(&video)
         .args([
             "-t",
             &format!("{:.3}", (end - start) as f64 / 1000.),
@@ -1281,6 +1322,157 @@ mod tests {
             (2, 2000, 2200)
         );
         assert!(find(&transcript, "missing phrase").unwrap().is_empty());
+    }
+    /// A ready session of two take videos: take 1 from 0 for 72 s, take 2
+    /// from 72 s for 30 s. The video files are written by the caller.
+    fn two_take_session(store: &Store) -> Session {
+        use crate::models::{Take, TakeStatus, TakeVideo};
+        let mut session = store
+            .create_session(
+                None,
+                Some("Two takes"),
+                &crate::models::CaptureConfig {
+                    source_id: "monitor:1".into(),
+                    microphone_id: None,
+                    system_audio: false,
+                    fps: 10,
+                },
+            )
+            .unwrap();
+        let take = |index, offset_ms, duration_ms| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status: TakeStatus::Ready,
+            folder: takes::folder_label(index),
+            source_id: (index > 1).then(|| "window:4242".into()),
+            microphone_id: None,
+            system_audio: false,
+        };
+        session.status = "ready".into();
+        session.duration_ms = 102000;
+        session.takes = vec![take(1, 0, 72000), take(2, 72000, 30000)];
+        session.format_version = crate::models::FORMAT_VERSION;
+        session.videos = vec![
+            TakeVideo {
+                take: 1,
+                start_ms: 0,
+                duration_ms: 72000,
+            },
+            TakeVideo {
+                take: 2,
+                start_ms: 72000,
+                duration_ms: 30000,
+            },
+        ];
+        store.save_session(&session).unwrap();
+        session
+    }
+    #[test]
+    fn a_clip_across_a_take_boundary_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = two_take_session(&store);
+        let folder = store.session_dir(&session.id).unwrap();
+        let output = dir.path().join("across.mp4");
+        let error = clip(&store, &session.id, 70000, 75000, Some(&output)).unwrap_err();
+        assert!(
+            error.contains("take 2, which starts at 72000 ms"),
+            "{error}"
+        );
+        assert!(!output.exists());
+        assert!(!folder.join("exports").exists());
+        // Inside one take, the clip reads that take's own video from its start.
+        assert_eq!(
+            clip_source(&folder, &session, 72000, 75000).unwrap(),
+            (takes::video_file(&folder, 2), 0)
+        );
+        assert_eq!(
+            clip_source(&folder, &session, 60000, 72000).unwrap(),
+            (takes::video_file(&folder, 1), 60000)
+        );
+        assert_eq!(
+            take_video_at(&folder, &session, 80000).unwrap(),
+            (takes::video_file(&folder, 2), 8000, 30000)
+        );
+    }
+    #[test]
+    #[ignore = "Requires FFmpeg; exports frames from two real take videos of different sizes and colours"]
+    fn actual_frames_come_from_each_take_video() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let session = two_take_session(&store);
+        let folder = store.session_dir(&session.id).unwrap();
+        // Shortened takes: 2 s of red at 64x64, then 1 s of blue at 96x48.
+        store
+            .update_session(&session.id, |s| {
+                s.duration_ms = 3000;
+                s.takes[0].duration_ms = 2000;
+                s.takes[1].offset_ms = 2000;
+                s.takes[1].duration_ms = 1000;
+                s.videos[0].duration_ms = 2000;
+                s.videos[1].start_ms = 2000;
+                s.videos[1].duration_ms = 1000;
+                Ok(())
+            })
+            .unwrap();
+        for (take, color, size, seconds) in [(1, "red", "64x64", "2"), (2, "blue", "96x48", "1")] {
+            let video = takes::video_file(&folder, take);
+            fs::create_dir_all(video.parent().unwrap()).unwrap();
+            let output = deps::command("ffmpeg")
+                .unwrap()
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+                .arg(format!("color=c={color}:s={size}:r=10:d={seconds}"))
+                .args(["-an", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&video)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let red = frame_at(
+            &store,
+            &session.id,
+            &FrameTime::AtMs(1500),
+            None,
+            FrameStyle::default(),
+        )
+        .unwrap();
+        assert_eq!((red.width, red.height), (64, 64));
+        assert!(image::open(&red.path).unwrap().to_rgb8().get_pixel(32, 32)[0] > 200);
+        let blue = frame_at(
+            &store,
+            &session.id,
+            &FrameTime::AtMs(2500),
+            None,
+            FrameStyle::default(),
+        )
+        .unwrap();
+        assert_eq!((blue.width, blue.height), (96, 48));
+        assert!(image::open(&blue.path).unwrap().to_rgb8().get_pixel(48, 24)[2] > 200);
+        // The last moment of the timeline is take 2's last frame.
+        let last = frame(&store, &session.id, 2999, None).unwrap();
+        assert!(image::open(last).unwrap().to_rgb8().get_pixel(48, 24)[2] > 200);
+        let batch = frames(
+            &store,
+            &session.id,
+            &FrameTimes::AtMs(vec![500, 2200]),
+            None,
+            FrameStyle::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            batch
+                .iter()
+                .map(|f| (f.width, f.height))
+                .collect::<Vec<_>>(),
+            [(64, 64), (96, 48)]
+        );
+        let clip = clip(&store, &session.id, 2100, 2900, None).unwrap();
+        assert!(clip.is_file());
     }
     #[test]
     #[ignore = "Requires FFmpeg/ffprobe; creates real video-only media and verifies final-frame/full-clip boundaries"]

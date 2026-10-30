@@ -122,7 +122,10 @@ pub fn attach_finished_video(store: &Store, session: &mut Session) -> Result<(),
         return Err("The finalized recording has no video stream.".into());
     }
     session.video_path = Some(path.to_string_lossy().into());
-    session.duration_ms = (duration * 1000.0).round() as u64;
+    // In format 2, video.mp4 is only take 1's; the session lasts its takes.
+    if session.videos.is_empty() {
+        session.duration_ms = (duration * 1000.0).round() as u64;
+    }
     Ok(())
 }
 fn accepts_live_update(runtime: &Runtime, id: &str, cancel: &AtomicBool) -> bool {
@@ -473,8 +476,8 @@ async fn start_recording(
             system_audio,
             fps: 30,
         };
-        // What the chosen window or display is, so Record more can make sure
-        // it captures the same one again.
+        // What the chosen window or display is, since its id can name
+        // something else after a restart.
         let identity = capture::source_identity(&config.source_id);
         let mut session =
             s.store
@@ -544,9 +547,9 @@ fn finish_transcription(job: ProcessingJob) {
         }),
     }
 }
-/// Adds one finished take to the combined video when it still waits for
-/// that, then transcribes only that take. The take ends ready or error, or
-/// stays swapping when the video could not be updated.
+/// Transcribes only one finished take, which ends ready or error. A take of
+/// a session saved before takes kept their own videos, still waiting to be
+/// joined, is upgraded first (see [`takes::recover`]).
 fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
     let session = s.store.session(id)?;
     let take = takes::list(&session)
@@ -554,10 +557,15 @@ fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
         .find(|take| take.index == index)
         .ok_or_else(|| format!("Take {index} is not part of this recording."))?;
     if take.status == TakeStatus::Swapping {
-        takes::complete_swap(&s.store, id, index)?;
-    } else {
-        takes::set_status(&s.store, id, index, TakeStatus::Transcribing)?;
+        takes::recover(&s.store, id)?;
     }
+    if !takes::list(&s.store.session(id)?)
+        .iter()
+        .any(|take| take.index == index && takes::on_timeline(take.status))
+    {
+        return Err(format!("Take {index} has no usable video."));
+    }
+    takes::set_status(&s.store, id, index, TakeStatus::Transcribing)?;
     let result = s
         .inference
         .lock()
@@ -676,8 +684,9 @@ fn stop_first(job: ProcessingJob, mut active: capture::ActiveCapture) -> Result<
     job.fail(error.clone());
     Err(error)
 }
-/// Stops a take: finalizes its own files, probes them, and leaves the swap
-/// and the transcription of only this take to a background job.
+/// Stops a take: finalizes its own files, probes them, places its video on
+/// the timeline and leaves the transcription of only this take to a
+/// background job.
 fn stop_take(
     job: ProcessingJob,
     mut active: capture::ActiveCapture,
@@ -742,16 +751,36 @@ async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> 
     })
     .await
 }
-/// Starts take N of session `id`: validates that the session is ready (or in
-/// error with a usable video) and that nothing else is recording or
-/// processing, probes the combined video for the take's offset and starts
-/// capture into `takes/<N>/` from the session's own source.
+/// Starts take N of session `id` recording `source_id`: validates that the
+/// session is ready (or in error with a usable video) and that nothing else
+/// is recording or processing, and starts capture into `takes/<N>/` at the
+/// end of the session timeline.
 fn start_take(
     s: &Shared,
     id: &str,
+    source_id: String,
     microphone_id: Option<String>,
-    system_audio: Option<bool>,
+    system_audio: bool,
     muted: bool,
+) -> Result<Session, String> {
+    start_take_with(
+        s,
+        id,
+        source_id,
+        microphone_id,
+        system_audio,
+        muted,
+        capture::start_muted,
+    )
+}
+fn start_take_with(
+    s: &Shared,
+    id: &str,
+    source_id: String,
+    microphone_id: Option<String>,
+    system_audio: bool,
+    muted: bool,
+    start: impl FnOnce(CaptureConfig, &std::path::Path, bool) -> Result<capture::ActiveCapture, String>,
 ) -> Result<Session, String> {
     let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     if runtime.active.is_some() || runtime.processing.is_some() {
@@ -759,23 +788,21 @@ fn start_take(
     }
     let mut session = s.store.session(id)?;
     takes::check_can_record_more(&session)?;
-    // A window handle or display number can name something else by now.
-    takes::check_source(
-        &session,
-        capture::source_identity(&session.source_id).as_ref(),
-    )?;
-    // The offset is the duration of the combined video as it is on disk.
-    attach_finished_video(&s.store, &mut session)
-        .map_err(|e| format!("Record more needs a playable recording: {e}"))?;
+    // A format-1 session lasts as long as its video.mp4 on disk; a format-2
+    // session already lists where its take videos end.
+    if session.videos.is_empty() {
+        attach_finished_video(&s.store, &mut session)
+            .map_err(|e| format!("Record more needs a playable recording: {e}"))?;
+    }
     s.preview
         .lock()
         .map_err(|e| e.to_string())?
-        .stop_for_recording(&session.source_id);
-    let system_audio = system_audio.unwrap_or(session.system_audio);
+        .stop_for_recording(&source_id);
     let started = takes::begin(
         &s.store,
         id,
         session.duration_ms,
+        source_id.clone(),
         microphone_id,
         system_audio,
     )?;
@@ -784,20 +811,19 @@ fn start_take(
         offset_ms: started.take.offset_ms,
     };
     let config = CaptureConfig {
-        source_id: started.session.source_id.clone(),
+        source_id,
         microphone_id: started.take.microphone_id.clone(),
         system_audio,
         fps: 30,
     };
+    let device = config.source_id.starts_with("android:");
     let folder = takes::take_dir(&s.store.session_dir(id)?, take.index);
-    match capture::start_muted(config, &folder, muted) {
+    match start(config, &folder, muted) {
         Ok(active) => {
             let session = started.session.clone();
             let cancel = activate(&mut runtime, &session, active, Some(take));
             drop(runtime);
-            if started.take.microphone_id.is_some()
-                || (system_audio && !session.source_id.starts_with("android:"))
-            {
+            if started.take.microphone_id.is_some() || (system_audio && !device) {
                 spawn_live(s, id, cancel, Some(take));
             }
             Ok(session)
@@ -811,37 +837,31 @@ fn start_take(
         }
     }
 }
-/// Continues a ready session as a new take, locked to the session's source.
-/// As in `start_recording`, `None` for `microphone_id` records without a
-/// microphone and `muted` defaults to false; `None` for `system_audio` keeps
-/// the session's choice. Returns the session with the new take recording.
+/// Continues a ready session as a new take recording `source_id`, any
+/// display, window or device. As in `start_recording`, `None` for
+/// `microphone_id` records without a microphone and `muted` defaults to
+/// false. Returns the session with the new take recording.
 #[tauri::command]
 async fn record_more(
     s: CmdState<'_>,
     id: String,
+    source_id: String,
     microphone_id: Option<String>,
-    system_audio: Option<bool>,
+    system_audio: bool,
     muted: Option<bool>,
 ) -> Result<Session, String> {
     let s = s.inner().clone();
-    blocking(move || start_take(&s, &id, microphone_id, system_audio, muted.unwrap_or(false))).await
-}
-/// Drops take `index` of session `id` when it cannot be added to the
-/// recording; see [`takes::discard`]. Refused while that session records or
-/// processes.
-fn discard_take_in(s: &Shared, id: &str, index: u32) -> Result<Session, String> {
-    // Held throughout, so Retry or Record more cannot start meanwhile.
-    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
-    ensure_session_not_in_use(&runtime, id)?;
-    takes::discard(&s.store, id, index)
-}
-/// Drops a take whose swap keeps failing (index 2 or later): it becomes
-/// interrupted, keeps its folder, and the session settles, usually to ready.
-/// Returns the updated session; the transcript's take dividers are updated.
-#[tauri::command]
-async fn discard_take(s: CmdState<'_>, id: String, index: u32) -> Result<Session, String> {
-    let s = s.inner().clone();
-    blocking(move || discard_take_in(&s, &id, index)).await
+    blocking(move || {
+        start_take(
+            &s,
+            &id,
+            source_id,
+            microphone_id,
+            system_audio,
+            muted.unwrap_or(false),
+        )
+    })
+    .await
 }
 #[tauri::command]
 fn get_settings(s: CmdState<'_>) -> Settings {
@@ -969,7 +989,6 @@ pub fn run() {
             start_recording,
             stop_recording,
             record_more,
-            discard_take,
             retry_transcription,
             set_microphone_muted,
             get_recording_status,
@@ -1213,14 +1232,28 @@ mod orchestration_tests {
         let state = state(folder.path().into());
         let session = ready_with_takes(&state);
         state.runtime.lock().unwrap().processing = Some("other".into());
-        assert!(start_take(&state, &session.id, None, None, false)
-            .unwrap_err()
-            .contains("Finish the current"));
+        assert!(start_take(
+            &state,
+            &session.id,
+            "android:R3CN90".into(),
+            None,
+            false,
+            false
+        )
+        .unwrap_err()
+        .contains("Finish the current"));
         state.runtime.lock().unwrap().processing = None;
-        // No combined video on disk: nothing to continue from.
-        assert!(start_take(&state, &session.id, None, None, false)
-            .unwrap_err()
-            .contains("playable recording"));
+        // No video on disk: nothing to continue from.
+        assert!(start_take(
+            &state,
+            &session.id,
+            "android:R3CN90".into(),
+            None,
+            false,
+            false
+        )
+        .unwrap_err()
+        .contains("playable recording"));
         state
             .store
             .update_session(&session.id, |s| {
@@ -1228,7 +1261,15 @@ mod orchestration_tests {
                 Ok(())
             })
             .unwrap();
-        assert!(start_take(&state, &session.id, None, None, false).is_err());
+        assert!(start_take(
+            &state,
+            &session.id,
+            "android:R3CN90".into(),
+            None,
+            false,
+            false
+        )
+        .is_err());
         let unchanged = state.store.session(&session.id).unwrap();
         assert!(unchanged.takes.is_empty());
         assert!(state.runtime.lock().unwrap().active.is_none());
@@ -1240,91 +1281,51 @@ mod orchestration_tests {
             .exists());
     }
     #[test]
-    fn record_more_refuses_a_window_or_display_that_is_gone() {
+    fn record_more_records_the_source_it_is_given() {
         let folder = tempfile::tempdir().unwrap();
         let state = state(folder.path().into());
-        // HWND 1 is never a window, and display 99 is never attached. A
-        // window recorded before identities were stored is refused outright.
-        let window = SourceIdentity::Window {
-            title: "Review".into(),
-            process: "notes.exe".into(),
-            class: "NotesWindow".into(),
-            pid: Some(4242),
-            process_created_ms: Some(1_793_000_000_000),
-        };
-        let display = SourceIdentity::Display {
-            device: r"\\.\DISPLAY99".into(),
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        };
-        for (source, identity) in [
-            ("window:1", None),
-            ("window:1", Some(window)),
-            ("monitor:99", None),
-            ("monitor:99", Some(display)),
-        ] {
-            let mut session = ready_from(&state, source);
-            session.source_identity = identity;
-            state.store.save_session(&session).unwrap();
-            let before = std::fs::read(
-                state
-                    .store
-                    .session_dir(&session.id)
-                    .unwrap()
-                    .join("session.json"),
-            )
+        let session = ready_from(&state, "monitor:1");
+        let dir = state.store.session_dir(&session.id).unwrap();
+        std::fs::write(dir.join("video.mp4"), b"take one").unwrap();
+        // Take 1 is in format 2 already, so no video needs probing.
+        state
+            .store
+            .update_session(&session.id, |s| {
+                s.format_version = FORMAT_VERSION;
+                s.videos = vec![TakeVideo {
+                    take: 1,
+                    start_ms: 0,
+                    duration_ms: 2000,
+                }];
+                Ok(())
+            })
             .unwrap();
-            assert_eq!(
-                start_take(&state, &session.id, None, None, false).unwrap_err(),
-                "The original window/display for this recording is no longer available. Start a new recording to capture another source.",
-                "{source}"
-            );
-            let dir = state.store.session_dir(&session.id).unwrap();
-            assert_eq!(std::fs::read(dir.join("session.json")).unwrap(), before);
-            assert!(!dir.join("takes").exists());
-            assert!(state.runtime.lock().unwrap().active.is_none());
-        }
-    }
-    #[test]
-    fn discarding_a_take_waits_until_the_session_is_not_in_use() {
-        let folder = tempfile::tempdir().unwrap();
-        let state = state(folder.path().into());
-        let mut session = ready_with_takes(&state);
-        let take = |index, offset_ms, duration_ms, status| Take {
-            index,
-            offset_ms,
-            duration_ms,
-            status,
-            folder: takes::folder_label(index),
-            source_id: None,
-            microphone_id: None,
-            system_audio: false,
-        };
-        session.status = "error".into();
-        session.error = Some("Take 2 could not be added.".into());
-        session.takes = vec![
-            take(1, 0, 2000, TakeStatus::Ready),
-            take(2, 2000, 1500, TakeStatus::Swapping),
-        ];
-        state.store.save_session(&session).unwrap();
-        state.runtime.lock().unwrap().processing = Some(session.id.clone());
-        assert!(discard_take_in(&state, &session.id, 2)
-            .unwrap_err()
-            .contains("Finish recording and processing"));
-        assert_eq!(
-            state.store.session(&session.id).unwrap().takes[1].status,
-            TakeStatus::Swapping
-        );
-        state.runtime.lock().unwrap().processing = None;
-        let discarded = discard_take_in(&state, &session.id, 2).unwrap();
-        assert_eq!(discarded.takes[1].status, TakeStatus::Interrupted);
-        assert_eq!(
-            (discarded.status.as_str(), discarded.error.as_deref()),
-            ("ready", None)
-        );
-        assert!(takes::check_can_record_more(&discarded).is_ok());
+        let mut asked = None;
+        let error = start_take_with(
+            &state,
+            &session.id,
+            "window:4242".into(),
+            Some("mic:Headset".into()),
+            true,
+            false,
+            |config, folder, muted| {
+                asked = Some((config, folder.to_owned(), muted));
+                Err("The window closed.".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "The window closed.");
+        let (config, take_folder, muted) = asked.unwrap();
+        assert_eq!(config.source_id, "window:4242");
+        assert_eq!(config.microphone_id.as_deref(), Some("mic:Headset"));
+        assert!(config.system_audio && !muted);
+        assert_eq!(take_folder, takes::take_dir(&dir, 2));
+        // A take that cannot start leaves the session as it was.
+        let restored = state.store.session(&session.id).unwrap();
+        assert_eq!(restored.status, "ready");
+        assert!(restored.takes.is_empty());
+        assert!(!take_folder.exists());
+        assert!(state.runtime.lock().unwrap().active.is_none());
     }
     #[test]
     fn retrying_a_take_transcribes_only_it_and_settles_the_session() {
