@@ -24,9 +24,12 @@ export function useSidebarLayout() {
   const show = useCallback(() => { if (narrow) setFloating(true); else setDocked(true); }, [narrow]);
   const hide = useCallback(() => { if (narrow) setFloating(false); else setDocked(false); }, [narrow]);
   const dismissOverlay = useCallback(() => setFloating(false), []);
+  /** Sets whether a wide window shows the sidebar beside the sheet, whatever the window's width is now. */
+  const dock = useCallback(() => setDocked(true), []);
+  const undock = useCallback(() => setDocked(false), []);
 
   const overlay = narrow && floating;
-  return { visible: narrow ? floating : docked, overlay, toggle, show, hide, dismissOverlay };
+  return { visible: narrow ? floating : docked, docked, overlay, toggle, show, hide, dismissOverlay, dock, undock };
 }
 
 /** How long the sidebar takes to slide out or in; `--motion-sidebar` in tokens.css. */

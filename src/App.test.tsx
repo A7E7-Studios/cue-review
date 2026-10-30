@@ -518,6 +518,122 @@ describe('project and session workflows', () => {
   });
 });
 
+describe('playback controls', () => {
+  it('plays at the speed chosen from the list', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.playbackSpeed(1) }));
+    await user.click(screen.getByRole('menuitemradio', { name: '1.5×' }));
+    expect(document.querySelector('video')!.playbackRate).toBe(1.5);
+    expect(screen.getByRole('button', { name: NAMES.playbackSpeed(1.5) })).toHaveFocus();
+  });
+  it('keeps the chosen speed for the next recording and the next start', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.playbackSpeed(1) }));
+    await user.click(screen.getByRole('menuitemradio', { name: '1.75×' }));
+    expect(localStorage.getItem('cuereview.playbackSpeed')).toBe('1.75');
+    cleanup();
+    await review();
+    expect(screen.getByRole('button', { name: NAMES.playbackSpeed(1.75) })).toBeVisible();
+    // The rate applies when the video loads (a browser resets it on each load).
+    fireEvent.loadedMetadata(document.querySelector('video')!);
+    expect(document.querySelector('video')!.playbackRate).toBe(1.75);
+  });
+  it('hides the sidebar and the transcript in focus', async () => {
+    const user = await review();
+    const focus = screen.getByRole('button', { name: NAMES.focusVideo });
+    await user.click(focus);
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'true');
+  });
+  it('ends focus when the sidebar is shown or the workspace leaves review', async () => {
+    const user = await review();
+    const focus = screen.getByRole('button', { name: NAMES.focusVideo });
+    await user.click(focus);
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'false');
+    await user.click(focus);
+    await user.keyboard('{Control>}n{/Control}');
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+  });
+  it('keeps focus when a search shows the sidebar, and hides it again with its toggle', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await user.type(screen.getByRole('searchbox', { name: NAMES.searchRecordings }), 'alpha');
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'true');
+  });
+  it('keeps both sidebars hidden in focus when a narrow window widens', async () => {
+    window.innerWidth = 900;
+    const user = await ready();
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    // Leaving focus docks it again, as it was before focus.
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
+  it('docks the sidebar when Show sidebar ends focus in a narrow window that widens', async () => {
+    const user = await review();
+    await act(async () => { window.innerWidth = 900; window.dispatchEvent(new Event('resize')); });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
+  it('docks the sidebar again after focus even if the window narrowed meanwhile', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await act(async () => { window.innerWidth = 900; window.dispatchEvent(new Event('resize')); });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    // No overlay over the sheet in the narrow window…
+    expect(document.querySelector('.app')).not.toHaveAttribute('data-sidebar', 'overlay');
+    // …and the sidebar is beside the sheet again once the window widens.
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
+  it('restores both sidebars when focus ends', async () => {
+    const user = await review();
+    const focus = screen.getByRole('button', { name: NAMES.focusVideo });
+    await user.click(focus);
+    await user.click(focus);
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'false');
+    // Escape ends focus too.
+    await user.click(focus);
+    await user.keyboard('{Escape}');
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    // A sidebar the person had hidden stays hidden.
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    await user.click(focus); await user.click(focus);
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    // Showing the sidebar while focused ends focus.
+    await user.click(focus);
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'false');
+  });
+});
+
 describe('layout', () => {
   it('auto-hides the sidebar below 1000px and shows it over the sheet until a recording opens', async () => {
     window.innerWidth = 900;
