@@ -2,7 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo
 import type { FocusEvent, KeyboardEvent, ReactNode } from 'react';
 import type { Segment } from '../backend';
 import { Icon } from '../icons';
-import { activeSegment, activeWord, findMatches, formatTime, segmentSeekMs, transcriptItems, wordSeekMs } from '../review';
+import { activeSegment, activeWord, findMatches, formatTime, playheadSegment, segmentSeekMs, transcriptItems, wordSeekMs } from '../review';
 import { prefersReducedMotion } from '../ui/usePresence';
 import { NAMES } from './types';
 import type { TranscriptPaneProps } from './types';
@@ -127,15 +127,18 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
   const latestSeek = useRef(onSeek);
   useLayoutEffect(() => { latestSeek.current = onSeek; });
 
-  // Following: keep the playing row (or the live tail) in view until the reader scrolls away.
+  // Following: keep the playhead's row (or the live end) in view until the reader scrolls away.
+  // Before the playhead reaches the first sentence there is nothing to follow or return to.
   const [following, setFollowing] = useState(true);
   const autoUntil = useRef(0);
-  const followKey = recording ? `end:${segments.length}:${segments.at(-1)?.text.length ?? 0}` : current >= 0 ? String(current) : '';
+  const playheadRow = recording ? -1 : playheadSegment(segments, timeMs);
+  const hasTarget = recording ? items.length > 0 : playheadRow >= 0;
+  const followKey = recording ? `end:${segments.length}:${segments.at(-1)?.text.length ?? 0}` : playheadRow >= 0 ? String(playheadRow) : '';
   const followTarget = useCallback((): Element | null => {
     const box = scroller.current;
     if (!box) return null;
-    return recording ? box.querySelector('[data-follow-end]') : current >= 0 ? box.querySelector(`[data-row="${current}"]`) : null;
-  }, [recording, current]);
+    return recording ? box.querySelector('[data-follow-end]') : playheadRow >= 0 ? box.querySelector(`[data-row="${playheadRow}"]`) : null;
+  }, [recording, playheadRow]);
   const scrollTo = useCallback((element: Element | null, block: ScrollLogicalPosition) => {
     if (!element) return;
     // Smooth only for short moves; a jump across the transcript is instant.
@@ -160,9 +163,10 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
     const now = performance.now();
     // Our own scroll is still moving: keep treating its events as ours.
     if (now < autoUntil.current) { autoUntil.current = Math.max(autoUntil.current, now + AUTO_SCROLL_MS.auto); return; }
-    if (!box || !following) return;
     const target = followTarget();
-    if (!target || !visibleIn(target, box)) setFollowing(false);
+    if (!box || !target) return;
+    // Scrolling the followed place back into view resumes following, as scrolling away stops it.
+    setFollowing(visibleIn(target, box));
   };
   // A wheel or touch during an automatic scroll is the reader's.
   const reading = () => { autoUntil.current = 0; };
@@ -269,6 +273,6 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
       </div>}
       <div className="cr-transcript-end" data-follow-end aria-hidden="true"/>
     </div>
-    {!following && items.length > 0 && <button type="button" className="cr-btn cr-return" onClick={returnToPlayback}><Icon name="play" filled/>{NAMES.returnToPlayback}</button>}
+    {!following && hasTarget && <button type="button" className="cr-btn cr-return" onClick={returnToPlayback}><Icon name="play" filled/>{recording ? NAMES.backToLive : NAMES.returnToPlayback}</button>}
   </section>;
 }

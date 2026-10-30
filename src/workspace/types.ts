@@ -175,7 +175,7 @@ export interface CaptureControlsProps {
 /** The dark dock that replaces the playback bar while recording (decision 6). No progress bar. */
 export interface RecordingDockProps {
   elapsedMs: number;
-  /** "Take N" and the timer name NAMES.takeTimer(take). 1 for a first recording. */
+  /** The take being recorded, named only in the timer's name NAMES.takeTimer(take). 1 for a first recording. */
   take: number;
   /** 0 to 1. The meter is labelled NAMES.microphoneLevel; hidden when there is no live microphone. */
   audioLevel?: number;
@@ -328,6 +328,7 @@ export const NAMES = {
   seekTo: (time: string) => `Seek to ${time}`,
   seekToWord: (word: string, time: string) => `Seek to ${word} at ${time}`,
   returnToPlayback: 'Return to playback',
+  backToLive: 'Back to live',
   retryTranscription: 'Retry transcription',
   discardTake: (take: number) => `Discard take ${take}`,
 
