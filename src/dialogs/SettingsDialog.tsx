@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import type { Settings, SetupStatus } from '../backend';
+import type { Language, LanguageModel, Settings, SetupStatus } from '../backend';
 import { platform, shortcut } from '../chrome/windowApi';
 import type { Platform, WindowTheme } from '../chrome/windowApi';
 import { Icon } from '../icons';
@@ -69,6 +69,25 @@ export const FONT_CREDIT = 'Figtree typeface © 2022 The Figtree Project Authors
 const message = (problem: unknown) => typeof problem === 'string' ? problem : problem instanceof Error ? problem.message : String(problem);
 const has = (setup: SetupStatus, names: string[]) => names.every(name => setup.dependencies?.some(item => item.name === name && item.available));
 
+const LANGUAGES: { value: Language; label: string }[] = [{ value: 'en', label: 'English' }, { value: 'de', label: 'German' }];
+const languageName = (language: Language) => LANGUAGES.find(item => item.value === language)?.label ?? 'English';
+const megabytes = (bytes: number) => Math.round(bytes / 1e6);
+const sentence = (text: string) => /[.!?]$/.test(text) ? text : `${text}.`;
+const BASE_UNTIL_INSTALLED = 'Recordings are transcribed with the base model until it is installed.';
+const INSTALL_FIRST = 'Install transcription first; this model then downloads by itself.';
+/** How long the dialog waits after one reply before it reads the downloading model again. */
+const POLL_MS = 1000;
+
+/** What the model row says on its right, e.g. "Downloading · 212 of 488 MB". */
+export function modelState(model: LanguageModel): string {
+  switch (model.state) {
+    case 'ready': return 'Ready';
+    case 'downloading': return model.totalBytes > 0 ? `Downloading · ${megabytes(model.receivedBytes)} of ${megabytes(model.totalBytes)} MB` : 'Downloading';
+    case 'failed': return 'Download failed';
+    default: return 'Not downloaded yet';
+  }
+}
+
 interface ShortcutRow { action: string; keys: string[]; spoken: string }
 /** Shortcut reference (decision 8): Ctrl on Windows and Linux, ⌘ on macOS. */
 export function shortcutRows(os: Platform): ShortcutRow[] {
@@ -82,8 +101,8 @@ export function shortcutRows(os: Platform): ShortcutRow[] {
   ];
 }
 
-/** Settings → Appearance, capability statuses, technical details, vocabulary and shortcuts (decision 14, C5). */
-export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme, setup, installing, onInstall, onCheckAgain, settings, onSaveSettings, error }: SettingsDialogProps) {
+/** Settings → Appearance, capability statuses, technical details, the transcription language and its model, vocabulary and shortcuts (decision 14, C5). */
+export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme, setup, installing, onInstall, onCheckAgain, onPollLanguageModel, onDownloadLanguageModel, settings, onSaveSettings, error }: SettingsDialogProps) {
   const stored = settings?.vocabulary ?? '';
   const [draft, setDraft] = useState(stored);
   const [problem, setProblem] = useState('');
@@ -92,11 +111,50 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   const [saved, setSaved] = useState('');
   const pending = useRef(false);
   const field = useRef<HTMLTextAreaElement>(null);
-  const ids = { help: useId(), problem: useId(), field: useId(), tools: useId(), shortcuts: useId() };
+  const ids = { help: useId(), problem: useId(), field: useId(), tools: useId(), transcription: useId(), languageProblem: useId(), shortcuts: useId() };
+  const chosen = settings?.language ?? 'en';
+  /** Shown at once while the choice saves; the stored language again if saving fails. */
+  const [language, setLanguage] = useState<Language>(chosen);
+  const [languageProblem, setLanguageProblem] = useState('');
+  const [starting, setStarting] = useState(false);
+  const pollModel = useRef(onPollLanguageModel);
+  useEffect(() => { pollModel.current = onPollLanguageModel; });
+  /** One read of the model's state; a failed read only waits for the next. */
+  const readModel = () => pollModel.current().catch(() => {});
 
   // Opening, loading or saving shows the stored value.
   useEffect(() => { setDraft(stored); setProblem(''); }, [stored, open]);
-  useEffect(() => { if (open) setSaved(''); }, [open]);
+  useEffect(() => { setLanguage(chosen); }, [chosen, open]);
+  useEffect(() => { if (open) { setSaved(''); setLanguageProblem(''); } }, [open]);
+
+  // While the language model downloads, its state is read about each second so its progress moves:
+  // the next read waits for the last reply, so replies never pile up.
+  const model = setup?.languageModel;
+  const downloading = open && model?.state === 'downloading';
+  useEffect(() => {
+    if (!downloading) return;
+    let stopped = false;
+    let timer = 0;
+    const next = () => { timer = window.setTimeout(() => void readModel().then(() => { if (!stopped) next(); }), POLL_MS); };
+    next();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [downloading]);
+
+  // Choosing saves at once and keeps the vocabulary as stored; the backend has marked the language's
+  // model downloading by the time it returns, so one read starts the progress.
+  const chooseLanguage = async (next: Language) => {
+    if (!settings) return;
+    setLanguage(next); setLanguageProblem('');
+    try { await onSaveSettings({ ...settings, language: next } satisfies Settings); void readModel(); }
+    catch (failure) { setLanguage(chosen); setLanguageProblem(message(failure)); }
+  };
+  const download = async () => {
+    if (starting) return;
+    setStarting(true); setLanguageProblem('');
+    try { await onDownloadLanguageModel(); void readModel(); }
+    catch (failure) { setLanguageProblem(message(failure)); }
+    finally { setStarting(false); }
+  };
 
   // Nothing is disabled while saving, so focus never drops out of the modal.
   const save = async (event: FormEvent) => {
@@ -147,6 +205,42 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
           <button type="button" className="settings-pill" disabled={installing} onClick={onCheckAgain}><Icon name="refresh"/>{NAMES.checkAgain}</button>
         </div>
       </> : <p className="settings-note">Start the desktop app to inspect installed recording tools.</p>}
+    </section>
+
+    <section className="settings-section settings-transcription" aria-labelledby={ids.transcription}>
+      <h3 id={ids.transcription}>Transcription</h3>
+      <div className="settings-row">
+        <label htmlFor={`${ids.field}-language`}>{NAMES.language}</label>
+        <select id={`${ids.field}-language`} value={language} disabled={!settings || installing}
+          aria-describedby={languageProblem ? ids.languageProblem : undefined} onChange={event => void chooseLanguage(event.target.value as Language)}>
+          {LANGUAGES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+      </div>
+      {model && <>
+        <div className="settings-status" data-available={model.state === 'ready' || undefined}>
+          <span>{languageName(model.language)} model</span>
+          <span>{model.state === 'ready' && <Icon name="check"/>}{modelState(model)}</span>
+        </div>
+        {model.state === 'downloading' && <>
+          <div className="settings-progress" role="progressbar" aria-label={NAMES.modelDownload(`${languageName(model.language)} model`)}
+            aria-valuemin={0} aria-valuemax={model.totalBytes > 0 ? megabytes(model.totalBytes) : undefined}
+            aria-valuenow={model.totalBytes > 0 ? Math.min(megabytes(model.receivedBytes), megabytes(model.totalBytes)) : undefined}
+            aria-valuetext={model.totalBytes > 0 ? `${megabytes(model.receivedBytes)} of ${megabytes(model.totalBytes)} MB` : undefined}>
+            <span style={{ width: `${model.totalBytes > 0 ? Math.min(100, model.receivedBytes / model.totalBytes * 100) : 0}%` }}/>
+          </div>
+          {!needsInstall && <p className="settings-note">Until it finishes, recordings are transcribed with the base model.</p>}
+        </>}
+        {model.state === 'failed' && <p className="settings-issue">{sentence(model.error?.trim() || 'The download did not finish')}{needsInstall ? '' : ` ${BASE_UNTIL_INSTALLED}`}</p>}
+        {model.state === 'missing' && !needsInstall && <p className="settings-note">{BASE_UNTIL_INSTALLED}</p>}
+        {/* Without transcription installed there is no base model to fall back on, and the backend refuses the download. */}
+        {(model.state === 'failed' || model.state === 'missing') && needsInstall && <p className="settings-note">{INSTALL_FIRST}</p>}
+        {(model.state === 'failed' || model.state === 'missing') && !needsInstall && <div className="settings-actions">
+          <button type="button" className="settings-pill" disabled={installing} aria-disabled={starting || undefined} onClick={() => void download()}>
+            {model.state === 'failed' ? NAMES.retryModelDownload : NAMES.downloadModel}
+          </button>
+        </div>}
+      </>}
+      {languageProblem && <p id={ids.languageProblem} className="settings-field-error" role="alert">{languageProblem}</p>}
     </section>
 
     <form className="settings-section settings-vocabulary" onSubmit={event => void save(event)} noValidate>

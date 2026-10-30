@@ -91,7 +91,9 @@ fn execute(store: &Store, command: Command) -> Result<(), String> {
             print_json(&agent::moments(store, &id, frames, style)?)
         }
         Command::Setup { install } => print_json(&if install {
-            deps::install_transcription()?
+            deps::install_transcription()?;
+            deps::fetch_language_model()?;
+            deps::setup_status()
         } else {
             deps::setup_status()
         }),

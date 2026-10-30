@@ -102,6 +102,10 @@
 .settings-statuses + .settings-pill,
 .settings-issue + .settings-pill { margin-top: 12px; }
 
+/* Transcription: the language and its model; a determinate bar while the model downloads. */
+.settings-progress { height: 4px; margin-top: 2px; overflow: hidden; border-radius: var(--radius-pill); background: var(--color-divider); }
+.settings-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--color-accent); }
+
 .settings-tool-actions { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .settings-details { flex: 1; min-width: 0; }
 .settings-details > summary {
