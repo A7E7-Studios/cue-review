@@ -1,6 +1,8 @@
 ---
 title: Camera capture
 code:
+  - src-tauri/tauri.conf.json
+  - src-tauri/Entitlements.plist
   - src-tauri/src/capture.rs
   - src-tauri/src/preview.rs
   - src/App.tsx

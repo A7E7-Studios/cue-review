@@ -24,3 +24,9 @@
 - [x] 4.2 Show the source-neutral paused state and render display/camera looks; test: src/stories/Workspace.stories.tsx
 - [ ] 4.3 Verify installed display recording, normal Stop and playback with isolated data; check: Starting a macOS display recording from its preview
 - [x] 4.4 Update architecture and nearest README as appropriate; test: node tools/gate/gate.mjs --local
+
+## 5. Packaged camera access
+
+- [ ] 5.1 Include the camera entitlement in the hardened macOS bundle and inspect the packaged signature; test: codesign --display --entitlements - /Applications/CueReview.app
+- [ ] 5.2 Verify camera preview, normal recording stop and playback in the installed app; check: A recording starts while the camera preview is active
+- [ ] 5.3 Document the signing requirement in architecture and keep the owner merge requirement explicit; test: node tools/gate/gate.mjs --local --pr 25

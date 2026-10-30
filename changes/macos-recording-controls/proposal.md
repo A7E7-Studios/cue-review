@@ -24,6 +24,8 @@ reopens it on macOS, making the trigger behave inconsistently.
   promptly, for both static and moving content.
 - Release an AVFoundation preview before recording opens the source; show Preview paused during
   startup and recording, and resume the draft preview if startup fails.
+- Include the camera entitlement in the hardened macOS app signature so macOS can request and
+  honor camera access when the person selects a camera.
 - A second click on the source or microphone trigger closes that picker, in a new recording and
   in review. Keep keyboard, outside-click and trigger-switching behavior intact.
 - Test production recording output arguments with real synthetic FFmpeg inputs, and picker
@@ -42,6 +44,11 @@ reopens it on macOS, making the trigger behave inconsistently.
   first; the picker's blur handler closes it before the click handler toggles it open again.
 
 ## Calls for the owner
+
+- Native camera verification exposed a separate packaging denial: macOS logs explicitly require
+  `com.apple.security.device.camera` for CueReview's hardened-runtime signature. Include that
+  single entitlement through the Tauri macOS configuration. This protected configuration path
+  requires the owner to merge the completed pull request under AGENTS.md.
 
 - The owner reported the installed buffering fix still failed. A native comparison reproduced
   the remaining cause: with preview active, the recording input never received its first frame;

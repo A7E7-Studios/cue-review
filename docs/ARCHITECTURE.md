@@ -28,6 +28,10 @@ FFmpeg process recordings flush output packets so the startup check can see enco
 waiting for buffered Matroska data. Startup rejects an exited process or output that remains below
 the readiness threshold; scrcpy uses its decoded-frame signal independently of file buffering.
 
+The hardened macOS bundle signs with the camera entitlement from `src-tauri/Entitlements.plist`.
+Its camera usage description explains the request; the entitlement permits macOS to present it,
+and the person's Camera privacy grant still controls access.
+
 Microphone and system audio have independent clocks. Retain capture offsets against one session origin, preserve silence and discontinuities, and align streams when producing the playback file. A recording must remain in sync when the output device is silent for several seconds. Muting a microphone must write silence without collapsing the timeline.
 
 `AudioWriter` (`capture.rs`) writes each track (`mic.wav`, `system.wav`) back to back as the device delivers it, as mono 32-bit float; placing a packet by its timestamp × the nominal rate would leave a short hole wherever the device runs slow, heard as crackle. The WASAPI capture timestamps split the packets into runs at every pause of more than 50 ms (a glitch, or loopback while nothing plays), give each run its start in the take, and measure the device's clock against the wall clock over the runs' own audio. At Stop, `finish` rewrites the track: each run resampled by that ratio with a 32-tap Blackman-windowed sinc (a 1024-phase table, streamed from the file) and placed at its start by the wall clock, silence before, between and after the runs, so the track is exactly the take's length and a gap cannot shift what follows. A ratio more than 5% from 1, or under a second of audio, is not trusted and counts as 1. While recording, gaps are written as wall-clock silence so live snapshots read the track roughly in place, before that correction.
