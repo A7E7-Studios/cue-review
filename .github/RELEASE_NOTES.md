@@ -1,30 +1,33 @@
 CueReview records visual feedback, transcribes it locally, and makes recordings available to coding agents.
 
-## What's new in 0.2.0
+## What's new in 0.3.0
 
-- **A new workspace (Float v2).** Recordings on the left, the video with its controls under it in the center, and the transcript in a full-height column on the right. Windows gets a custom title bar with search and Settings; macOS uses the native traffic lights inside the sidebar. The interface uses the bundled Figtree font.
-- **Record more.** Continue a finished recording as a new take from the same source. Takes play back as one video, with a tick on the scrubber and a "Take 2 · 0:42" divider in the transcript. Only the new take is transcribed. Record more continues only the original window or display; if that source is gone, CueReview says so and offers a new recording. A take that cannot be added can be discarded from the error message.
-- **Keyboard shortcuts.** `Ctrl+R` (`⌘R` on macOS) records, records more or stops; `Ctrl+N` starts a new recording; `Ctrl+K` searches recordings by name. Hints appear when you hover over a control.
-- **Vocabulary.** In Settings, list names and terms the transcriber should expect. It is off by default.
-- **Pointer tracking (Windows).** Display and window recordings remember where the pointer was and when you clicked, so agents can see what "this" and "here" referred to.
-- **Touch tracking (Android).** Android device recordings remember where your finger touched, whether CueReview runs on Windows, macOS or Linux, so agents see your taps the same way they see the Windows pointer. It needs no root, follows the screen's rotation and ignores touches Android treats as palms.
-- **Agent CLI.** `cue transcript ID --segments` prints a compact, timestamped transcript; `cue frames` exports many frames in one call, one per segment if you like, scaled with `--max-width` and with the pointer ringed by `--mark-cursor`; `cue moments` lists spoken pointing moments with the pointer and nearby clicks; `cue rename` renames a session while the app is open; every command has `--help`. Copy for agent now suggests this workflow.
-- The transcript follows playback until you scroll away, then offers Return to playback, and you can search inside it. The theme setting moved to Settings → Appearance.
-- **Fixes.** The live preview no longer freezes after a few frames on some displays, and reconnects if its stream drops. Recordings in a copied or moved data folder play again. An Android recording keeps every frame when the phone turns between portrait and landscape; before, the turned part was lost and the rest played early. `Ctrl+R` and `F5` can no longer reload the window.
+- **Clean audio.** Microphone recordings no longer crackle: the audio track is written without the tiny gaps that some microphones, such as webcams, produced every fraction of a second, so transcripts miss fewer words.
+- **A legible microphone.** While recording, the dock shows the microphone's name, a level meter from −60 to 0 dBFS that shows quiet speech, and a mute that stays visible as muted rather than hiding the meter. Every take starts unmuted unless Mute is ticked before it starts.
+- **One recording bar.** The same bar sits under the video before every take, with the source and microphone pickers and a red Record. In review it holds Record more, so a new take can use another microphone.
+- **Record more from any source.** A new take can record any display, window or device, and each take keeps its own video. Playback moves from take to take on its own, and seeking, the transcript and search land in the right take. Sessions recorded before 0.3.0 play as they did.
+- **Faster, better transcripts.** Words appear about 3 s after they are said while recording, and the transcript is ready about 3 s after Stop, whatever the take's length; the whole take is then transcribed again in the background for accuracy. Transcripts come from the small model of the language chosen in Settings → Transcription (English or German), which mishears far less than before; it downloads by itself in the background. On processors with AVX2 the speech runtime runs several times faster.
+- **Search recordings and transcripts.** **Search** under New session, or `Ctrl+K` (`⌘K`), finds recordings by name and by what was said, and opens a line's recording at that moment. `Ctrl+F` (`⌘F`) finds words in the open transcript.
+- **Playback.** Playback speed is chosen from a list (0.5× to 2×) and stays for every recording. **Focus video** hides the sidebar and the transcript; press it again or Escape to bring them back.
+- **The sidebar.** A plain **New session** row starts a recording; right-click empty space in the sidebar for New session and New section. **Move to section** opens as a submenu. The sidebar slides when it is hidden or shown.
+- **Looks.** The title bar has more room and larger icons. Scrollbars, the Appearance dropdown and dialogs match the app, the dark-mode dialog backdrop is darker, and text renders sharper. The dock no longer shows a take label or a caption.
+- **Capture sources.** The source list orders displays, windows, Android/Quest devices, then cameras, starts on the first available one, and keeps your choice across refreshes. A camera preview that fails says so and offers Retry.
+- **Agent CLI.** `cue frame`, `cue frames` and `cue moments --frames` read each frame from the take its time falls in. `cue setup --install` also fetches the chosen language's model.
+- **Fixes.** Right-clicking no longer shows the webview's page menu (Refresh, Save as, Print). Return to playback appears only when there is playback to return to.
 
-## Removed
+## Changed
 
-- **Markers:** the Add marker button, the M shortcut and the marker dialog. Existing markers stay in their session folders and remain readable in this release. Say "look at this" instead; `cue moments` finds it.
-- The theme button in the sidebar (now in Settings → Appearance).
+- The title bar has no search field; search moved to the sidebar. The sidebar no longer filters recordings by name.
+- Record more no longer joins takes into one video, so it no longer needs extra disk space or a Retry when another program holds the recording open.
 
 ## Known limits
 
+- `cue clip` refuses a range that crosses from one take into the next.
 - Pointer tracking works only for Windows display and window recordings, and touch tracking only for Android devices: not for macOS or Linux desktops, cameras or Meta Quest. Very short clicks (under about 16 ms) can be missed.
 - Touch tracking records the first finger of a gesture, not the others. A touch within about a second of turning the phone can be placed as if it had not turned yet.
 - When an Android recording turns between portrait and landscape, the turned part keeps the first part's frame size, with black bars, so it plays smaller.
 - On Windows, hovering the custom maximize button does not show the Snap Layouts menu.
 - The vocabulary takes at most 20 terms (200 characters) of plain ASCII. It makes those spellings more likely, not certain, and only affects transcriptions made after you save it.
-- Adding a take briefly needs about twice the recording's size in free disk space. If another program has the recording open, CueReview finishes adding the take after you close it and choose Retry, or the next time it starts.
 - Builds are unsigned on Windows and ad-hoc signed, without notarization, on macOS. Windows SmartScreen or macOS Gatekeeper may ask for approval; on macOS, use System Settings → Privacy & Security → Open Anyway. macOS/Linux per-window recording, desktop system audio and Linux Wayland capture are not supported yet, and macOS/Linux hardware capture still needs real-device validation.
 
 ## Install
@@ -33,7 +36,7 @@ CueReview records visual feedback, transcribes it locally, and makes recordings 
 - Linux x64: install the `.deb` on Ubuntu 24.04 or newer, or mark the `.AppImage` executable and run it. The AppImage requires a compatible WebKitGTK/Linux desktop.
 - macOS 12+: open the DMG matching Apple Silicon (`arm64`) or Intel (`x64`) and drag CueReview into Applications. Grant screen, microphone or camera permissions when asked.
 
-The `cue` command and local speech runtime are included. On first use, install the speech models through Settings (about 149 MB). FFmpeg and ffprobe must be installed separately and available on PATH:
+The `cue` command and local speech runtime are included. On first use, install transcription through Settings: the runtime and the base model (about 148 MB), then the chosen language's model in the background (about 488 MB). FFmpeg and ffprobe must be installed separately and available on PATH:
 - Windows (PowerShell): `winget install --id Gyan.FFmpeg --exact`
 - macOS (Homebrew): `brew install ffmpeg`
 - Ubuntu/Debian: `sudo apt update && sudo apt install ffmpeg`
