@@ -36,19 +36,19 @@ eight times slower, and the build with them cannot start on a processor that lac
 #### Scenario: Five minutes of speech is transcribed in seconds
 - **GIVEN** an installed build on a computer with a processor that has AVX2
 - **WHEN** a recording with about five minutes of speech finishes and is transcribed
-- **THEN** its transcript is ready in well under a minute, not the minute and a half it took with
-  the plain build
+- **THEN** its transcript is ready at least three times sooner than the plain build makes it
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::actual_vector_build_is_faster_than_the_plain_build
 - **PROOF** desk: open
 
 ### Requirement: Transcription uses a share of the processor that fits the job
-The app SHALL give a final transcription half the processor's logical threads, from one to eight,
-and the transcription it does while recording a quarter of them, from one to four, because more
-than eight threads barely speed it up, and work done while recording runs beside the capture and
-its encoder.
+The app SHALL give a final transcription half the processor's logical threads, at most eight and
+at least four where the processor has them, and the transcription it does while recording a
+quarter, at most four and at least two where the processor has them, because more than eight
+threads barely speed it up, work done while recording runs beside the capture and its encoder, and
+a small processor must not get fewer threads than whisper's own defaults.
 
 #### Scenario: Thread counts follow the processor
-- **WHEN** a final or a live transcription starts on a processor with 2, 8 or 32 logical threads
-- **THEN** a final transcription uses 1, 4 or 8 threads
-- **AND** a live transcription uses 1, 2 or 4 threads
+- **WHEN** a final or a live transcription starts on a processor with 2, 4, 8 or 32 logical threads
+- **THEN** a final transcription uses 2, 4, 4 or 8 threads
+- **AND** a live transcription uses 2, 2, 2 or 4 threads
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::thread_counts_follow_the_processor

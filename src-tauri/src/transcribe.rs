@@ -14,16 +14,16 @@ use std::{
     time::Duration,
 };
 
-/// Whisper threads for a final transcription: half the logical threads, 1 to
-/// 8. More than eight barely speed it up (take 3 of a review: 8.9 s with 8,
-/// 8.3 s with 16).
+/// Whisper threads for a final transcription: half the logical threads, at
+/// most 8, and never fewer than whisper-cli's default of 4 where the
+/// processor has them. More than eight barely speed it up.
 fn final_threads(logical: usize) -> usize {
-    (logical / 2).clamp(1, 8)
+    (logical / 2).max(logical.min(4)).clamp(1, 8)
 }
-/// Whisper threads while recording: a quarter, 1 to 4, beside the capture
-/// and its encoder.
+/// Whisper threads while recording: a quarter, at most 4 and never fewer
+/// than 2 where the processor has them, beside the capture and its encoder.
 fn live_threads(logical: usize) -> usize {
-    (logical / 4).clamp(1, 4)
+    (logical / 4).max(logical.min(2)).clamp(1, 4)
 }
 fn logical_threads() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
@@ -577,8 +577,10 @@ mod tests {
     fn thread_counts_follow_the_processor() {
         let counts = |logical| (final_threads(logical), live_threads(logical));
         assert_eq!(counts(1), (1, 1));
-        assert_eq!(counts(2), (1, 1));
+        assert_eq!(counts(2), (2, 2));
+        assert_eq!(counts(4), (4, 2));
         assert_eq!(counts(8), (4, 2));
+        assert_eq!(counts(12), (6, 3));
         assert_eq!(counts(32), (8, 4));
     }
     #[test]

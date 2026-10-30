@@ -38,8 +38,9 @@ update; with the AVX2 build and 4 threads, 1.5–2.6 s.
   AVX2 runs the fast build", "A processor without AVX2 runs the plain build".
 - A recording with about five minutes of speech is transcribed in seconds: "Five minutes of speech
   is transcribed in seconds".
-- Final transcription uses half the logical threads (1–8), live transcription a quarter (1–4):
-  "Thread counts follow the processor".
+- Final transcription uses half the logical threads (at most 8, at least 4 where there are that
+  many), live transcription a quarter (at most 4, at least 2): "Thread counts follow the
+  processor".
 
 ## Settled questions
 
