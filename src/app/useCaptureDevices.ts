@@ -3,6 +3,7 @@ import { backend } from '../backend';
 import type { CaptureSource, Microphone } from '../backend';
 
 export const MICROPHONE_UNAVAILABLE = 'The selected microphone is unavailable. Reconnect it and refresh microphones, choose another input, or select No microphone.';
+const SOURCE_PRIORITY: Record<CaptureSource['kind'], number> = { display: 0, window: 1, android: 2, quest: 2, camera: 3 };
 
 /**
  * Capture sources, microphones and the current choices. A choice that disappears on
@@ -19,8 +20,10 @@ export function useCaptureDevices() {
 
   const refreshDevices = useCallback(async () => {
     const [videoSources, audioSources] = await Promise.all([backend.sources(), backend.microphones()]);
-    setSources(videoSources); setMicrophones(audioSources);
-    setSourceId(current => current || videoSources.find(item => item.available)?.id || '');
+    // Keep discovery order within each kind, without changing the backend's list.
+    const ordered = [...videoSources].sort((left, right) => SOURCE_PRIORITY[left.kind] - SOURCE_PRIORITY[right.kind]);
+    setSources(ordered); setMicrophones(audioSources);
+    setSourceId(current => current || ordered.find(item => item.available)?.id || '');
     setMicrophoneId(current => current ?? audioSources[0]?.id ?? '');
   }, []);
 

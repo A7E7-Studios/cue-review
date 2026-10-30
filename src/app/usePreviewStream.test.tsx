@@ -23,6 +23,63 @@ describe('usePreviewStream', () => {
   });
   afterEach(() => { vi.useRealTimers(); });
 
+  it('fails a first-frame timeout with useful Retry guidance and releases the stream', async () => {
+    const { result, rerender } = await started('avfoundation:0');
+    const oldTimeout = result.current.onPreviewTimeout;
+    const oldUrl = result.current.preview;
+    act(() => oldTimeout(oldUrl));
+    expect(result.current.preview).toBe('');
+    expect(result.current.previewError).toMatch(/No preview frame appeared.*camera.*retry/i);
+    expect(backend.stopPreview).toHaveBeenCalledWith(backend.preview.mock.calls[0][1]);
+    const timeoutError = result.current.previewError;
+    act(() => fail()('Preview stream ended during teardown'));
+    expect(result.current.previewError).toBe(timeoutError);
+    rerender({ revision: 1 });
+    await act(async () => {});
+    expect(result.current.preview).toContain('view=2');
+    expect(result.current.previewError).toBe('');
+    act(() => oldTimeout(oldUrl));
+    expect(result.current.preview).toContain('view=2');
+    expect(result.current.previewError).toBe('');
+  });
+
+  it('ignores timeout reports for an obsolete URL or a connection awaiting reconnect', async () => {
+    const { result } = await started();
+    const oldUrl = result.current.preview;
+    act(() => result.current.onPreviewTimeout('http://127.0.0.1:9000/other?view=1'));
+    expect(result.current.previewError).toBe('');
+    act(() => drop()('1'));
+    act(() => result.current.onPreviewTimeout(oldUrl));
+    expect(result.current.previewError).toBe('');
+    act(() => { vi.advanceTimersByTime(PREVIEW_RECONNECT_DELAYS_MS[0]); });
+    expect(result.current.preview).toContain('view=2');
+  });
+
+  it('ignores a late image error from an obsolete connection', async () => {
+    const { result } = await started();
+    const oldError = result.current.onPreviewError;
+    act(() => drop()('1'));
+    act(() => { vi.advanceTimersByTime(PREVIEW_RECONNECT_DELAYS_MS[0]); });
+    expect(result.current.preview).toContain('view=2');
+    act(() => oldError());
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(result.current.preview).toContain('view=2');
+    expect(result.current.previewError).toBe('');
+  });
+
+  it('ignores a timeout callback from a previous source even when its fixture image URL is reused', async () => {
+    backend.preview.mockImplementation(async (_source: string, id: string) => ({ id, url: 'data:image/svg+xml,<svg/>' }));
+    const { result, rerender } = renderHook(({ source }) => usePreviewStream(source, true, 0), { initialProps: { source: 'first' } });
+    await act(async () => {});
+    const oldTimeout = result.current.onPreviewTimeout;
+    const oldUrl = result.current.preview;
+    rerender({ source: 'second' });
+    await act(async () => {});
+    act(() => oldTimeout(oldUrl));
+    expect(result.current.preview).toBe(oldUrl);
+    expect(result.current.previewError).toBe('');
+  });
+
   it('numbers each image connection on the stream URL', () => {
     expect(viewerUrl('http://127.0.0.1:9000/token', 3)).toBe('http://127.0.0.1:9000/token?view=3');
     expect(viewerUrl('http://127.0.0.1:9000/token?a=1', 4)).toBe('http://127.0.0.1:9000/token?a=1&view=4');

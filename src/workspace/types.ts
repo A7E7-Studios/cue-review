@@ -78,6 +78,8 @@ export interface MediaStageProps {
   previewError?: string;
   /** The live preview image failed to load its stream; the stream hook reconnects it. */
   onPreviewError?: () => void;
+  /** No drawable first frame arrived; identifies the exact image connection that timed out. */
+  onPreviewTimeout?: (url: string) => void;
   /** Offered as NAMES.retryPreview beside a preview error: starts the preview again. */
   onRetryPreview?: () => void;
   /** Review video source (`videoUrl(session.videoPath)`). */

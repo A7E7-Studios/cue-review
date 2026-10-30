@@ -26,6 +26,93 @@ pub(crate) fn requires_exclusive_capture(source: &str) -> bool {
     source.starts_with("v4l2:")
 }
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+const MAX_STDERR: usize = 8 * 1024;
+const MAX_ERROR_DETAIL: usize = 1024;
+/// After stdout ends, give the diagnostic reader a bounded chance to consume
+/// the child's final error. A child that closes stdout but hangs must still fail.
+const DIAGNOSTIC_WAIT: Duration = Duration::from_millis(100);
+#[derive(Default)]
+struct DiagnosticTail {
+    bytes: Vec<u8>,
+    finished: bool,
+}
+#[derive(Default)]
+struct DecoderDiagnostics {
+    state: Mutex<DiagnosticTail>,
+    available: Condvar,
+}
+impl DecoderDiagnostics {
+    fn append(&self, bytes: &[u8]) {
+        if let Ok(mut state) = self.state.lock() {
+            if bytes.len() >= MAX_STDERR {
+                state.bytes.clear();
+                state
+                    .bytes
+                    .extend_from_slice(&bytes[bytes.len() - MAX_STDERR..]);
+            } else {
+                let remove = (state.bytes.len() + bytes.len()).saturating_sub(MAX_STDERR);
+                state.bytes.drain(..remove);
+                state.bytes.extend_from_slice(bytes);
+            }
+        }
+    }
+    fn finish(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.finished = true;
+            self.available.notify_all();
+        }
+    }
+    fn wait_for_end(&self) {
+        if let Ok(state) = self.state.lock() {
+            let _ = self
+                .available
+                .wait_timeout_while(state, DIAGNOSTIC_WAIT, |state| !state.finished);
+        }
+    }
+    fn message(&self, source: &str, failure: &str) -> String {
+        let detail = self
+            .state
+            .lock()
+            .ok()
+            .map(|state| {
+                let text = String::from_utf8_lossy(&state.bytes);
+                // Keep an actionable access error even when FFmpeg follows it
+                // with generic summaries; cap the inline excerpt, not the tail.
+                let useful = text
+                    .lines()
+                    .rev()
+                    .find(|line| {
+                        let line = line.to_ascii_lowercase();
+                        [
+                            "permission",
+                            "denied",
+                            "not authorized",
+                            "unauthorized",
+                            "device busy",
+                        ]
+                        .iter()
+                        .any(|term| line.contains(term))
+                    })
+                    .unwrap_or(text.trim());
+                let mut start = useful.len().saturating_sub(MAX_ERROR_DETAIL);
+                while !useful.is_char_boundary(start) {
+                    start += 1;
+                }
+                useful[start..].trim().to_owned()
+            })
+            .unwrap_or_default();
+        let guidance = if source.starts_with("avfoundation:") {
+            "Check Camera or Screen Recording access in macOS System Settings, close other apps using the source, then retry."
+        } else {
+            "Check that the source is connected and available, close other apps using it, then retry."
+        };
+        if detail.is_empty() {
+            format!("{failure} {guidance}")
+        } else {
+            format!("{failure} {guidance}\n{detail}")
+        }
+    }
+}
 #[derive(Default)]
 struct Frames {
     latest: Mutex<(u64, Arc<Vec<u8>>)>,
@@ -109,7 +196,7 @@ impl Preview {
                 return Err(error);
             }
             if timeout.elapsed() > Duration::from_secs(10) {
-                return Err("Preview stream timed out. Reconnect the source and try again.".into());
+                return Err(capture.startup_timeout(source));
             }
             thread::sleep(Duration::from_millis(20));
         }
@@ -299,11 +386,38 @@ fn serve(
     error: &ErrorSink,
     dropped: &DropSink,
 ) {
+    serve_with_timeout(
+        listener,
+        token,
+        frames,
+        failure,
+        error,
+        dropped,
+        Duration::from_secs(15),
+    );
+}
+
+fn serve_with_timeout(
+    listener: TcpListener,
+    token: &str,
+    frames: &Frames,
+    failure: impl Fn() -> Option<String>,
+    error: &ErrorSink,
+    dropped: &DropSink,
+    viewer_wait: Duration,
+) {
     let mut connected = false;
     let began = Instant::now();
     while !frames.stopped.load(Ordering::Relaxed) {
         if let Some(message) = failure() {
             error(message);
+            return;
+        }
+        if !connected && began.elapsed() >= viewer_wait {
+            error(
+                "Preview could not connect to its viewer. Select Retry to reconnect the preview."
+                    .into(),
+            );
             return;
         }
         match listener.accept() {
@@ -338,9 +452,6 @@ fn serve(
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                if !connected && began.elapsed() > Duration::from_secs(15) {
-                    return;
-                }
                 thread::sleep(Duration::from_millis(20));
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
@@ -369,31 +480,34 @@ impl Source {
         match self {
             #[cfg(windows)]
             Self::Native(source) => source.error.lock().ok()?.clone(),
-            Self::Process(source) => source
-                .reader
-                .as_ref()
-                .filter(|reader| reader.is_finished())
-                .map(|_| "Preview stream ended. Reconnect the source and select it again.".into()),
+            Self::Process(source) => source.frames.error.lock().ok()?.clone(),
+        }
+    }
+    fn startup_timeout(&self, id: &str) -> String {
+        match self {
+            #[cfg(windows)]
+            Self::Native(_) => {
+                "Preview stream timed out. Reconnect the source and try again.".into()
+            }
+            Self::Process(source) => source.diagnostics.message(id, "Preview stream timed out."),
         }
     }
 }
 struct ProcessSource {
     decoder: Option<Child>,
     reader: Option<JoinHandle<()>>,
+    diagnostic_reader: Option<JoinHandle<()>>,
+    frames: Arc<Frames>,
+    diagnostics: Arc<DecoderDiagnostics>,
     device: Option<DeviceServer>,
 }
 impl ProcessSource {
     fn start(id: &str, sink: FrameSink, frames: Arc<Frames>) -> Result<Self, String> {
-        let mut source = Self {
-            decoder: None,
-            reader: None,
-            device: None,
-        };
+        let mut device = None;
         let mut command = deps::command("ffmpeg")?;
         command.args(["-hide_banner", "-loglevel", "error", "-threads", "2"]);
         if let Some(serial) = id.strip_prefix("android:") {
-            source.device = Some(DeviceServer::start(serial)?);
-            let device = source.device.as_ref().unwrap();
+            device = Some(DeviceServer::start(serial)?);
             command.args([
                 "-probesize",
                 "32",
@@ -404,56 +518,98 @@ impl ProcessSource {
                 "-f",
                 "h264",
                 "-i",
-                &format!("tcp://127.0.0.1:{}", device.port),
+                &format!("tcp://127.0.0.1:{}", device.as_ref().unwrap().port),
             ]);
         } else {
             capture::configure_video_input(&mut command, id, 30, "32M")?;
         }
-        let mut decoder = command
-            .args([
-                "-an",
-                "-vf",
-                "scale=1280:720:force_original_aspect_ratio=decrease",
-                "-fps_mode",
-                "passthrough",
-                "-c:v",
-                "mjpeg",
-                "-q:v",
-                "5",
-                "-threads",
-                "2",
-                "-f",
-                "image2pipe",
-                "pipe:1",
-            ])
+        command.args([
+            "-an",
+            "-vf",
+            "scale=1280:720:force_original_aspect_ratio=decrease",
+            "-fps_mode",
+            "passthrough",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "-threads",
+            "2",
+            "-f",
+            "image2pipe",
+            "pipe:1",
+        ]);
+        Self::spawn_decoder(command, device, sink, frames, id)
+    }
+    fn spawn_decoder(
+        mut command: std::process::Command,
+        device: Option<DeviceServer>,
+        sink: FrameSink,
+        frames: Arc<Frames>,
+        id: &str,
+    ) -> Result<Self, String> {
+        let decoder = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| format!("Could not start the preview decoder: {error}"))?;
+        let diagnostics = Arc::new(DecoderDiagnostics::default());
+        let mut source = Self {
+            decoder: Some(decoder),
+            reader: None,
+            diagnostic_reader: None,
+            frames: frames.clone(),
+            diagnostics: diagnostics.clone(),
+            device,
+        };
+        let decoder = source.decoder.as_mut().unwrap();
         let mut output = decoder
             .stdout
             .take()
             .ok_or("Preview decoder has no output")?;
-        source.decoder = Some(decoder);
+        let mut stderr = decoder
+            .stderr
+            .take()
+            .ok_or("Preview decoder has no diagnostics")?;
+        let errors = diagnostics.clone();
+        source.diagnostic_reader = Some(thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(length) => errors.append(&chunk[..length]),
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        errors.append(
+                            format!("\nCould not read preview diagnostics: {error}").as_bytes(),
+                        );
+                        break;
+                    }
+                }
+            }
+            errors.finish();
+        }));
+        let id = id.to_owned();
         source.reader = Some(thread::spawn(move || {
             let mut buffer = Vec::new();
             let mut chunk = [0u8; 65536];
             let result = (|| -> Result<(), String> {
                 loop {
-                    let length = output.read(&mut chunk).map_err(|e| e.to_string())?;
+                    let length = match output.read(&mut chunk) {
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        result => result.map_err(|error| error.to_string())?,
+                    };
                     if length == 0 {
-                        return Err(
-                            "Preview stream ended. Reconnect the source and select it again."
-                                .into(),
-                        );
+                        return Err("Preview stream ended.".into());
                     }
                     buffer.extend_from_slice(&chunk[..length]);
                     drain_jpegs(&mut buffer, &sink)?;
                 }
             })();
             if let Err(error) = result {
-                frames.fail(error);
+                diagnostics.wait_for_end();
+                frames.fail(diagnostics.message(&id, &error));
             }
         }));
         Ok(source)
@@ -461,11 +617,18 @@ impl ProcessSource {
 }
 impl Drop for ProcessSource {
     fn drop(&mut self) {
+        // Stop suppresses the expected pipe EOF; kill/reap before joining either
+        // reader so neither can wait forever for a pipe held by this child.
+        self.frames.stopped.store(true, Ordering::Relaxed);
+        self.frames.available.notify_all();
         if let Some(mut decoder) = self.decoder.take() {
             let _ = decoder.kill();
             let _ = decoder.wait();
         }
         if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.diagnostic_reader.take() {
             let _ = reader.join();
         }
         self.device = None;
@@ -646,6 +809,226 @@ impl Drop for DeviceServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decoder_diagnostics_retain_a_bounded_utf8_safe_tail() {
+        let diagnostics = DecoderDiagnostics::default();
+        diagnostics.append(&vec![b'a'; MAX_STDERR + 17]);
+        diagnostics.append("\nPermission denied: camera access\n".as_bytes());
+        let state = diagnostics.state.lock().unwrap();
+        assert_eq!(state.bytes.len(), MAX_STDERR);
+        assert!(
+            String::from_utf8_lossy(&state.bytes).ends_with("Permission denied: camera access\n")
+        );
+        drop(state);
+        diagnostics.append(&vec![0xff; MAX_STDERR + 1]);
+        assert!(diagnostics
+            .message("avfoundation:0", "Preview stream ended.")
+            .contains("System Settings"));
+    }
+
+    #[test]
+    fn decoder_error_excerpt_is_small_and_keeps_the_access_error() {
+        let diagnostics = DecoderDiagnostics::default();
+        diagnostics.append(b"Camera authorization failed: Permission denied\n");
+        diagnostics.append("Generic decoder summary\n".repeat(100).as_bytes());
+        let message = diagnostics.message("avfoundation:0", "Preview stream ended.");
+        assert!(message.contains("Permission denied"), "{message}");
+        assert!(message.len() < MAX_ERROR_DETAIL + 512);
+        diagnostics.append(&vec![0xff; MAX_STDERR]);
+        let message = diagnostics.message("avfoundation:0", "Preview stream ended.");
+        assert!(message.len() < MAX_ERROR_DETAIL + 512);
+        assert_eq!(diagnostics.state.lock().unwrap().bytes.len(), MAX_STDERR);
+    }
+
+    fn decoder_fixture(mode: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "preview::tests::preview_decoder_subprocess_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        command.env("CUEREVIEW_PREVIEW_FIXTURE", mode);
+        command
+    }
+
+    #[test]
+    #[ignore = "Private subprocess fixture; invoked only by the preview process unit tests"]
+    fn preview_decoder_subprocess_fixture() {
+        match std::env::var("CUEREVIEW_PREVIEW_FIXTURE").as_deref() {
+            Ok("failure") => eprintln!("Camera authorization failed: Permission denied"),
+            Ok("flood") => {
+                let mut error = std::io::stderr().lock();
+                for _ in 0..128 {
+                    error.write_all(&[b'x'; 8192]).unwrap();
+                }
+                error
+                    .write_all(b"\nSynthetic decoder final diagnostic\n")
+                    .unwrap();
+            }
+            Ok("wait") => thread::sleep(Duration::from_secs(30)),
+            Err(std::env::VarError::NotPresent) => {}
+            _ => panic!("The preview subprocess fixture needs a recognized explicit mode"),
+        }
+    }
+
+    fn wait_for_decoder_failure(frames: &Frames) -> String {
+        let began = Instant::now();
+        loop {
+            if let Some(error) = frames.error.lock().unwrap().clone() {
+                return error;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "decoder did not report its failure"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn decoder_failure_reports_stderr_and_macos_access_guidance() {
+        let frames = Arc::new(Frames::default());
+        let source = ProcessSource::spawn_decoder(
+            decoder_fixture("failure"),
+            None,
+            Arc::new(|_| {}),
+            frames.clone(),
+            "avfoundation:0",
+        )
+        .unwrap();
+        let error = wait_for_decoder_failure(&frames);
+        assert!(error.contains("Permission denied"), "{error}");
+        assert!(error.contains("System Settings"), "{error}");
+        drop(source);
+    }
+
+    #[test]
+    fn verbose_decoder_stderr_does_not_block_preview_failure_or_teardown() {
+        let frames = Arc::new(Frames::default());
+        let source = ProcessSource::spawn_decoder(
+            decoder_fixture("flood"),
+            None,
+            Arc::new(|_| {}),
+            frames.clone(),
+            "avfoundation:0",
+        )
+        .unwrap();
+        let error = wait_for_decoder_failure(&frames);
+        assert!(
+            error.contains("Synthetic decoder final diagnostic"),
+            "missing final diagnostic"
+        );
+        assert!(error.len() < MAX_ERROR_DETAIL + 512);
+        assert!(
+            !error.contains("Camera access is blocked"),
+            "a decoder error is not proof of denied permission"
+        );
+        drop(source);
+    }
+
+    #[test]
+    fn stopping_a_decoder_reaps_it_and_joins_both_pipe_readers() {
+        let frames = Arc::new(Frames::default());
+        let source = ProcessSource::spawn_decoder(
+            decoder_fixture("wait"),
+            None,
+            Arc::new(|_| {}),
+            frames.clone(),
+            "avfoundation:0",
+        )
+        .unwrap();
+        let began = Instant::now();
+        drop(source);
+        assert!(began.elapsed() < Duration::from_secs(3));
+        assert!(
+            frames.error.lock().unwrap().is_none(),
+            "intentional stop is not a capture error"
+        );
+    }
+
+    #[test]
+    fn a_preview_without_a_viewer_reports_a_recoverable_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let frames = Frames::default();
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let failed = errors.clone();
+        serve_with_timeout(
+            listener,
+            "token",
+            &frames,
+            || None,
+            &(Arc::new(move |message| failed.lock().unwrap().push(message)) as ErrorSink),
+            &(Arc::new(|_| {}) as DropSink),
+            Duration::from_millis(20),
+        );
+        let errors = errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("Retry"), "{}", errors[0]);
+        assert!(TcpStream::connect(address).is_err());
+    }
+
+    #[test]
+    fn synthetic_preview_frames_reach_the_viewer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let frames = Arc::new(Frames::default());
+        let publish = frames.clone();
+        let sink: FrameSink = Arc::new(move |frame| publish.send(frame));
+        let pixels = image::RgbImage::from_pixel(2, 2, image::Rgb([20, 100, 200]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&pixels)
+            .unwrap();
+        let cut = jpeg.len() / 2;
+        let mut incoming = jpeg[..cut].to_vec();
+        drain_jpegs(&mut incoming, &sink).unwrap();
+        incoming.extend_from_slice(&jpeg[cut..]);
+        drain_jpegs(&mut incoming, &sink).unwrap();
+        let served = frames.clone();
+        let server = thread::spawn(move || {
+            serve(
+                listener,
+                "token",
+                &served,
+                || None,
+                &(Arc::new(|message| panic!("{message}")) as ErrorSink),
+                &(Arc::new(|_| {}) as DropSink),
+            )
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client
+            .write_all(b"GET /token?view=1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let mut reader = BufReader::new(client);
+        let mut length = 0;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+            if line == "\r\n" && length > 0 {
+                break;
+            }
+        }
+        let mut delivered = vec![0; length];
+        reader.read_exact(&mut delivered).unwrap();
+        assert_eq!(delivered, jpeg);
+        assert_eq!(image::load_from_memory(&delivered).unwrap().width(), 2);
+        frames.stopped.store(true, Ordering::Relaxed);
+        frames.available.notify_all();
+        server.join().unwrap();
+        assert!(TcpStream::connect(address).is_err());
+    }
+
     #[test]
     fn exclusive_camera_start_waits_for_preview_worker_to_release_source() {
         let frames = Arc::new(Frames::default());
