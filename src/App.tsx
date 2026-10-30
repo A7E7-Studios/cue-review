@@ -97,6 +97,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [focusVideo, setFocusVideo] = useState(false);
+  const [draftSection, setDraftSection] = useState<string | null>(null);
 
   const video = useRef<HTMLVideoElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -157,7 +158,7 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   const openSession = useCallback(async (id: string) => {
     const request = ++selection.current;
-    restorePlayback.current = null; setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
+    restorePlayback.current = null; setDraftSection(null); setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
@@ -268,8 +269,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   // Compact mode exists only while recording.
   useEffect(() => { if (compact && !recording) void exitCompact(); }, [compact, recording, exitCompact]);
 
-  const prepare = useCallback(() => {
+  /** A new session; one started from a section heading is filed in that section when it records. */
+  const prepare = useCallback((sectionId?: unknown) => {
     if (locked) return;
+    setDraftSection(typeof sectionId === 'string' ? sectionId : null);
     selection.current++; shownId.current = null; restorePlayback.current = null; dismissOverlay();
     setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null); setRecordMoreError('');
   }, [locked, dismissOverlay]);
@@ -311,7 +314,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       if (!source?.available) throw new Error(source?.detail || 'Choose an available screen, window, or connected device first.');
       if (microphoneUnavailable) throw new Error(MICROPHONE_UNAVAILABLE);
       setStartingRecording(true);
-      const next = await backend.start(null, null, sourceId, microphoneId || null, systemAudio, muted);
+      const target = draftSection && projects.some(section => section.id === draftSection) ? draftSection : null;
+      const next = await backend.start(target, null, sourceId, microphoneId || null, systemAudio, muted);
       shownId.current = next.id;
       setSession(next); setDraft(false); setTranscript(EMPTY_TRANSCRIPT); runtimeState.current = 'recording';
       setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0 }); setTime(0); setPlaying(false);
@@ -674,7 +678,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
     onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
     onRenameSection={item => openDialog({ kind: 'renameSection', id: item.id, value: item.name })}
-    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })}
+    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })} onNewInSection={prepare}
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
     onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
   const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}

@@ -41,6 +41,8 @@ export interface SidebarProps {
   onRename: (session: Session) => void;
   onRenameSection: (section: Project) => void;
   onCreateSection: (sessionId?: string) => void;
+  /** Starts a new session filed in this section; shown as a + on the section's heading. */
+  onNewInSection?: (sectionId: string) => void;
   onDeleteSection: (section: Project) => void;
   onDeleteSession: (session: Session) => void;
   onReorder: (ids: string[]) => Promise<boolean>;
@@ -262,6 +264,9 @@ export const NAMES = {
   newRecording: 'New recording',
   newSession: 'New session',
   newSection: 'New section',
+  /** The menu item that names a new section in a dialog. */
+  newSectionItem: 'New section…',
+  newSessionInSection: (name: string) => `New session in ${name}`,
   recents: 'Recents',
   section: (name: string) => `Section: ${name}`,
   sectionOptions: (name: string) => `Section options for ${name}`,

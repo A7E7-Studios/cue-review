@@ -378,6 +378,9 @@ describe('project and session workflows', () => {
     await user.keyboard('{Control>}r{/Control}'); expect(backend.start).not.toHaveBeenCalled(); expect(backend.recordMore).not.toHaveBeenCalled();
     await user.keyboard('{ArrowRight}');
     expect(screen.getByRole('menuitem', { name: NAMES.recents })).toHaveFocus();
+    // Escape closes the submenu first, then the recording's menu.
+    await user.keyboard('{Escape}'); expect(screen.getByRole('menuitem', { name: NAMES.moveToSection })).toHaveFocus();
+    expect(screen.queryByRole('menu', { name: NAMES.moveToSection })).not.toBeInTheDocument();
     await user.keyboard('{Escape}'); expect(row).toHaveFocus();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
@@ -394,10 +397,26 @@ describe('project and session workflows', () => {
     const user = await review();
     await user.click(screen.getByRole('button', { name: NAMES.recordingOptions }));
     await user.click(screen.getByRole('menuitem', { name: NAMES.moveToSection }));
-    await user.click(screen.getByRole('menuitem', { name: NAMES.newSection }));
+    await user.click(screen.getByRole('menuitem', { name: NAMES.newSectionItem }));
     await user.type(screen.getByLabelText(NAMES.nameField), 'New category'); await user.click(screen.getByRole('button', { name: NAMES.save }));
     await waitFor(() => expect(within(screen.getByRole('region', { name: NAMES.section('New category') })).getByRole('button', { name: 'Review Alpha' })).toBeEnabled());
     expect(backend.moveSession).toHaveBeenCalledWith('s1', 'p2');
+  });
+  it('files a session started from a section heading in that section', async () => {
+    const user = await review();
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSessionInSection('Project Alpha') }));
+    expect(await screen.findByRole('heading', { name: NAMES.newRecording })).toBeVisible();
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    expect(backend.start).toHaveBeenCalledWith('p1', null, 'display1', 'mic1', false, false);
+  });
+  it('starts a plain new session in Recents after one started from a section', async () => {
+    const user = await review();
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSessionInSection('Project Alpha') }));
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSession }));
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    expect(backend.start).toHaveBeenCalledWith(null, null, 'display1', 'mic1', false, false);
   });
   it('remembers collapsed sections and keeps orphaned recordings reachable', async () => {
     localStorage.setItem('cuereview.closedSections', '["p1"]');

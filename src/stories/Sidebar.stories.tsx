@@ -41,6 +41,7 @@ function SidebarExample({ platform, selected, filter, showCollapse, empty, longN
       onCollapse={() => setMessage('Collapse action selected.')} onNew={() => { setActiveId(''); setMessage('Fresh temporary recording selected.'); }} onOpen={setActiveId}
       onRename={session => setMessage(`Rename selected: ${session.name}`)} onRenameSection={section => setMessage(`Rename selected: ${section.name}`)}
       onCreateSection={() => setSections(items => [...items, { id: `new-${items.length}`, name: 'New section', createdAt: date }])}
+      onNewInSection={id => { setActiveId(''); setMessage(`New session in ${sections.find(section => section.id === id)?.name}.`); }}
       onDeleteSection={section => { setSections(items => items.filter(item => item.id !== section.id)); setSessions(items => items.map(item => item.projectId === section.id ? { ...item, projectId: null } : item)); setMessage('Section removed. Its recordings are back in Recents.'); }}
       onDeleteSession={session => { setSessions(items => items.filter(item => item.id !== session.id)); setMessage('Sample recording removed. No files were accessed.'); }}
       onMove={async (id, projectId) => { setSessions(items => items.map(item => item.id === id ? { ...item, projectId } : item)); setMessage('Recording moved.'); return true; }}
@@ -140,6 +141,23 @@ export const CollapsedSection: Story = {
     const toggle = canvas.getByRole('button', { name: 'Interface' });
     await userEvent.click(toggle);
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  },
+};
+export const MoveToSectionSubmenu: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getAllByRole('button', { name: 'Recording options' })[0]);
+    await userEvent.hover(canvas.getByRole('menuitem', { name: 'Move to section' }));
+    const submenu = await canvas.findByRole('menu', { name: 'Move to section' });
+    await waitFor(() => expect(within(submenu).getByRole('menuitem', { name: 'New section…' })).toBeVisible());
+  },
+};
+export const SectionNewSession: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Keyboard focus in the heading shows its + as hovering does (synthetic hover applies no :hover).
+    canvas.getByRole('button', { name: 'Interface' }).focus();
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'New session in Interface' })).toBeVisible());
   },
 };
 export const ContextMenu: Story = {
