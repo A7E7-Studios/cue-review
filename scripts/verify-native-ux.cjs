@@ -66,7 +66,7 @@ async function windowChrome(){
 }
 // Shortcut hints stay hidden until hover; the name is unchanged and aria-keyshortcuts carries the key (decision 7).
 async function shortcutHint(){
- const button=sidebar().getByRole('button',{name:'New recording',exact:true});const hint=button.locator('kbd');
+ const button=sidebar().getByRole('button',{name:'New session',exact:true});const hint=button.locator('kbd');
  await page.getByRole('heading',{level:1}).hover();await page.waitForTimeout(250);
  const hidden=await hint.evaluate(kbd=>getComputedStyle(kbd).opacity);
  await button.hover();await page.waitForTimeout(250);
@@ -76,7 +76,7 @@ async function shortcutHint(){
  result.checks.shortcutHint={hidden,shown,keys,label:(await hint.textContent()).trim()};
 }
 async function compact(){
- await idle();await sidebar().getByRole('button',{name:'New recording',exact:true}).click();
+ await idle();await sidebar().getByRole('button',{name:'New session',exact:true}).click();
  const initial=await size();
  ownsRecording=true;
  await page.getByRole('button',{name:'Record',exact:true}).click();await page.getByRole('button',{name:'Stop',exact:true}).waitFor();recordingId=(await invoke('get_recording_status')).sessionId;

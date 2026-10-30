@@ -94,7 +94,9 @@ const assert = (value, message) => { if (!value) throw Error(message); };
     await page.screenshot({ path: path.join(output, 'device-review.png') });
     const videoHash = crypto.createHash('sha256').update(fs.readFileSync(session.videoPath)).digest('hex');
     if (await page.getByRole('button', { name: 'Pause', exact: true }).count()) await page.getByRole('button', { name: 'Pause', exact: true }).click();
-    await sidebar.getByRole('button', { name: 'New section', exact: true }).click();
+    // New section lives in the sidebar's own menu: right-click empty space in the list.
+    await page.locator('.recording-list').click({ button: 'right', position: { x: 20, y: 4 } });
+    await page.getByRole('menuitem', { name: 'New section', exact: true }).click();
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Optional Quest group');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     const recordingRow = page.locator(`[data-session-id="${result.sessionId}"]`);
