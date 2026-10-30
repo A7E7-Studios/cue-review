@@ -44,7 +44,10 @@ nothing.
 - **The left panel's menu moved to the sidebar-new-session change.** Both changes built it; the
   recording-flow batch's version lands first, together with the New session row it belongs to, so
   this change keeps only the guard. Q1 (anywhere in the sidebar outside rows and headings) and Q6
-  (open with both items disabled while recording) were passed to that change to build.
+  (open with both items disabled while recording) were passed to that change. When this change was
+  reviewed, the sidebar-new-session spec still said the menu opens only in the list and not at all
+  while recording; the recording-flow batch confirmed it is changing both to match Q1 and Q6. If
+  that change lands without them, the owner's Q1 and Q6 answers for the sidebar are not met yet.
 - The fix is in app code (a document-level `contextmenu` handler), not in the Tauri configuration
   or the WebView2 settings, so it needs no protected path. Turning WebView2's default menus off in
   Rust would also drop the editing menu in text fields, which Q5 keeps.

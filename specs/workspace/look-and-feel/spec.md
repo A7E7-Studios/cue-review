@@ -17,9 +17,8 @@ app rather than a web page in a window.
 ### Requirement: Right-click never shows the webview's page menu
 The app SHALL show no menu when the person right-clicks anywhere without a menu of its own (the
 sidebar's menus are in the sidebar capability), and SHALL keep the system's editing menu in text
-fields, because the webview's page menu (Refresh,
-Save as, Print, More tools) does nothing useful in a desktop app, while Cut, Copy and Paste matter
-where text is typed.
+fields, because the webview's page menu (Refresh, Save as, Print, More tools) does nothing useful in
+a desktop app, while Cut, Copy and Paste matter where text is typed.
 
 #### Scenario: Right-clicking the workspace shows no menu
 - **GIVEN** the app showing a recording
