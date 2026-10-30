@@ -45,7 +45,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 3. Stop. The video is finalized and transcribed locally. Original media remains available if transcription fails; use Retry after fixing setup.
 4. Find the recording in the sidebar. Its title comes from the transcript; click the title to rename it. **Search** under New session (`Ctrl+K`) finds recordings by name and by what was said: before you type it lists the latest recordings, then the recordings and transcript lines that contain every word you type; Enter opens a line's recording at that moment. Drag a recording into a section, or right-click and choose **Move to section**. Right-click empty space in the sidebar (or the **New session** row) for **New session** and **New section**. Sections are optional categories in the same list; drag back to Recents to ungroup. Grouping never moves the media files. Drag section headings to reorder them. Deleting a section returns its recordings to Recents; deleting a recording from its menu requires confirmation and removes its files.
 5. Play the recording and click transcript words to seek. The transcript follows playback until you scroll away; **Return to playback**, or scrolling the playing sentence back into view, resumes following. While recording it follows the newest words, and **Back to live** returns to them. **Find in transcript** (`Ctrl+F`) searches the open recording's text. **Playback speed** opens a list from 0.5× to 2×, and the chosen speed stays for every recording. **Focus video** hides the sidebar and the transcript; press it again or Escape to bring them back. The standard model uses DTW alignment points for visual lookup while retaining the original word intervals and Whisper JSON. Both are model estimates, not guaranteed exact alignment.
-6. **Record more**, in the recording bar under the playback controls, continues the same session as a new take, from the same source (shown locked in the bar) with the microphone chosen there. If that source is gone, the refusal under the bar offers **New recording**. The scrubber shows a tick where each take starts, and the transcript shows a "Take 2 · 0:42" divider. Only the new take is transcribed.
+6. **Record more**, in the recording bar under the playback controls, continues the same session as a new take, from the display, window or device and the microphone chosen in the bar. Each take keeps its own video, and the session plays them one after another: the scrubber shows a tick where each take starts, and the transcript shows a "Take 2 · 0:42" divider. Only the new take is transcribed. If the take cannot start, the reason shows under the bar, with **New recording**.
 7. **Copy for agent**, or open the session folder.
 
 | Action | Windows and Linux | macOS |
@@ -82,8 +82,8 @@ CueReview\
   .instance.lock           held by the app, cue record, cue transcribe and cue setup --install
   models\  tools\          speech models and the downloaded runtime
   sessions\<id>\           one recording
-    session.json           name, status, durationMs and takes[]
-    video.mp4              the combined recording: every take, back to back
+    session.json           name, status, durationMs, takes[] and videos[]
+    video.mp4              take 1's video
     mic.wav  system.wav    take 1's lossless audio tracks, as recorded
     transcript.json  transcript.txt
     whisper.json  vad.txt  vad.log
@@ -91,10 +91,10 @@ CueReview\
     capture-timing.json    take 1's capture clock and canvas
     markers.json           v0.1 markers, kept readable for one release
     exports\               frames and clips written by cue
-    takes\2\               take 2: its audio tracks, cursor.jsonl, capture-timing.json and Whisper output
+    takes\2\               take 2: its video.mp4, audio tracks, cursor.jsonl, capture-timing.json and Whisper output
 ```
 
-Take 1 uses the session folder itself, so sessions recorded before v0.2.0 are single-take sessions with no migration. A later take records into `takes\<N>\`; once its video has been appended to `video.mp4` and verified, the take's own video copy is removed and its lossless audio stays for transcription retries. While a take is added, the folder briefly needs about twice the size of `video.mp4`.
+Take 1 uses the session folder itself, so sessions recorded before v0.2.0 are single-take sessions with no migration. A later take records into `takes\<N>\` and keeps its own `video.mp4` there; `videos` in `session.json` lists where each take video starts on the session timeline. Sessions saved by earlier versions joined their takes into one `video.mp4`, which still plays them all.
 
 New recordings use H.264 CRF23 at their original resolution and frame rate. After successful finalization and stream/duration verification, the duplicate native video is removed. Failed captures retain original tracks for recovery, and lossless audio is retained for transcription retries. Existing recordings are not recompressed or cleaned up automatically.
 
@@ -108,12 +108,12 @@ The packages include `cue.exe` on Windows and `cue` on macOS/Linux next to the a
 | --- | --- |
 | `cue projects` | List sections (projects) as JSON. |
 | `cue sessions [PROJECT_ID]` | List sessions, newest first. |
-| `cue info ID` | One session: name, status, `durationMs`, `takes` and folder paths. |
+| `cue info ID` | One session: name, status, `durationMs`, `takes`, `videos` and folder paths. |
 | `cue transcript ID [--segments \| --json]` | Each segment's text per line; `--segments` prints `[mm:ss \| seekMs] text` lines (h:mm:ss after an hour) with a `── Take N · m:ss ──` divider where each take starts; `--json` prints the full transcript with word times. |
 | `cue find ID --phrase TEXT` | Find a spoken phrase, ignoring case and punctuation: `[{occurrence, startMs, endMs, seekMs, text, cursor?}]`. |
 | `cue frame ID (--at-ms MS \| --phrase TEXT [--occurrence N]) [--max-width N] [--mark-cursor] [--output PATH]` | Export one PNG: `{path, timeMs, width, height, cursor}`. |
 | `cue frames ID (--at-ms MS,MS,... \| --per-segment) [--max-width N] [--mark-cursor] [--output-dir DIR]` | Export several PNGs in one call; `--per-segment` takes one at each segment's seek point and adds `segmentId`. |
-| `cue clip ID --start-ms MS --end-ms MS [--output PATH]` | Export an MP4 clip: `{path}`. |
+| `cue clip ID --start-ms MS --end-ms MS [--output PATH]` | Export an MP4 clip from one take video: `{path}`. A range that crosses into the next take's video is refused. |
 | `cue moments ID [--frames [--max-width N] [--mark-cursor]]` | Spoken pointing moments ("here", "there", "this", "these", "that", "those", "see", "look at", …) with the cursor and the clicks within 1 s: `[{segmentId, term, phrase, seekMs, startMs, endMs, text, cursor, clicks}]`, plus `frame` with `--frames`. |
 | `cue rename ID NAME` | Rename a session. Works while the app is open. |
 | `cue transcribe ID` | Transcribe a finished session again, locally. |
@@ -135,7 +135,7 @@ The recommended agent workflow, which Copy for agent spells out with full paths:
 & 'C:\path\to\cue.exe' clip SESSION_ID --start-ms START_MS --end-ms END_MS
 ```
 
-Read the compact transcript first, look at one frame per segment, list the spoken pointing moments, then inspect what you need with a targeted frame or clip. Prefer `seekMs` for visual lookup; `startMs`/`endMs` keep the model's original intervals. All timestamps are estimates, so inspect neighboring frames when it matters.
+Read the compact transcript first, look at one frame per segment, list the spoken pointing moments, then inspect what you need with a targeted frame or clip. Every time is a session time: frames and clips come from the video of the take the time falls in. Prefer `seekMs` for visual lookup; `startMs`/`endMs` keep the model's original intervals. All timestamps are estimates, so inspect neighboring frames when it matters.
 
 Read-only commands and `rename` run while the app is open. `record`, `transcribe` and `setup --install` take the data folder's process lock and refuse to run beside the app. Every write to a session takes that session's lock in `locks\`, so the app and `cue` never lose each other's updates; the app refreshes the sidebar when its window regains focus. The CLI is the agent interface; no MCP server is needed.
 

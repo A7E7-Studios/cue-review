@@ -1,15 +1,18 @@
 // Record more, end to end, in an owned and isolated desktop app (decision 10).
 //
-// The script starts its own ffplay window (FFmpeg's testsrc2 pattern, with a unique title)
-// and records only that window: take 1 for about 4 s through the UI, then Record more and
-// take 2 for about 4 s. No microphone and no system audio are recorded, but the pointer
-// position is (cursor.jsonl). Nothing leaves the machine.
+// The script starts two ffplay windows of its own (FFmpeg's testsrc2 pattern at 1280x720 and
+// 960x540, with unique titles) and records only those: take 1 of the first window for about 4 s
+// through the UI, then Record more of the second window, chosen in the review bar, for about
+// 4 s. No microphone and no system audio are recorded, but the pointer position is
+// (cursor.jsonl). Nothing leaves the machine.
 //
-// It then checks: one session with two takes and their offsets; video.mp4 lasting about the
-// sum of the takes (ffprobe); the take 2 dock (its timer named "Take 2 elapsed time", no take label
-// or caption) and the live divider while recording, the "Take 2 · m:ss"
-// divider afterwards; the take divider in `cue transcript ID --segments`; and cursor.jsonl in
-// both take folders. Recordings are stopped on failure. Prints a JSON summary, writes it to
+// It then checks: one session with two takes, their offsets and take 2's source; each take's own
+// video.mp4 lasting about its take (ffprobe), nothing joined, and session.videos placing them; the
+// take 2 dock (its timer named "Take 2 elapsed time", no take label or caption) and the live
+// divider while recording, the "Take 2 · m:ss" divider afterwards; the player loading take 2's
+// video when the scrubber seeks into it and take 1's when it seeks back; `cue frame` in take 2 at
+// take 2's size; the take divider in `cue transcript ID --segments`; and cursor.jsonl in both
+// take folders. Recordings are stopped on failure. Prints a JSON summary, writes it to
 // test-results/takes-verification.json and exits 1 on failure.
 //
 //   cargo build --release (the app and cue.exe in src-tauri/target/release), ffplay on PATH
@@ -33,9 +36,10 @@ const executable = process.env.CUEREVIEW_APP || path.join(release, 'cuereview.ex
 const cue = process.env.CUEREVIEW_CUE || path.join(release, 'cue.exe');
 const endpoint = 'http://127.0.0.1:9229';
 const windowTitle = `CueReview takes fixture ${runId.slice(0, 8)}`;
+const secondTitle = `CueReview takes fixture 2 ${runId.slice(0, 8)}`;
 const TAKE_MS = 4000;
 const result = { runId, dataRoot, executable, cue, windowTitle, whisperDir: whisperDir(), startedAt: new Date().toISOString(), checks: {}, observations: {}, screenshots: [], pageErrors: [], cleanup: {}, passed: false };
-let app, player, browser, page, appLog, sessionId, recording = false;
+let app, player, secondPlayer, browser, page, appLog, sessionId, recording = false;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const assert = (condition, message) => { if (!condition) throw Error(message); };
@@ -52,6 +56,12 @@ async function until(condition, timeoutMs, message, everyMs = 200) {
     if (Date.now() > end) throw Error(message);
     await delay(everyMs);
   }
+}
+function probeSize(file) {
+  const out = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  assert(!out.error && out.status === 0, `ffprobe failed on ${file}: ${out.error || out.stderr}`);
+  const [width, height] = out.stdout.trim().split(',').map(Number);
+  return { width, height };
 }
 function probeMs(file) {
   const out = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
@@ -76,7 +86,7 @@ async function waitForIdleSession(timeoutMs = 180000) {
   return until(async () => {
     const status = await invoke('get_recording_status');
     const session = await invoke('get_session', { id: sessionId });
-    const busy = (session.takes || []).some(take => ['recording', 'finalizing', 'swapping', 'transcribing'].includes(take.status));
+    const busy = (session.takes || []).some(take => ['recording', 'finalizing', 'transcribing'].includes(take.status));
     return status.state === 'idle' && ['ready', 'error'].includes(session.status) && !busy && session;
   }, timeoutMs, 'Processing did not finish within the time limit', 250);
 }
@@ -122,6 +132,8 @@ async function launch() {
   // The source window: a moving test pattern this script owns, closed in cleanup.
   player = spawn('ffplay', ['-hide_banner', '-loglevel', 'error', '-an', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-window_title', windowTitle, '-x', '1280', '-y', '720'], { windowsHide: false, stdio: 'ignore' });
   result.ownedPlayerPid = player.pid;
+  secondPlayer = spawn('ffplay', ['-hide_banner', '-loglevel', 'error', '-an', '-f', 'lavfi', '-i', 'testsrc2=size=960x540:rate=30', '-window_title', secondTitle, '-x', '960', '-y', '540'], { windowsHide: false, stdio: 'ignore' });
+  result.ownedSecondPlayerPid = secondPlayer.pid;
   appLog = fs.openSync(path.join(output, 'owned-app.log'), 'a');
   const env = withSpeechPath({ ...process.env, CUEREVIEW_DATA_DIR: dataRoot, CUEREVIEW_MODEL: path.join(appData, 'models', 'ggml-base.bin'), CUEREVIEW_VAD_MODEL: path.join(appData, 'models', 'ggml-silero-v6.2.0.bin'), WEBVIEW2_USER_DATA_FOLDER: path.join(dataRoot, 'profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9229' });
   app = spawn(executable, [], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', appLog, appLog] });
@@ -136,15 +148,17 @@ async function launch() {
   page.on('pageerror', error => result.pageErrors.push(error.message));
   await page.waitForFunction(() => !!window.__TAURI_INTERNALS__);
 }
-async function chooseSource() {
+// Chooses the ffplay window titled `title` in the recording bar, without system audio, and, the
+// first time, with no microphone.
+async function chooseSource(title, first) {
   const source = await until(async () => {
-    assert(player.exitCode === null, `ffplay exited (${player.exitCode})`);
-    return (await invoke('list_sources')).find(item => item.kind === 'window' && item.name === windowTitle);
-  }, 20000, `The ffplay window "${windowTitle}" never appeared as a capture source`, 500);
-  result.source = source;
-  await page.getByRole('heading', { level: 1, name: 'New recording', exact: true }).waitFor();
+    assert(player.exitCode === null && secondPlayer.exitCode === null, 'An ffplay window exited');
+    return (await invoke('list_sources')).find(item => item.kind === 'window' && item.name === title);
+  }, 20000, `The ffplay window "${title}" never appeared as a capture source`, 500);
+  (result.sources ??= []).push(source);
+  if (first) await page.getByRole('heading', { level: 1, name: 'New recording', exact: true }).waitFor();
   const sources = page.getByRole('group', { name: 'Capture sources', exact: true });
-  const option = sources.getByRole('button', { name: windowTitle, exact: true });
+  const option = sources.getByRole('button', { name: title, exact: true });
   await page.locator('.source-trigger').click();
   await sources.waitFor();
   if (!await option.count()) {
@@ -152,21 +166,29 @@ async function chooseSource() {
     await option.waitFor();
   }
   await option.click();
-  await until(async () => await page.locator('.source-trigger').getAttribute('title') === windowTitle, 5000, 'The source picker did not select the ffplay window');
+  await until(async () => await page.locator('.source-trigger').getAttribute('title') === title, 5000, `The source picker did not select "${title}"`);
   await page.locator('.source-trigger').click();
   const systemAudio = page.getByLabel('Include system audio', { exact: true });
   if (await systemAudio.isChecked()) await systemAudio.uncheck();
   await page.keyboard.press('Escape');
+  if (!first) return source;
   await page.locator('.mic-trigger').click();
   await page.getByRole('group', { name: 'Microphone options', exact: true }).getByRole('button', { name: 'No microphone', exact: true }).click();
   result.observations.previewFrame = await until(() => page.evaluate(() => document.querySelector('.preview-image')?.naturalWidth || 0), 10000, 'no preview').catch(() => 0);
+  return source;
 }
+// The review video's file and length, or null without one.
+const loadedVideo = () => page.evaluate(() => {
+  const video = document.querySelector('video');
+  return video ? { src: decodeURIComponent(video.currentSrc || video.src || ''), durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : 0 } : null;
+});
+const TAKE_2_VIDEO = /[\\/]takes[\\/]2[\\/]video\.mp4/;
 
 async function main() {
   fs.mkdirSync(output, { recursive: true });
-  console.error(`verify-takes records the window "${windowTitle}" twice for about ${TAKE_MS / 1000} s (no microphone, no system audio). Nothing leaves this machine.`);
+  console.error(`verify-takes records the windows "${windowTitle}" and "${secondTitle}" for about ${TAKE_MS / 1000} s each (no microphone, no system audio). Nothing leaves this machine.`);
   await launch();
-  await chooseSource();
+  await chooseSource(windowTitle, true);
 
   const first = await recordTake(1, page.getByRole('button', { name: 'Record', exact: true }));
   result.observations.take1 = first.status;
@@ -174,6 +196,8 @@ async function main() {
   await recordMore.waitFor();
   await until(() => recordMore.isEnabled(), 20000, 'Record more did not become available after take 1');
   const baseMs = first.session.durationMs;
+  // Take 2 records another window, chosen in the review bar.
+  const secondSource = await chooseSource(secondTitle, false);
   const second = await recordTake(2, recordMore);
   result.checks.dockShowedTake2 = second.status;
   assert(Math.abs(second.status.takeOffsetMs - baseMs) <= 50, `Take 2 started at ${second.status.takeOffsetMs} ms instead of the ${baseMs} ms recorded before it`);
@@ -190,12 +214,19 @@ async function main() {
   for (const take of takes) assert(take.durationMs >= TAKE_MS - 1500 && take.durationMs <= TAKE_MS + 4000, `Take ${take.index} lasts ${take.durationMs} ms, not about ${TAKE_MS} ms`);
   result.checks.takes = takes.map(({ index, offsetMs, durationMs, status, folder }) => ({ index, offsetMs, durationMs, status, folder }));
 
-  // video.mp4 holds both takes.
+  assert(takes[1].sourceId === secondSource.id, `Take 2 recorded ${takes[1].sourceId}, not ${secondSource.id}`);
+
+  // Each take keeps its own video; nothing is joined.
   const sessionDir = path.join(dataRoot, 'sessions', sessionId);
-  const combinedMs = probeMs(path.join(sessionDir, 'video.mp4'));
-  const sumMs = takes[0].durationMs + takes[1].durationMs;
-  assert(Math.abs(combinedMs - sumMs) <= 250 && Math.abs(combinedMs - session.durationMs) <= 250, `video.mp4 lasts ${combinedMs} ms; the takes add up to ${sumMs} ms and the session says ${session.durationMs} ms`);
-  result.checks.combinedVideo = { probedMs: combinedMs, takesMs: sumMs, sessionMs: session.durationMs };
+  const files = [path.join(sessionDir, 'video.mp4'), path.join(sessionDir, 'takes', '2', 'video.mp4')];
+  const ownMs = files.map(probeMs);
+  takes.forEach((take, index) => assert(Math.abs(ownMs[index] - take.durationMs) <= 250, `Take ${take.index}'s video lasts ${ownMs[index]} ms, not its ${take.durationMs} ms`));
+  const sizes = files.map(probeSize);
+  assert(sizes[0].width !== sizes[1].width, `The two windows recorded at one size: ${JSON.stringify(sizes)}`);
+  const videos = session.videos || [];
+  assert(session.formatVersion === 2 && videos.length === 2 && videos[0].take === 1 && videos[0].startMs === 0 && videos[1].take === 2 && videos[1].startMs === takes[1].offsetMs, `Session videos: ${JSON.stringify(videos)}`);
+  assert(Math.abs(session.durationMs - (takes[1].offsetMs + ownMs[1])) <= 250, `The session lasts ${session.durationMs} ms, not both takes`);
+  result.checks.takeVideos = { probedMs: ownMs, sizes, videos, sessionMs: session.durationMs };
   result.observations.take2Folder = fs.readdirSync(path.join(sessionDir, 'takes', '2')).sort();
   result.observations.strayTemporaryFiles = fs.readdirSync(sessionDir).filter(name => /^video\..*\.tmp\.mp4$/.test(name));
 
@@ -204,13 +235,22 @@ async function main() {
   assert(JSON.stringify(transcript.takes) === JSON.stringify([{ index: 1, startMs: 0 }, { index: 2, startMs: takes[1].offsetMs }]), `Transcript takes: ${JSON.stringify(transcript.takes)}`);
   const divider = `Take 2 · ${clock(takes[1].offsetMs)}`;
   await transcriptPane().getByText(divider, { exact: true }).waitFor();
-  // The review reloads the combined file rather than a cached take 1.
-  const videoMs = await until(() => page.evaluate(expected => {
-    const duration = document.querySelector('video')?.duration;
-    return Number.isFinite(duration) && Math.abs(duration * 1000 - expected) <= 250 ? Math.round(duration * 1000) : 0;
-  }, combinedMs), 20000, 'The review video does not last as long as the combined video.mp4');
+  // The player opens on take 1's video; seeking into take 2 loads take 2's, and back again.
+  const take1Video = await until(async () => { const video = await loadedVideo(); return video?.durationMs && video; }, 20000, 'The review video did not load');
+  assert(!TAKE_2_VIDEO.test(take1Video.src) && Math.abs(take1Video.durationMs - ownMs[0]) <= 250, `The review opened ${JSON.stringify(take1Video)}, not take 1's video`);
+  await page.getByRole('slider', { name: 'Playback position', exact: true }).focus();
+  await page.keyboard.press('End');
+  const take2Video = await until(async () => { const video = await loadedVideo(); return video && TAKE_2_VIDEO.test(video.src) && video.durationMs && video; }, 20000, "Seeking to the end did not load take 2's video");
+  assert(Math.abs(take2Video.durationMs - ownMs[1]) <= 250, `Take 2's video in the player lasts ${take2Video.durationMs} ms`);
+  await page.keyboard.press('Home');
+  await until(async () => { const video = await loadedVideo(); return video && !TAKE_2_VIDEO.test(video.src); }, 20000, "Seeking back did not load take 1's video");
   await shot('review-two-takes');
-  result.checks.reviewUi = { divider, videoMs };
+  result.checks.reviewUi = { divider, take1Video, take2Video };
+
+  // A frame in take 2 comes from take 2's video, at its size.
+  const frame = JSON.parse(runCue(['frame', sessionId, '--at-ms', String(takes[1].offsetMs + 1000)]));
+  assert(frame.width === sizes[1].width && frame.height === sizes[1].height, `cue frame in take 2 is ${frame.width}x${frame.height}, not take 2's ${sizes[1].width}x${sizes[1].height}`);
+  result.checks.take2Frame = frame;
 
   // The CLI view of the same session.
   const lines = runCue(['transcript', sessionId, '--segments']).split(/\r?\n/).filter(Boolean);
@@ -246,10 +286,11 @@ async function cleanup() {
     if (app.exitCode === null) { result.cleanup.forcedOwnedAppPid = app.pid; app.kill(); }
     result.cleanup.appExitCode = app.exitCode;
   } else if (app && app.exitCode === null) app.unref();
-  if (player && player.exitCode === null) {
-    player.kill();
-    for (let i = 0; i < 30 && player.exitCode === null; i++) await delay(100);
-    result.cleanup.playerClosed = player.exitCode !== null;
+  for (const [name, owned] of [['playerClosed', player], ['secondPlayerClosed', secondPlayer]]) {
+    if (!owned || owned.exitCode !== null) continue;
+    owned.kill();
+    for (let i = 0; i < 30 && owned.exitCode === null; i++) await delay(100);
+    result.cleanup[name] = owned.exitCode !== null;
   }
   if (appLog !== undefined) fs.closeSync(appLog);
 }

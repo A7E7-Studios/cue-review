@@ -43,7 +43,7 @@ function Foundations() {
         <button type="button" className="cr-btn cr-record"><span className="cr-record-dot" aria-hidden="true"/><span className="cr-capture-label">Record</span></button>
       </div>
       <div className="cr-capture">
-        <button type="button" className="cr-btn cr-capture-trigger" aria-disabled="true" title="Record more records this session's own source"><Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">Display 1</span><Icon name="chevron" strokeWidth={2}/></button>
+        <button type="button" className="cr-btn cr-capture-trigger" title="Design review — Figma"><Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">Design review — Figma</span><Icon name="chevron" strokeWidth={2}/></button>
         <button type="button" className="cr-btn cr-capture-trigger"><Icon name="micOff" strokeWidth={1.7}/><span className="cr-capture-label">No microphone</span><Icon name="chevron" strokeWidth={2}/></button>
         <button type="button" className="cr-btn cr-record" disabled><span className="cr-record-dot" aria-hidden="true"/><span className="cr-capture-label">Record more</span></button>
       </div>

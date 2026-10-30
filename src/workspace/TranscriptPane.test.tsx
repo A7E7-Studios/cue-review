@@ -95,27 +95,6 @@ describe('TranscriptPane in review', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
     rerender(<TranscriptPane {...props({ transcript: { segments: [] }, error: 'Speech model not found', onRetry, retryDisabled: true })}/>);
     expect(screen.getByRole('button', { name: 'Retry transcription' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: /^Discard take/ })).not.toBeInTheDocument();
-  });
-  it('offers to discard a stuck take beside Retry, inert but focusable while another action runs', async () => {
-    const user = userEvent.setup();
-    const onRetry = vi.fn();
-    const onDiscardTake = vi.fn();
-    const error = 'Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.';
-    const { rerender } = render(<TranscriptPane {...props({ error, onRetry, discardTake: 2, onDiscardTake })}/>);
-    const discard = screen.getByRole('button', { name: 'Discard take 2' });
-    expect(discard).toHaveAttribute('aria-haspopup', 'dialog');
-    expect(discard.parentElement).toBe(screen.getByRole('button', { name: 'Retry transcription' }).parentElement);
-    await user.click(discard);
-    expect(onDiscardTake).toHaveBeenCalledTimes(1);
-    rerender(<TranscriptPane {...props({ error, onRetry, discardTake: 2, onDiscardTake, retryBusy: true })}/>);
-    expect(discard).toHaveAttribute('aria-disabled', 'true');
-    discard.focus();
-    expect(discard).toHaveFocus();
-    await user.click(discard);
-    await user.click(screen.getByRole('button', { name: 'Retry transcription' }));
-    expect(onDiscardTake).toHaveBeenCalledTimes(1);
-    expect(onRetry).not.toHaveBeenCalled();
   });
   it('shows the empty message in the body and a Processing chip while processing', () => {
     render(<TranscriptPane {...props({ transcript: { segments: [] }, status: 'processing', emptyMessage: 'Transcribing…' })}/>);
