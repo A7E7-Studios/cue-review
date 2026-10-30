@@ -6,6 +6,9 @@ code:
   - src/Sidebar.tsx
   - src/Sidebar.css
   - src/workspace/types.ts
+  - src/ui/fonts.css
+  - src/assets/fonts/
+  - scripts/hint-figtree.py
 ---
 # Look and feel
 
@@ -63,3 +66,21 @@ menu never offers what would be refused.
 - **WHEN** the person right-clicks the left panel outside a recording row or a section heading
 - **THEN** the menu opens with New recording and New section both disabled
 - **PROOF** test: src/Sidebar.test.tsx::the panel menu disables its items while recording
+
+### Requirement: Text is sharp at 100% display scaling
+The app SHALL set its text in a hinted build of its typeface, in every weight its styles use,
+because the unhinted Figtree blurs at the app's 12–14 px sizes on a display at 100% scaling, and a
+weight without its own face would be synthesized or fall back to another font.
+
+#### Scenario: Text renders sharply at 100% display scaling
+- **GIVEN** Windows at 100% display scaling
+- **WHEN** the person reads the sidebar, the transcript and Settings
+- **THEN** letter stems are crisp, with no grey fringe beside each stroke
+- **AND** the text keeps the Float v2 typeface, sizes and line breaks
+- **PROOF** test: src/ui/fonts.test.ts::ships hinted static Figtree faces
+- **PROOF** desk: open
+
+#### Scenario: Every weight the styles use has its own face
+- **WHEN** a style sets a font weight
+- **THEN** the bundled typeface has a face of that weight for Latin and extended Latin text
+- **PROOF** test: src/ui/fonts.test.ts::declares a face for every weight the styles use
