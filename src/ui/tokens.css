@@ -1,7 +1,7 @@
 /* Shared foundation for compact desktop tools. Values describe roles, not screens. */
 :root {
-  /* Figtree (OFL) is bundled through @fontsource-variable/figtree; nothing loads from the network. */
-  --font-family: 'Figtree Variable', system-ui, 'Segoe UI', sans-serif;
+  /* Figtree (OFL) is bundled as hinted static weights (ui/fonts.css); nothing loads from the network. */
+  --font-family: 'Figtree', system-ui, 'Segoe UI', sans-serif;
   --font-body: 13px;
   --font-control: 12px;
   --font-meta: 11px;
@@ -83,6 +83,7 @@
   --size-icon-button: 34px;
   --size-play: 40px;
   --size-pill: 32px;
+  --size-speed-button: 56px;
   --size-pill-large: 36px;
   --size-dock-control: 44px;
   /* Transcript words: the gap added to each space, the spoken pill's reach into it, and Figtree's text box (ascent + descent). */
@@ -95,7 +96,6 @@
   --color-sheet: #FFFFFF;
   --color-sheet-edge: #DFE2E7;
   --color-divider: #EEEFF2;
-  --color-control-divider: #E4E4E9;
   --color-panel: #EEF0F4;
   --shadow-panel: inset 0 0 0 1px rgba(255, 255, 255, .7), 0 0 0 1px rgba(24, 24, 27, .06), 0 6px 18px rgba(16, 24, 40, .06);
   --color-pill: #F4F4F7;
@@ -131,16 +131,23 @@
   --color-button: #FFFFFF;
   --color-control-ring: #DCDFE5;
   --shadow-button: 0 0 0 1px var(--color-control-ring), 0 1px 2px rgba(16, 24, 40, .06);
-  --shadow-new-recording: var(--shadow-button);
   /* The macOS toolbar's search field. */
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #E4E6EB;
-  --color-record-disabled: #C9A3A6;
 
   /* Window controls (Windows) */
   --color-window-control-hover: rgba(24, 24, 27, .06);
   --color-window-close-hover: #C42B1C;
   --color-on-window-close: #FFFFFF;
+
+  /* Scrollbars, dialogs and their backdrop */
+  --color-scrollbar: rgba(24, 24, 27, .22);
+  --color-scrollbar-hover: rgba(24, 24, 27, .40);
+  --color-scrim: rgba(16, 20, 26, .33);
+  --color-dialog: var(--color-sheet);
+  --color-dialog-edge: var(--color-sheet-edge);
+  /* A list that opens over a dialog, such as the Appearance dropdown's. */
+  --color-dialog-menu: var(--color-sheet);
 
   /* Media */
   --shadow-video: 0 0 0 1px rgba(24, 24, 27, .08), 0 10px 30px rgba(16, 24, 40, .10);
@@ -167,7 +174,7 @@
   --color-live-divider: #F6CFD1;
   --color-live-tail: #F7F7F9;
 
-  /* Recording dock and the Record more pill */
+  /* Recording dock and the recording bar */
   --color-dock: #18181B;
   --color-dock-divider: #3F3F46;
   --color-dock-text: #FAFAFA;
@@ -185,8 +192,7 @@
   --radius-field: 7px;
   --radius-row: 8px;
   --radius-video: 12px;
-  /* FloatV2ReviewMac: a lighter ring on New recording and a cooler search field. */
-  --shadow-new-recording: 0 0 0 1px rgba(24, 24, 27, .07), 0 1px 2px rgba(16, 24, 40, .06);
+  /* FloatV2ReviewMac: a cooler search field. */
   --color-toolbar-search: #F2F3F6;
 }
 
@@ -224,7 +230,6 @@
   --color-sheet: #1A1A1E;
   --color-sheet-edge: #2C2C32;
   --color-divider: #26262B;
-  --color-control-divider: #34343B;
   --color-panel: #202025;
   --shadow-panel: inset 0 0 0 1px rgba(255, 255, 255, .04), 0 0 0 1px rgba(0, 0, 0, .4), 0 6px 18px rgba(0, 0, 0, .3);
   --color-pill: #28282E;
@@ -252,12 +257,19 @@
   --color-text-tertiary-on-selected: #9393A0;
   --color-button: #232328;
   --color-control-ring: #34343B;
-  --shadow-new-recording: var(--shadow-button);
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #232328;
-  --color-record-disabled: #6B4446;
 
   --color-window-control-hover: rgba(255, 255, 255, .08);
+
+  /* Dialogs step forward: a 50% black backdrop (Fluent 2's dark overlay) behind a surface one step
+     lighter than the sheet, since dark surfaces show elevation by getting lighter. */
+  --color-scrollbar: rgba(255, 255, 255, .20);
+  --color-scrollbar-hover: rgba(255, 255, 255, .36);
+  --color-scrim: rgba(0, 0, 0, .50);
+  --color-dialog: #222227;
+  --color-dialog-edge: rgba(255, 255, 255, .09);
+  --color-dialog-menu: #2B2B31;
 
   --shadow-video: 0 0 0 1px rgba(255, 255, 255, .08), 0 10px 30px rgba(0, 0, 0, .35);
   --shadow-video-live: 0 0 0 2px var(--color-record), 0 10px 30px rgba(0, 0, 0, .35);

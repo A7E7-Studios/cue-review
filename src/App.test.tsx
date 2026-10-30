@@ -87,6 +87,11 @@ async function loaded(props: AppProps = { platform: 'windows' }) {
   return user;
 }
 const sidebar = () => within(screen.getByRole('complementary', { name: NAMES.recordings }));
+/** New section lives in the sidebar's own menu: right-click empty space in the list. */
+const newSection = async (user: ReturnType<typeof userEvent.setup>) => {
+  fireEvent.contextMenu(document.querySelector('.recording-list')!);
+  await user.click(screen.getByRole('menuitem', { name: NAMES.newSection }));
+};
 const transcriptPane = () => within(screen.getByRole('region', { name: NAMES.transcript }));
 async function open(user: TestUser, name: string | RegExp = /Review Alpha/) {
   await user.click(sidebar().getByRole('button', { name }));
@@ -188,7 +193,7 @@ describe('keyboard interaction', () => {
   });
   it('scopes recording shortcuts outside naming and settings dialogs while allowing Escape', async () => {
     const user = await ready();
-    await user.click(screen.getByRole('button', { name: NAMES.newSection }));
+    await newSection(user);
     screen.getByRole('button', { name: NAMES.cancel }).focus();
     await user.keyboard('{Control>}r{/Control}{Control>}n{/Control}');
     expect(backend.start).not.toHaveBeenCalled();
@@ -230,6 +235,26 @@ describe('keyboard interaction', () => {
     await transcriptPane().findByText('Processing');
     expect(backend.stop).toHaveBeenCalledOnce(); expect(backend.start).not.toHaveBeenCalled();
   });
+  it('a mute from the dock ends with its take', async () => {
+    backend.recordMore.mockImplementation(async (id: string) => { sessions = sessions.map(item => item.id === id ? takeTwo(item) : item); status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 }; return takeTwo(newSession(id)); });
+    backend.stop.mockImplementation(async () => { const next = takeTwo(newSession(), 'ready'); sessions = [next]; status = { state: 'idle' }; return next; });
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+    const user = await review();
+    await user.keyboard('{Control>}r{/Control}');
+    await screen.findByRole('timer', { name: NAMES.takeTimer(2) });
+    const mute = screen.getByRole('button', { name: NAMES.muteMicrophone });
+    // The dock names the microphone it records.
+    expect(mute).toHaveAccessibleDescription('Studio microphone');
+    await user.click(mute);
+    await waitFor(() => expect(screen.getByRole('button', { name: NAMES.muteMicrophone })).toHaveAttribute('aria-pressed', 'true'));
+    expect(backend.mute).toHaveBeenLastCalledWith(true);
+    await user.keyboard('{Control>}r{/Control}');
+    await waitFor(() => expect(backend.stop).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled());
+    await user.keyboard('{Control>}r{/Control}');
+    await waitFor(() => expect(backend.recordMore).toHaveBeenCalledTimes(2));
+    expect(backend.recordMore).toHaveBeenLastCalledWith('s1', 'mic1', false, false);
+  });
   it('starts a new recording with Ctrl+N, except while recording', async () => {
     const user = await review();
     await user.keyboard('{Control>}n{/Control}');
@@ -242,7 +267,7 @@ describe('keyboard interaction', () => {
   });
   it('uses ⌘ on macOS, where Ctrl does nothing', async () => {
     const user = await ready({ platform: 'macos' });
-    expect(screen.getByRole('button', { name: NAMES.newRecording })).toHaveAttribute('aria-keyshortcuts', 'Meta+N');
+    expect(screen.getByRole('button', { name: NAMES.newSession })).toHaveAttribute('aria-keyshortcuts', 'Meta+N');
     await user.keyboard('{Control>}r{/Control}');
     expect(backend.start).not.toHaveBeenCalled();
     await user.keyboard('{Meta>}r{/Meta}');
@@ -373,17 +398,45 @@ describe('project and session workflows', () => {
     await user.keyboard('{Control>}r{/Control}'); expect(backend.start).not.toHaveBeenCalled(); expect(backend.recordMore).not.toHaveBeenCalled();
     await user.keyboard('{ArrowRight}');
     expect(screen.getByRole('menuitem', { name: NAMES.recents })).toHaveFocus();
+    // Escape closes the submenu first, then the recording's menu.
+    await user.keyboard('{Escape}'); expect(screen.getByRole('menuitem', { name: NAMES.moveToSection })).toHaveFocus();
+    expect(screen.queryByRole('menu', { name: NAMES.moveToSection })).not.toBeInTheDocument();
     await user.keyboard('{Escape}'); expect(row).toHaveFocus();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+  it('cancels the webview menu across the workspace and keeps it in text fields', async () => {
+    await review();
+    // fireEvent returns false when a handler cancelled the event, which is what keeps the webview's menu away.
+    expect(fireEvent.contextMenu(screen.getByRole('region', { name: NAMES.recordingVideo }))).toBe(false);
+    expect(fireEvent.contextMenu(screen.getByRole('button', { name: NAMES.settings }))).toBe(false);
+    expect(fireEvent.contextMenu(document.body)).toBe(false);
+    expect(fireEvent.contextMenu(screen.getByRole('searchbox', { name: NAMES.searchRecordings }))).toBe(true);
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
   it('creates a section directly from a recording menu and moves only that recording', async () => {
     const user = await review();
     await user.click(screen.getByRole('button', { name: NAMES.recordingOptions }));
     await user.click(screen.getByRole('menuitem', { name: NAMES.moveToSection }));
-    await user.click(screen.getByRole('menuitem', { name: NAMES.newSection }));
+    await user.click(screen.getByRole('menuitem', { name: NAMES.newSectionItem }));
     await user.type(screen.getByLabelText(NAMES.nameField), 'New category'); await user.click(screen.getByRole('button', { name: NAMES.save }));
     await waitFor(() => expect(within(screen.getByRole('region', { name: NAMES.section('New category') })).getByRole('button', { name: 'Review Alpha' })).toBeEnabled());
     expect(backend.moveSession).toHaveBeenCalledWith('s1', 'p2');
+  });
+  it('files a session started from a section heading in that section', async () => {
+    const user = await review();
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSessionInSection('Project Alpha') }));
+    expect(await screen.findByRole('heading', { name: NAMES.newRecording })).toBeVisible();
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    expect(backend.start).toHaveBeenCalledWith('p1', null, 'display1', 'mic1', false, false);
+  });
+  it('starts a plain new session in Recents after one started from a section', async () => {
+    const user = await review();
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSessionInSection('Project Alpha') }));
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSession }));
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    expect(backend.start).toHaveBeenCalledWith(null, null, 'display1', 'mic1', false, false);
   });
   it('remembers collapsed sections and keeps orphaned recordings reachable', async () => {
     localStorage.setItem('cuereview.closedSections', '["p1"]');
@@ -436,7 +489,7 @@ describe('project and session workflows', () => {
   });
   it('creates and renames a section without changing the fresh recording category', async () => {
     const user = await ready();
-    await user.click(screen.getByRole('button', { name: NAMES.newSection }));
+    await newSection(user);
     await user.type(screen.getByLabelText(NAMES.nameField), 'Beta product'); await user.click(screen.getByRole('button', { name: NAMES.save }));
     await screen.findByRole('button', { name: 'Beta product' });
     expect(backend.createProject).toHaveBeenCalledWith('Beta product');
@@ -462,6 +515,122 @@ describe('project and session workflows', () => {
     expect(await sidebar().findByRole('button', { name: 'Renamed from the CLI' })).toBeVisible();
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Renamed from the CLI');
     expect(screen.getByRole('button', { name: 'Seek to here at 0:02' })).toBeVisible();
+  });
+});
+
+describe('playback controls', () => {
+  it('plays at the speed chosen from the list', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.playbackSpeed(1) }));
+    await user.click(screen.getByRole('menuitemradio', { name: '1.5×' }));
+    expect(document.querySelector('video')!.playbackRate).toBe(1.5);
+    expect(screen.getByRole('button', { name: NAMES.playbackSpeed(1.5) })).toHaveFocus();
+  });
+  it('keeps the chosen speed for the next recording and the next start', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.playbackSpeed(1) }));
+    await user.click(screen.getByRole('menuitemradio', { name: '1.75×' }));
+    expect(localStorage.getItem('cuereview.playbackSpeed')).toBe('1.75');
+    cleanup();
+    await review();
+    expect(screen.getByRole('button', { name: NAMES.playbackSpeed(1.75) })).toBeVisible();
+    // The rate applies when the video loads (a browser resets it on each load).
+    fireEvent.loadedMetadata(document.querySelector('video')!);
+    expect(document.querySelector('video')!.playbackRate).toBe(1.75);
+  });
+  it('hides the sidebar and the transcript in focus', async () => {
+    const user = await review();
+    const focus = screen.getByRole('button', { name: NAMES.focusVideo });
+    await user.click(focus);
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'true');
+  });
+  it('ends focus when the sidebar is shown or the workspace leaves review', async () => {
+    const user = await review();
+    const focus = screen.getByRole('button', { name: NAMES.focusVideo });
+    await user.click(focus);
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'false');
+    await user.click(focus);
+    await user.keyboard('{Control>}n{/Control}');
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+  });
+  it('keeps focus when a search shows the sidebar, and hides it again with its toggle', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await user.type(screen.getByRole('searchbox', { name: NAMES.searchRecordings }), 'alpha');
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'true');
+  });
+  it('keeps both sidebars hidden in focus when a narrow window widens', async () => {
+    window.innerWidth = 900;
+    const user = await ready();
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    // Leaving focus docks it again, as it was before focus.
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
+  it('docks the sidebar when Show sidebar ends focus in a narrow window that widens', async () => {
+    const user = await review();
+    await act(async () => { window.innerWidth = 900; window.dispatchEvent(new Event('resize')); });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
+  it('docks the sidebar again after focus even if the window narrowed meanwhile', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await act(async () => { window.innerWidth = 900; window.dispatchEvent(new Event('resize')); });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    // No overlay over the sheet in the narrow window…
+    expect(document.querySelector('.app')).not.toHaveAttribute('data-sidebar', 'overlay');
+    // …and the sidebar is beside the sheet again once the window widens.
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
+  it('restores both sidebars when focus ends', async () => {
+    const user = await review();
+    const focus = screen.getByRole('button', { name: NAMES.focusVideo });
+    await user.click(focus);
+    await user.click(focus);
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'false');
+    // Escape ends focus too.
+    await user.click(focus);
+    await user.keyboard('{Escape}');
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    // A sidebar the person had hidden stays hidden.
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    await user.click(focus); await user.click(focus);
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    // Showing the sidebar while focused ends focus.
+    await user.click(focus);
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
+    expect(focus).toHaveAttribute('aria-pressed', 'false');
   });
 });
 
@@ -813,6 +982,21 @@ describe('recording and processing', () => {
     expect(await screen.findByRole('button', { name: 'Seek to batch at 0:13' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: NAMES.stop })).toBeEnabled();
   });
+  it('starts a new recording with the display and microphone chosen in the recording bar', async () => {
+    backend.sources.mockResolvedValue([{ id: 'display1', name: 'Display 1', kind: 'display', available: true }, { id: 'display2', name: 'Display 2', kind: 'display', available: true }]);
+    const user = await ready();
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    await user.click(bar.getByRole('button', { name: 'Display 1' }));
+    await chooseSource(user, 'Display 2');
+    await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
+    await chooseMicrophone(user, 'mic2');
+    expect(bar.getByRole('button', { name: 'Display 2' })).toBeVisible();
+    expect(bar.getByRole('button', { name: 'Headset microphone' })).toBeVisible();
+    await user.click(bar.getByRole('button', { name: NAMES.record }));
+    await screen.findByRole('button', { name: NAMES.stop });
+    expect(backend.start).toHaveBeenCalledOnce();
+    expect(backend.start).toHaveBeenCalledWith(null, null, 'display2', 'mic2', false, false);
+  });
   it('passes selected USB source, selected microphone, system audio and mute independently, then loads the completed transcript', async () => {
     const user = await ready();
     await user.click(screen.getByRole('button', { name: 'Display 1' }));
@@ -886,9 +1070,11 @@ describe('record more', () => {
     expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic1', false, false);
     expect(document.querySelector('video')).toBeNull();
     expect(screen.getByRole('button', { name: NAMES.copyForAgent })).toBeDisabled();
-    expect(screen.getByRole('button', { name: NAMES.newRecording })).toBeDisabled();
-    // Sections cannot change while recording, so New section is off too (a deliberate deviation from the mock).
-    expect(screen.getByRole('button', { name: NAMES.newSection })).toBeDisabled();
+    expect(screen.getByRole('button', { name: NAMES.newSession })).toBeDisabled();
+    // Sections cannot change while recording: the sidebar's menu opens with its items disabled.
+    fireEvent.contextMenu(document.querySelector('.recording-list')!);
+    expect(screen.getByRole('menuitem', { name: NAMES.newSection })).toHaveAttribute('aria-disabled', 'true');
+    await user.keyboard('{Escape}');
     expect(transcriptPane().getByText('Take 2 · recording')).toBeVisible();
     expect(screen.queryByText(/Adding to this session/)).not.toBeInTheDocument();
 
@@ -928,7 +1114,7 @@ describe('record more', () => {
     const media = document.querySelector('video');
     backend.recordMore.mockRejectedValueOnce('Record more needs a playable recording.');
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    expect(await within(screen.getByRole('group', { name: NAMES.playback })).findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
+    expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
     await waitFor(() => expect(document.querySelector('video')).not.toBe(media));
     const restored = document.querySelector('video')!;
     expect(restored).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
@@ -1038,26 +1224,80 @@ describe('record more', () => {
     expect(discard).toHaveFocus();
     expect(transcriptPane().getByText('Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.')).toBeVisible();
   });
-  it('shows a source that is gone beside Record more, with New recording as the way forward', async () => {
+  it('records more from the bar under the playback controls, with its microphone and the session\'s locked source', async () => {
+    backend.recordMore.mockImplementation(async (id: string) => { sessions = sessions.map(item => item.id === id ? takeTwo(item) : item); status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 }; return takeTwo(newSession(id)); });
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+    const user = await review();
+    // The playback row holds no Record more; the recording bar under it does.
+    expect(within(screen.getByRole('group', { name: NAMES.playback })).queryByRole('button', { name: NAMES.recordMore })).not.toBeInTheDocument();
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    const source = bar.getByRole('button', { name: 'Display 1' });
+    expect(source).toHaveAttribute('aria-disabled', 'true');
+    expect(source).toHaveAccessibleDescription('Record more records this session\'s own source');
+    // Focusable, so the keyboard reaches it, but it opens no picker.
+    source.focus(); await user.keyboard('{Enter}');
+    expect(source).toHaveFocus();
+    expect(screen.queryByRole('group', { name: NAMES.captureSources })).not.toBeInTheDocument();
+    await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
+    await chooseMicrophone(user, 'mic2');
+    await user.click(bar.getByRole('button', { name: NAMES.recordMore }));
+    expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toBeVisible();
+    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic2', false, false);
+    // While the take records, the dock takes the bar's place.
+    expect(screen.queryByRole('group', { name: NAMES.recordingBar })).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: NAMES.recordingControls })).toBeVisible();
+  });
+  it('names the session\'s source in the bar as the original source once it is no longer listed', async () => {
+    sessions = [{ ...newSession(), sourceId: 'window:42' }];
+    await review();
+    const source = within(screen.getByRole('group', { name: NAMES.recordingBar })).getByRole('button', { name: 'Original source' });
+    expect(source).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
+  });
+  it('never names the session\'s source after a listed window or display that may only share its id', async () => {
+    // After a restart a window handle or display number can name something else, and the listing cannot tell.
+    backend.sources.mockResolvedValue([
+      { id: 'monitor:1', name: 'Display 1 — DELL U2720Q', kind: 'display', available: true },
+      { id: 'window:42', name: 'Inbox — Mail', kind: 'window', available: true, detail: 'Mail.exe' },
+    ]);
+    const identity = { kind: 'window' as const, title: 'Design review — Figma', process: 'Figma.exe', class: 'Chrome_WidgetWin_1', pid: 4120 };
+    const screenTwo = { kind: 'display' as const, device: '\\\\.\\DISPLAY2', left: 0, top: 0, right: 2560, bottom: 1440 };
+    sessions = [{ ...newSession(), sourceId: 'window:42', sourceIdentity: identity }, { ...newSession('s3'), name: 'Review Beta', sourceId: 'monitor:1', sourceIdentity: screenTwo },
+      { ...newSession('s4'), name: 'Review Gamma', sourceId: 'monitor:1' }];
+    const user = await review();
+    const bar = () => within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    // A window is named by the title the session stored, not by the window that has its handle now.
+    expect(bar().getByRole('button', { name: 'Design review — Figma' })).toHaveAttribute('aria-disabled', 'true');
+    expect(bar().queryByRole('button', { name: 'Inbox — Mail' })).not.toBeInTheDocument();
+    // A display is named by the device the session stored, not by the display that has its number now.
+    await open(user, /Review Beta/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    expect(bar().getByRole('button', { name: 'Display 2' })).toHaveAttribute('aria-disabled', 'true');
+    expect(bar().queryByRole('button', { name: /DELL/ })).not.toBeInTheDocument();
+    // Without a stored identity it is the original source.
+    await open(user, /Review Gamma/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    expect(bar().getByRole('button', { name: 'Original source' })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
+  });
+  it('shows a source that is gone under the recording bar, with New recording as the way forward', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
     const user = await review();
     backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    const playback = within(screen.getByRole('group', { name: NAMES.playback }));
-    const message = await playback.findByRole('alert');
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    const message = await bar.findByRole('alert');
     expect(message).toHaveTextContent(SOURCE_GONE);
-    // Beside the pill only, not repeated in the workspace banner; the pill is described by it.
+    // Under the bar only, not repeated in the workspace banner; Record more is described by it.
     expect(screen.getAllByRole('alert')).toEqual([message]);
-    expect(playback.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(SOURCE_GONE);
+    expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(SOURCE_GONE);
     await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
 
     // Dismissing hides it; the next refusal brings it back.
     await user.click(within(message).getByRole('button', { name: NAMES.dismissError }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(playback.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription('Record more (Ctrl+R): continue this session as a new take');
+    expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription('Record more (Ctrl+R): continue this session as a new take');
     backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    const again = await playback.findByRole('alert');
+    const again = await bar.findByRole('alert');
 
     // New recording opens a draft, where another source can be chosen.
     await user.click(within(again).getByRole('button', { name: NAMES.newRecording }));
@@ -1084,7 +1324,7 @@ describe('record more', () => {
     await user.keyboard('{Enter}');
     expect(backend.recordMore).toHaveBeenCalledOnce();
     await act(async () => refuse(SOURCE_GONE));
-    expect(await within(screen.getByRole('group', { name: NAMES.playback })).findByRole('alert')).toHaveTextContent(SOURCE_GONE);
+    expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent(SOURCE_GONE);
     expect(more).not.toHaveAttribute('aria-disabled');
     expect(more).toHaveFocus();
     expect(more).toHaveAccessibleDescription(SOURCE_GONE);
@@ -1313,7 +1553,7 @@ describe('local setup recovery and request races', () => {
   it('does not let an old session response replace a newly prepared recording', async () => {
     let resolveOld!: (value: Session) => void; backend.session.mockImplementationOnce(() => new Promise<Session>(resolve => { resolveOld = resolve; }));
     const user = await ready(); await open(user);
-    await user.click(sidebar().getByRole('button', { name: NAMES.newRecording }));
+    await user.click(sidebar().getByRole('button', { name: NAMES.newSession }));
     await act(async () => resolveOld(newSession()));
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(NAMES.newRecording);
     expect(screen.getByRole('button', { name: NAMES.record })).toBeEnabled();
@@ -1446,7 +1686,7 @@ describe('dialogs, focus and announcements', () => {
     backend.start.mockRejectedValueOnce('USB device disconnected.');
     await user.click(screen.getByRole('button', { name: NAMES.record }));
     expect(await screen.findByRole('alert')).toHaveTextContent('USB device disconnected.');
-    await user.click(screen.getByRole('button', { name: NAMES.newSection }));
+    await newSection(user);
     const dialog = screen.getByRole('dialog', { name: NAMES.newSection });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     backend.createProject.mockRejectedValueOnce('A section with that name already exists.');

@@ -24,7 +24,7 @@ async function setTheme(theme){
  try{
   browser=await chromium.connectOverCDP('http://127.0.0.1:9224');page=browser.contexts()[0].pages()[0];
   await idle();
-  await page.getByRole('complementary',{name:'Recordings',exact:true}).getByRole('button',{name:'New recording',exact:true}).click();
+  await page.getByRole('complementary',{name:'Recordings',exact:true}).getByRole('button',{name:'New session',exact:true}).click();
   await page.locator('.mic-trigger').click();
   await page.getByRole('group',{name:'Microphone options',exact:true}).getByRole('button',{name:'No microphone',exact:true}).click();
   await page.locator('.source-trigger').click();

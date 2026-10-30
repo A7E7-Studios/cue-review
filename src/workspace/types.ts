@@ -41,6 +41,8 @@ export interface SidebarProps {
   onRename: (session: Session) => void;
   onRenameSection: (section: Project) => void;
   onCreateSection: (sessionId?: string) => void;
+  /** Starts a new session filed in this section; shown as a + on the section's heading. */
+  onNewInSection?: (sectionId: string) => void;
   onDeleteSection: (section: Project) => void;
   onDeleteSession: (session: Session) => void;
   onReorder: (ids: string[]) => Promise<boolean>;
@@ -108,7 +110,7 @@ export interface ScrubberProps {
   disabled?: boolean;
 }
 
-/** Review controls: scrubber, play, time, speed, focus and the Record more pill (decision 6). */
+/** Review controls: scrubber, play, time, speed and focus (decision 6). The recording bar sits under them. */
 export interface PlaybackBarProps {
   timeMs: number;
   durationMs: number;
@@ -119,25 +121,19 @@ export interface PlaybackBarProps {
   /** False when the session has no playable video. */
   canPlay: boolean;
   onTogglePlay: () => void;
-  /** 0.75, 1, 1.5 or 2; labelled NAMES.playbackSpeed(speed). */
+  /** One of PLAYBACK_SPEEDS; the button is labelled NAMES.playbackSpeed(speed) and opens NAMES.playbackSpeedList. */
   speed: number;
-  onCycleSpeed: () => void;
+  onSpeed: (speed: number) => void;
+  /** Whether Focus video hides both sidebars; the NAMES.focusVideo toggle shows it as pressed. */
   focused: boolean;
-  /** Labelled NAMES.focusVideo or NAMES.restoreTranscript. */
   onToggleFocus: () => void;
-  recordMoreDisabled: boolean;
-  /** Another action is under way: Record more and the error's actions stay focusable but inert (aria-disabled). */
-  recordMoreBusy?: boolean;
-  onRecordMore: () => void;
-  /** Why Record more failed, shown beside the pill as an alert, with NAMES.newRecording and NAMES.dismissError. */
-  recordMoreError?: string;
-  /** Starts a new recording instead, for a source that is gone. */
-  onNewRecording?: () => void;
-  onDismissRecordMoreError?: () => void;
 }
 
 export type CaptureMenu = 'source' | 'microphone';
-/** Draft controls: source and microphone pickers and Record. Keeps the `.source-trigger` and `.mic-trigger` hooks. */
+/**
+ * The recording bar, named NAMES.recordingBar: source and microphone pickers and Record in a draft,
+ * Record more in review. Keeps the `.source-trigger` and `.mic-trigger` hooks.
+ */
 export interface CaptureControlsProps {
   /** Every listed source, including a placeholder for a missing previous choice. */
   sources: CaptureSource[];
@@ -162,14 +158,26 @@ export interface CaptureControlsProps {
   onRefreshMicrophones: () => void;
   /** Disables the source picker (recording or busy). */
   locked: boolean;
+  /**
+   * Review: the picker shows the session's own source, because a take records the session's source.
+   * It stays focusable but inert (aria-disabled), titled and described by SOURCE_LOCKED.
+   */
+  sourceLocked?: boolean;
   /** Disables the microphone picker. */
   busy: boolean;
-  /** NAMES.record, NAMES.pleaseWait or NAMES.transcribing. */
+  /** Review: Record continues the session as a new take, and its tooltip says so. */
+  review?: boolean;
+  /** NAMES.record, NAMES.pleaseWait or NAMES.transcribing in a draft; NAMES.recordMore in review. */
   recordLabel: string;
   recordDisabled: boolean;
-  /** Recording is starting: Record stays focusable but inert (aria-disabled). */
+  /** Recording is starting: Record and the error's New recording stay focusable but inert (aria-disabled). */
   recordBusy?: boolean;
   onRecord: () => void;
+  /** Why Record more failed, shown under the bar as an alert, with NAMES.newRecording and NAMES.dismissError. */
+  recordMoreError?: string;
+  /** Starts a new recording instead, for a source that is gone. */
+  onNewRecording?: () => void;
+  onDismissRecordMoreError?: () => void;
 }
 
 /** The dark dock that replaces the playback bar while recording (decision 6). No progress bar. */
@@ -177,12 +185,14 @@ export interface RecordingDockProps {
   elapsedMs: number;
   /** The take being recorded, named only in the timer's name NAMES.takeTimer(take). 1 for a first recording. */
   take: number;
-  /** 0 to 1. The meter is labelled NAMES.microphoneLevel; hidden when there is no live microphone. */
+  /** Linear RMS, 0 to 1: the loudest since the last status. The meter is labelled NAMES.microphoneLevel and reads it in dBFS; hidden when there is no live microphone. */
   audioLevel?: number;
   /** The locked source, shown as a disabled button. */
   sourceName: string;
   hasMicrophone: boolean;
-  /** Toggle labelled NAMES.muteMicrophone with aria-pressed. */
+  /** The recorded microphone's device name; the chip shows its short form and its tooltip the whole name. */
+  microphoneName?: string;
+  /** The microphone chip: a toggle labelled NAMES.muteMicrophone with aria-pressed, reading NAMES.muted while muted. */
   muted: boolean;
   onMuted: (muted: boolean) => void;
   /** Labelled NAMES.compact or NAMES.expand. */
@@ -260,13 +270,18 @@ export const NAMES = {
   // Sidebar
   recordings: 'Recordings',
   newRecording: 'New recording',
+  newSession: 'New session',
   newSection: 'New section',
+  /** The menu item that names a new section in a dialog. */
+  newSectionItem: 'New section…',
+  newSessionInSection: (name: string) => `New session in ${name}`,
   recents: 'Recents',
   section: (name: string) => `Section: ${name}`,
   sectionOptions: (name: string) => `Section options for ${name}`,
   recordingOptions: 'Recording options',
   recordingActions: 'Recording actions',
   sectionActions: 'Section actions',
+  sidebarActions: 'Sidebar actions',
   moveToSection: 'Move to section',
   rename: 'Rename',
   moveUp: 'Move up',
@@ -293,11 +308,15 @@ export const NAMES = {
   pause: 'Pause',
   playbackPosition: 'Playback position',
   playbackSpeed: (speed: number) => `Playback speed ${speed}×`,
+  playbackSpeedList: 'Playback speed',
+  normalSpeed: 'Normal',
   focusVideo: 'Focus video',
-  restoreTranscript: 'Restore transcript',
+  /** Focus video's tooltip while it is pressed. */
+  leaveFocus: 'Show the sidebars again (Esc)',
   recordMore: 'Record more',
 
-  // Capture controls
+  // Recording bar (capture controls)
+  recordingBar: 'Recording bar',
   record: 'Record',
   pleaseWait: 'Please wait…',
   transcribing: 'Transcribing…',
