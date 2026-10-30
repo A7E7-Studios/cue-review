@@ -54,8 +54,9 @@ Settings, Appearance open, dark:
 
 ## Components
 
-- **From the library:** the Dialog (`src/ui/Dialog.tsx`), the sidebar menu's surface, rows and
-  shadow for the open list, the `close` icon, the tokens.
+- **From the library:** the Dialog (`src/ui/Dialog.tsx`), the sidebar menu's row size, radius and
+  shadow for the open list (its surface is `--color-dialog-menu`, its row highlight a text tint), the
+  `close` icon, the tokens.
 - **New:** tokens `--color-scrollbar`, `--color-scrollbar-hover`, `--color-scrim`,
   `--color-dialog`, `--color-dialog-edge` and `--color-dialog-menu` (a list opening over a dialog:
   the sheet in light, `#2B2B31` in dark, one step above the dialog).

@@ -23,8 +23,8 @@ back looked alike.
 
 ## What changes
 
-- Every scrollbar in the app is a slim rounded thumb on a clear track, without arrows, darker
-  under the pointer ("A scrolling area shows the app's scrollbar"); a dialog's stays clear of its
+- Every scrollbar in the app is a slim rounded thumb on a clear track, without arrows, more
+  visible under the pointer ("A scrolling area shows the app's scrollbar"); a dialog's stays clear of its
   corners ("The Settings scrollbar clears the dialog's corners").
 - The Appearance dropdown and its open list take the app's menu style, with a check on the current
   theme ("Opening the Appearance dropdown").
