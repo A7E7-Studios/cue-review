@@ -26,10 +26,10 @@ width between takes.
 
 ## Settled questions
 
-- **The caption** (review item, 2:15–2:32): taken out, nothing replaces it.
-- **The "Take N" label** (review item, 2:32 and 3:21): taken out; the transcript's divider names the
+- **Q1 The caption** (review item, 2:15–2:32): taken out, nothing replaces it.
+- **Q2 The "Take N" label** (review item, 2:32 and 3:21): taken out; the transcript's divider names the
   take.
-- **Q11 The look**: the removal as drawn in `look/workspace-recording-take-2.png`. Rejected: changes to
+- **Q3 The look**: the removal as drawn in `look/workspace-recording-take-2.png`. Rejected: changes to
   it.
 
 ## Calls for the owner
