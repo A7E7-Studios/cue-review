@@ -28,28 +28,26 @@ fn live_threads(logical: usize) -> usize {
 fn logical_threads() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
 }
-// The options live in settings.rs so the saved vocabulary can shape them.
-fn decoding_options(root: &Path) -> Vec<String> {
-    settings::decoding_args(&settings::load(root))
+// The options live in settings.rs so the saved vocabulary and language can shape them.
+fn decoding_options(root: &Path, model: &Path) -> Vec<String> {
+    settings::decoding_args(&settings::load(root), model)
 }
-fn dtw_preset(custom_model: bool, requested: Option<&str>) -> Result<Option<String>, String> {
-    let preset = if custom_model {
-        requested
-    } else {
-        Some("base")
-    };
-    match preset {
+/// The model for a final transcription in the language saved under `root`.
+fn final_model(root: &Path) -> deps::ModelChoice {
+    deps::final_model(settings::language(&settings::load(root)))
+}
+fn dtw_preset(requested: Option<&str>) -> Result<Option<String>, String> {
+    match requested {
         None => Ok(None),
         Some(name) if matches!(name, "tiny" | "tiny.en" | "base" | "base.en" | "small" | "small.en" | "medium" | "medium.en" | "large.v1" | "large.v2" | "large.v3" | "large.v3.turbo") => Ok(Some(name.into())),
         Some(_) => Err("CUEREVIEW_DTW_MODEL must name a supported Whisper alignment preset (for example base or base.en).".into()),
     }
 }
-fn alignment_options(command: &mut std::process::Command) -> Result<(), String> {
-    let requested = std::env::var("CUEREVIEW_DTW_MODEL").ok();
-    if let Some(preset) = dtw_preset(
-        std::env::var_os("CUEREVIEW_MODEL").is_some(),
-        requested.as_deref(),
-    )? {
+fn alignment_options(
+    command: &mut std::process::Command,
+    model: &deps::ModelChoice,
+) -> Result<(), String> {
+    if let Some(preset) = dtw_preset(model.dtw.as_deref())? {
         command.args(["-dtw", &preset, "-nfa"]);
     }
     Ok(())
@@ -279,15 +277,16 @@ pub fn transcribe_snapshot(
     if !has_speech(&speech, folder, cancel)? {
         return Ok(empty_transcript());
     }
+    let model = deps::live_model();
     let mut whisper = deps::command("whisper-cli")?;
-    alignment_options(&mut whisper)?;
+    alignment_options(&mut whisper, &model)?;
     let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
     whisper
         .arg("-m")
-        .arg(deps::model_path())
+        .arg(&model.path)
         .arg("-f")
         .arg(&speech)
-        .args(decoding_options(root))
+        .args(decoding_options(root, &model.path))
         .arg("-t")
         .arg(live_threads(logical_threads()).to_string())
         .arg("-of")
@@ -525,7 +524,8 @@ pub fn transcribe_media(
     } else {
         folder.join("video.mp4")
     };
-    if !deps::model_path().is_file() {
+    let model = final_model(root);
+    if !model.path.is_file() {
         return Err(
             "Install the local speech model, then retry transcription. Your recording is saved."
                 .into(),
@@ -553,14 +553,14 @@ pub fn transcribe_media(
         return Ok(empty_transcript());
     }
     let mut whisper = deps::command("whisper-cli")?;
-    alignment_options(&mut whisper)?;
+    alignment_options(&mut whisper, &model)?;
     let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
     whisper
         .arg("-m")
-        .arg(deps::model_path())
+        .arg(&model.path)
         .arg("-f")
         .arg(speech)
-        .args(decoding_options(root))
+        .args(decoding_options(root, &model.path))
         .arg("-t")
         .arg(final_threads(logical_threads()).to_string())
         .arg("-of")
@@ -660,14 +660,12 @@ mod tests {
         assert_eq!(token_anchor(&json!({"t_dtw":0.0})), Some(0));
     }
     #[test]
-    fn custom_models_require_an_explicit_alignment_preset() {
-        assert_eq!(dtw_preset(false, None).unwrap().as_deref(), Some("base"));
-        assert_eq!(dtw_preset(true, None).unwrap(), None);
-        assert_eq!(
-            dtw_preset(true, Some("base.en")).unwrap().as_deref(),
-            Some("base.en")
-        );
-        assert!(dtw_preset(true, Some("guessed-file-name")).is_err());
+    fn alignment_presets_must_be_known_whisper_presets() {
+        assert_eq!(dtw_preset(None).unwrap(), None);
+        for preset in ["base", "small.en", "small", "base.en"] {
+            assert_eq!(dtw_preset(Some(preset)).unwrap().as_deref(), Some(preset));
+        }
+        assert!(dtw_preset(Some("guessed-file-name")).is_err());
     }
     #[test]
     fn live_anchors_control_overlap_and_preserve_zero_duration_words() {
@@ -1137,14 +1135,15 @@ mod tests {
             &cancel,
         )
         .unwrap();
+        let model = deps::live_model();
         let mut baseline = deps::command("whisper-cli").unwrap();
-        alignment_options(&mut baseline).unwrap();
+        alignment_options(&mut baseline, &model).unwrap();
         baseline
             .arg("-m")
-            .arg(deps::model_path())
+            .arg(&model.path)
             .arg("-f")
             .arg(output.path().join("speech.wav"))
-            .args(decoding_options(output.path()))
+            .args(decoding_options(output.path(), &model.path))
             .args(["-t", "2", "-of"])
             .arg(output.path().join("baseline"));
         run_logged(baseline, &output.path().join("baseline.log")).unwrap();
@@ -1252,14 +1251,15 @@ mod tests {
         assert_ne!(plain, vector, "no avx2 build beside {}", plain.display());
         let folder = tempfile::tempdir().unwrap();
         let time = |binary: &Path, label: &str| {
+            let model = deps::live_model();
             let mut whisper = std::process::Command::new(binary);
-            alignment_options(&mut whisper).unwrap();
+            alignment_options(&mut whisper, &model).unwrap();
             whisper
                 .arg("-m")
-                .arg(deps::model_path())
+                .arg(&model.path)
                 .arg("-f")
                 .arg(&speech)
-                .args(decoding_options(folder.path()))
+                .args(decoding_options(folder.path(), &model.path))
                 .args(["-t", "4", "-of"])
                 .arg(folder.path().join(label));
             let started = std::time::Instant::now();

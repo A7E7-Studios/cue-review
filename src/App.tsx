@@ -539,9 +539,12 @@ export default function App({ platform: requested }: AppProps = {}) {
     catch (problem) { reportFromSettings(problem); }
     finally { setInstalling(false); }
   };
+  /** Settings reads it on opening, on Check again, after a language change and each second while the language model downloads. */
+  const refreshSetup = () => void backend.setup().then(setSetup).catch(reportFromSettings);
   const openSettings = () => {
     setDialogError(''); setSettingsOpen(true);
     backend.settings().then(setSettings).catch(reportFromSettings);
+    refreshSetup();
   };
   const saveSettings = async (next: Settings) => { setSettings(await backend.saveSettings(next)); };
 
@@ -693,7 +696,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
-      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
+      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={refreshSetup}
+      onRefreshSetup={refreshSetup} onDownloadLanguageModel={backend.downloadLanguageModel}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
     <NameDialog state={dialog} busy={busy} error={dialog ? dialogError : ''} fallbackFocusRef={sheet}
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>

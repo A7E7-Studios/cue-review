@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
 import { backend } from '../backend';
-import type { Settings as AppSettings, SetupStatus } from '../backend';
+import type { Settings as AppSettings, Language, SetupStatus } from '../backend';
 import type { WindowTheme } from '../chrome/windowApi';
 import { SettingsDialog } from '../dialogs/SettingsDialog';
 import { Dialog } from '../ui/Dialog';
-import { configureScenario } from './backend.fixture';
+import { configureLanguageModel, configureScenario } from './backend.fixture';
 
 type Props = { busy: boolean; error: boolean; destructive: boolean; initiallyOpen: boolean };
 function DialogExample({ busy, error, destructive, initiallyOpen }: Props) {
@@ -30,11 +30,11 @@ function DialogExample({ busy, error, destructive, initiallyOpen }: Props) {
     </Dialog>
   </div>;
 }
-type SettingsProps = { scenario?: 'fresh' | 'setup'; desktop?: boolean; installing?: boolean; error?: string; vocabulary?: string };
-// The real Settings dialog over the workshop backend: saving, setup checks and
-// installation change only in-memory fixtures.
-function SettingsExample({ scenario = 'fresh', desktop = true, installing: startInstalling = false, error, vocabulary }: SettingsProps) {
-  useState(() => { configureScenario(scenario); return true; });
+type SettingsProps = { scenario?: 'fresh' | 'setup'; desktop?: boolean; installing?: boolean; error?: string; vocabulary?: string; language?: Language; model?: Parameters<typeof configureLanguageModel>[1] };
+// The real Settings dialog over the workshop backend: saving, setup checks,
+// installation and the language model's download change only in-memory fixtures.
+function SettingsExample({ scenario = 'fresh', desktop = true, installing: startInstalling = false, error, vocabulary, language, model }: SettingsProps) {
+  useState(() => { configureScenario(scenario); if (model) configureLanguageModel(language, model); return true; });
   const [open, setOpen] = useState(true);
   const [theme, setTheme] = useState<WindowTheme>(() => document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const [setup, setSetup] = useState<SetupStatus | null>(null);
@@ -44,7 +44,7 @@ function SettingsExample({ scenario = 'fresh', desktop = true, installing: start
   const launcher = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (desktop) void backend.setup().then(setSetup);
-    void (vocabulary === undefined ? backend.settings() : backend.saveSettings({ vocabulary })).then(setSettings);
+    void backend.settings().then(current => vocabulary === undefined ? current : backend.saveSettings({ ...current, vocabulary })).then(setSettings);
   }, [desktop, vocabulary]);
   const install = async () => {
     setInstalling(true); setProblem('');
@@ -54,11 +54,12 @@ function SettingsExample({ scenario = 'fresh', desktop = true, installing: start
   };
   return <div className="workshop-dialog-launcher">
     <button ref={launcher} className="primary" onClick={() => setOpen(true)}>Open settings</button>
-    <p>Appearance changes this workshop page. Vocabulary saves to an in-memory sample; validation matches the desktop app.</p>
+    <p>Appearance changes this workshop page. Language and vocabulary save to an in-memory sample; validation matches the desktop app, and a new language's model downloads in a few seconds.</p>
     {settings && <p role="note">Saved vocabulary: {settings.vocabulary ?? 'none'}</p>}
     <SettingsDialog open={open} onClose={() => setOpen(false)} fallbackFocusRef={launcher}
       theme={theme} onTheme={next => { setTheme(next); document.documentElement.dataset.theme = next; }}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup)}
+      onRefreshSetup={() => { if (desktop) void backend.setup().then(setSetup); }} onDownloadLanguageModel={backend.downloadLanguageModel}
       settings={settings} onSaveSettings={async next => setSettings(await backend.saveSettings(next))} error={problem}/>
   </div>;
 }
@@ -99,6 +100,10 @@ export const SettingsInstalling: Story = settingsStory({ scenario: 'setup', inst
 export const SettingsInstallFailed: Story = settingsStory({ scenario: 'setup', error: 'Download failed. Check your connection and retry.' });
 export const SettingsWithVocabulary: Story = settingsStory({ vocabulary: 'CueReview, Tauri, Figtree, Nadia Okafor, Quest 3' });
 export const SettingsOutsideDesktop: Story = settingsStory({ desktop: false });
+export const SettingsModelReady: Story = settingsStory({ language: 'en', model: { state: 'ready', receivedBytes: 0 } });
+export const SettingsModelDownloading: Story = settingsStory({ language: 'de', model: { state: 'downloading', receivedBytes: 212_000_000 } });
+export const SettingsModelFailed: Story = settingsStory({ language: 'en', model: { state: 'failed', receivedBytes: 0, error: 'The download was cut off.' } });
+export const SettingsModelMissing: Story = settingsStory({ language: 'en', model: { state: 'missing', receivedBytes: 0 } });
 export const SettingsVocabularyValidation: Story = {
   ...settingsStory(),
   play: async ({ canvasElement }) => {

@@ -70,6 +70,14 @@ threads, against a hand-corrected reference:
 - Transcripts that already exist are not transcribed again on their own; Retry or `cue transcribe`
   does it with the new model.
 - `CUEREVIEW_MODEL` and `CUEREVIEW_DTW_MODEL` still override the model for tests and experiments.
+- Holding the language costs a safeguard base had by accident: on pure noise without the speech
+  gate, base with language detection wrote nothing, while base held to English and small.en write
+  annotations or stock phrases ("[Music]", "Thank you for watching.", "(Applause)"), with or without
+  the vocabulary prompt. The app's whole-input speech gate still keeps noise-only recordings and
+  snapshots empty (the ignored vocabulary test checks both paths), but a long noisy pause inside a
+  recording with speech can now produce such a phrase. Detecting the language again would bring back
+  language switching on short or noisy input; filtering annotation-only segments is left to a later
+  change if the owner sees them.
 
 ## Out of scope
 

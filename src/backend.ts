@@ -14,10 +14,15 @@ export interface Transcript { segments: Segment[]; language?: string; status?: s
 export interface CaptureSource { id: string; name: string; kind: 'display' | 'window' | 'android' | 'quest' | 'camera'; available: boolean; detail?: string }
 export interface Microphone { id: string; name: string }
 export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 'error'; sessionId?: string; elapsedMs?: number; audioLevel?: number; liveTranscript?: Transcript; error?: string; takeIndex?: number; takeOffsetMs?: number }
-export interface SetupStatus { ready: boolean; issues: string[]; dependencies?: {name:string;available:boolean;path?:string;detail?:string}[]; modelReady?:boolean; modelPath?:string }
+/** A transcription language: English by default, or German. */
+export type Language = 'en' | 'de';
+/** The chosen language's speech model: base transcribes until it is `ready`. A failed or missing one is fetched with `downloadLanguageModel`. */
+export interface LanguageModel { language: Language; model: string; state: 'ready' | 'downloading' | 'failed' | 'missing'; receivedBytes: number; totalBytes: number; error?: string }
+/** `languageModel` is absent when the environment names a custom model. */
+export interface SetupStatus { ready: boolean; issues: string[]; dependencies?: {name:string;available:boolean;path?:string;detail?:string}[]; modelReady?:boolean; modelPath?:string; languageModel?: LanguageModel }
 export interface Marker { id: string; timeMs: number; label: string }
-/** App-wide preferences in `<data root>/settings.json`, shared with the `cue` CLI. */
-export interface Settings { vocabulary?: string }
+/** App-wide preferences in `<data root>/settings.json`, shared with the `cue` CLI. An absent `language` is English. */
+export interface Settings { vocabulary?: string; language?: Language }
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error('Open CueReview as a desktop app to access your recordings and capture devices. Run npm run tauri dev.');
@@ -43,6 +48,8 @@ export const backend = {
   microphones: () => call<Microphone[]>('list_microphones'),
   setup: () => call<SetupStatus>('get_setup_status'),
   installTranscription: () => call<void>('install_transcription'),
+  /** Starts the chosen language's model download in the background, or starts it again after a failure. Progress arrives in `setup().languageModel`. */
+  downloadLanguageModel: () => call<void>('download_language_model'),
   status: () => call<RecordingStatus>('get_recording_status'),
   start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
   stop: () => call<Session>('stop_recording'),

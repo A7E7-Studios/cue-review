@@ -137,6 +137,10 @@ pub struct Settings {
     /// Terms passed to Whisper as a prompt. `None` keeps the prompt off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
+    /// The language every transcription is held to: `"en"` or `"de"`.
+    /// `None` means English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -232,6 +236,25 @@ pub struct SetupStatus {
     pub dependencies: Vec<Dependency>,
     pub model_ready: bool,
     pub model_path: Option<String>,
+    /// The chosen language's model; `None` when `CUEREVIEW_MODEL` replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_model: Option<LanguageModel>,
+}
+
+/// The state of the chosen language's speech model, for Settings and `cue setup`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModel {
+    /// `"en"` or `"de"`.
+    pub language: String,
+    /// The model's name, for example `"small.en"`.
+    pub model: String,
+    /// `"ready"`, `"downloading"`, `"failed"` or `"missing"`.
+    pub state: String,
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[cfg(test)]

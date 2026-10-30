@@ -21,7 +21,7 @@ npm ci
 npm run tauri dev
 ```
 
-On first use, open **Settings → Install transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB). Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
+On first use, open **Settings → Install transcription**. This downloads a pinned Windows whisper.cpp CPU runtime, the multilingual `base` model (about 148 MB), and a small speech detection model (885 KB), then fetches the chosen language's model in the background: `small.en` for English or the multilingual `small` for German (about 488 MB each). Until that model is installed, recordings are transcribed with `base`. Downloads are SHA-256 verified. Thereafter transcription runs offline. FFmpeg remains a separate prerequisite; CueReview shows missing-tool errors rather than silently substituting sample data.
 
 ```powershell
 winget install Gyan.FFmpeg
@@ -58,7 +58,7 @@ Window recordings keep their initial canvas size. Resizing the source during cap
 
 Shortcut hints appear when you hover over or focus a control. Settings lists the same shortcuts.
 
-**Settings** (the sliders button at the right of the title bar, or of the toolbar on macOS and Linux) holds Appearance (light or dark), the status of the recording tools with Install transcription and technical details, the vocabulary, and the shortcut list. The **vocabulary** is a short list of names and terms the transcriber should expect, separated by commas: at most 20 terms and 200 characters of plain ASCII. It is off by default; when set, it becomes a Whisper prompt for every later transcription, live and final, in the app and in `cue`. It makes the listed spellings more likely but does not guarantee them, and it does not change transcripts that already exist (retry or `cue transcribe` to apply it).
+**Settings** (the sliders button at the right of the title bar, or of the toolbar on macOS and Linux) holds Appearance (light or dark), the status of the recording tools with Install transcription and technical details, Transcription (the Language, English or German, and its model's state: ready, downloading with its progress, or failed with Try again), the vocabulary, and the shortcut list. The language holds every later transcription, live and final, in the app and in `cue`, to English or German; choosing German downloads its model. The **vocabulary** is a short list of names and terms the transcriber should expect, separated by commas: at most 20 terms and 200 characters of plain ASCII. It is off by default; when set, it becomes a Whisper prompt for every later transcription, live and final, in the app and in `cue`. It makes the listed spellings more likely but does not guarantee them, and it does not change transcripts that already exist (retry or `cue transcribe` to apply it).
 
 **Markers are gone** from the app in v0.2.0: no Add marker button, no M shortcut and no marker dialog. A session's existing `markers.json` stays in its folder and stays readable for this release. Point at a moment by saying it instead; `cue moments` finds those spoken moments.
 

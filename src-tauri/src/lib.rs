@@ -359,9 +359,16 @@ async fn install_transcription(s: CmdState<'_>) -> Result<SetupStatus, String> {
     let s = s.inner().clone();
     blocking(move || {
         let _guard = s.installer.lock().map_err(|e| e.to_string())?;
-        deps::install_transcription()
+        let status = deps::install_transcription()?;
+        deps::start_language_model_download();
+        Ok(status)
     })
     .await
+}
+/// Starts the chosen language's model download again, for example after it failed.
+#[tauri::command]
+fn download_language_model() {
+    deps::start_language_model_download();
 }
 #[tauri::command]
 fn get_agent_handoff(s: CmdState<'_>, app: tauri::AppHandle, id: String) -> Result<String, String> {
@@ -849,7 +856,12 @@ fn get_settings(s: CmdState<'_>) -> Settings {
 }
 #[tauri::command]
 fn save_settings(s: CmdState<'_>, settings: Settings) -> Result<Settings, String> {
-    settings::save(&s.store.root, &settings)
+    let before = settings::language(&settings::load(&s.store.root));
+    let saved = settings::save(&s.store.root, &settings)?;
+    if settings::language(&saved) != before {
+        deps::start_language_model_download();
+    }
+    Ok(saved)
 }
 #[tauri::command]
 async fn set_microphone_muted(s: CmdState<'_>, muted: bool) -> Result<(), String> {
@@ -918,6 +930,8 @@ pub fn run() {
             }
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
+            // An installation with only base fetches its language's model now.
+            deps::start_language_model_download();
             app.manage(Arc::new(AppState {
                 store,
                 _ownership: ownership,
@@ -964,6 +978,7 @@ pub fn run() {
             stop_preview,
             get_setup_status,
             install_transcription,
+            download_language_model,
             get_agent_handoff,
             open_session_folder,
             start_recording,

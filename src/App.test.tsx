@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     projects: vi.fn(), sessions: vi.fn(), session: vi.fn(), transcript: vi.fn(), markers: vi.fn(), addMarker: vi.fn(), setup: vi.fn(), status: vi.fn(),
     sources: vi.fn(), microphones: vi.fn(), preview: vi.fn(), stopPreview: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), renameSession: vi.fn(),
     moveSession: vi.fn(), reorderProjects: vi.fn(), deleteProject: vi.fn(), deleteSession: vi.fn(), start: vi.fn(), stop: vi.fn(), recordMore: vi.fn(),
-    discardTake: vi.fn(), handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
+    discardTake: vi.fn(), handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), downloadLanguageModel: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
   },
   windowApi: {
     minimize: vi.fn(), toggleMaximize: vi.fn(), isMaximized: vi.fn(), onResized: vi.fn(), close: vi.fn(), startDragging: vi.fn(),
@@ -1251,7 +1251,7 @@ describe('local setup recovery and request races', () => {
     await user.click(screen.getByRole('button', { name: NAMES.installTranscription }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Check your connection');
     await user.click(screen.getByRole('button', { name: NAMES.installTranscription }));
-    await waitFor(() => expect(screen.getByText('Transcription').parentElement).toHaveTextContent('Available'));
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Recording tools' })).getByText('Transcription').parentElement).toHaveTextContent('Available'));
     expect(screen.queryByRole('button', { name: NAMES.installTranscription })).not.toBeInTheDocument();
     expect(backend.installTranscription).toHaveBeenCalledTimes(2);
   });
@@ -1270,7 +1270,7 @@ describe('local setup recovery and request races', () => {
     await user.click(screen.getByRole('button', { name: NAMES.stop })); expect(backend.stop).toHaveBeenCalledOnce();
     await act(async () => finishInstall());
     await user.click(screen.getByRole('button', { name: NAMES.settings }));
-    expect(screen.getByText('Transcription').parentElement).toHaveTextContent('Available');
+    expect(within(screen.getByRole('region', { name: 'Recording tools' })).getByText('Transcription').parentElement).toHaveTextContent('Available');
     expect(backend.installTranscription).toHaveBeenCalledOnce();
   });
   it('saves the vocabulary from Settings', async () => {
@@ -1284,6 +1284,25 @@ describe('local setup recovery and request races', () => {
     await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledWith({ vocabulary: 'CueReview, Tauri' }));
     expect(await screen.findByText('Vocabulary saved')).toBeVisible();
     expect(field).toHaveValue('CueReview, Tauri');
+  });
+  it('chooses the language in Settings and fetches its model again after a failure', async () => {
+    backend.settings.mockResolvedValue({ vocabulary: 'Quest' });
+    const model = { language: 'en' as const, model: 'small.en', receivedBytes: 0, totalBytes: 487_614_201 };
+    const user = await ready();
+    setup = { ...readySetup, languageModel: { ...model, state: 'failed', error: 'The download was cut off.' } };
+    backend.downloadLanguageModel.mockImplementation(async () => { setup = { ...readySetup, languageModel: { ...model, state: 'ready', receivedBytes: model.totalBytes } }; });
+    // Opening Settings reads the model's state again.
+    await user.click(screen.getByRole('button', { name: NAMES.settings }));
+    await user.click(await screen.findByRole('button', { name: NAMES.retryModelDownload }));
+    expect(backend.downloadLanguageModel).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByText('English model').parentElement).toHaveTextContent('Ready'));
+
+    backend.saveSettings.mockImplementationOnce(async (next: object) => { setup = { ...readySetup, languageModel: { ...model, language: 'de', model: 'small', state: 'downloading', receivedBytes: 1_000_000 } }; return { ...next }; });
+    const language = screen.getByRole('combobox', { name: NAMES.language });
+    await waitFor(() => expect(language).toBeEnabled());
+    await user.selectOptions(language, 'de');
+    expect(backend.saveSettings).toHaveBeenCalledWith({ vocabulary: 'Quest', language: 'de' });
+    expect(await screen.findByRole('progressbar', { name: NAMES.modelDownload('German model') })).toBeVisible();
   });
   it('ignores an old source preview that arrives after the user selects another source', async () => {
     let resolveOld!: (value: { id: string; url: string }) => void;
