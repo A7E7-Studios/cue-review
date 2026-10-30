@@ -199,6 +199,11 @@ fn run_live_output(
     }
 }
 fn vad_count(output: &str) -> Result<usize, String> {
+    vad_regions(output).map(|regions| regions.len())
+}
+/// The detector's speech regions, start and end in milliseconds (it prints
+/// centiseconds).
+fn vad_regions(output: &str) -> Result<Vec<(u64, u64)>, String> {
     let mut lines = output
         .lines()
         .map(str::trim)
@@ -210,30 +215,61 @@ fn vad_count(output: &str) -> Result<usize, String> {
         .filter(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|count| count.parse::<usize>().ok())
         .ok_or("Speech detector returned an invalid result; see vad.txt.")?;
-    let regions: Vec<_> = lines.collect();
-    if regions.len() != count
-        || regions
-            .iter()
-            .enumerate()
-            .any(|(i, line)| !line.starts_with(&format!("Speech segment {i}: start = ")))
-    {
+    let regions: Vec<_> = lines
+        .enumerate()
+        .map(|(i, line)| {
+            let (start, end) = line
+                .strip_prefix(&format!("Speech segment {i}: start = "))?
+                .split_once(", end = ")?;
+            let ms = |value: &str| {
+                value
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .map(|v| (v * 10.0).round() as u64)
+            };
+            Some((ms(start)?, ms(end)?))
+        })
+        .collect::<Option<_>>()
+        .ok_or("Speech detector returned inconsistent regions; see vad.txt.")?;
+    if regions.len() != count {
         return Err("Speech detector returned inconsistent regions; see vad.txt.".into());
     }
-    Ok(count)
+    Ok(regions)
 }
-// Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
-// JSON token times are not mapped back to the original recording timeline.
-fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
+fn detect(
+    speech: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+    pad_ms: u32,
+) -> Result<Vec<(u64, u64)>, String> {
     let mut detector = deps::command("whisper-vad-speech-segments")?;
     detector
         .args(["-vm"])
         .arg(deps::vad_model_path())
         .arg("-f")
         .arg(speech)
-        .args(["-vt", "0.35", "-vp", "500", "-vspd", "100", "-np"]);
+        .args(["-vt", "0.35", "-vp"])
+        .arg(pad_ms.to_string())
+        .args(["-vspd", "100", "-np"]);
     let output = folder.join("vad.txt");
     run_live_output(detector, &folder.join("vad.log"), cancel, Some(&output))?;
-    Ok(vad_count(&fs::read_to_string(output).map_err(|e| e.to_string())?)? > 0)
+    vad_regions(&fs::read_to_string(output).map_err(|e| e.to_string())?)
+}
+/// Where `speech` (16 kHz) holds speech, padded by only 100 ms so the pauses
+/// that end a stretch stay visible.
+pub(crate) fn speech_regions(
+    speech: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+) -> Result<Vec<(u64, u64)>, String> {
+    detect(speech, folder, cancel, 100)
+}
+// Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
+// JSON token times are not mapped back to the original recording timeline.
+fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
+    Ok(!detect(speech, folder, cancel, 500)?.is_empty())
 }
 fn empty_transcript() -> Transcript {
     Transcript {
@@ -582,6 +618,26 @@ mod tests {
         assert_eq!(counts(8), (4, 2));
         assert_eq!(counts(12), (6, 3));
         assert_eq!(counts(32), (8, 4));
+    }
+    #[test]
+    fn detector_regions_are_read_in_milliseconds() {
+        let output = "Detected 2 speech segments:
+Speech segment 0: start = 136.00, end = 962.00
+Speech segment 1: start = 984.00, end = 1131.50
+";
+        assert_eq!(vad_regions(output).unwrap(), [(1360, 9620), (9840, 11315)]);
+        assert!(vad_regions(
+            "Detected 1 speech segments:
+Speech segment 0: start = x, end = 1.0
+"
+        )
+        .is_err());
+        assert!(vad_regions(
+            "Detected 2 speech segments:
+Speech segment 0: start = 1.0, end = 2.0
+"
+        )
+        .is_err());
     }
     #[test]
     fn successful_process_cannot_reuse_old_or_malformed_output() {

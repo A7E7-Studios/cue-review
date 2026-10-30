@@ -1626,10 +1626,14 @@ struct AudioTrack {
     writer: Arc<Mutex<AudioWriter>>,
     path: PathBuf,
 }
+/// Copies the live track into `target`: from `from_ms` (at most 60 s of it),
+/// or the latest 30 s when `from_ms` is `None`. Returns the copy's bounds in
+/// ms from the track's start.
 fn snapshot_track(
     path: &Path,
     writer: &Arc<Mutex<AudioWriter>>,
     target: &Path,
+    from_ms: Option<u64>,
 ) -> Result<(u64, u64), String> {
     if path == target {
         return Err("Audio snapshots must use a separate file".into());
@@ -1660,7 +1664,14 @@ fn snapshot_track(
     if end == 0 {
         return Err("Waiting for audio samples".into());
     }
-    let start = end.saturating_sub(spec.sample_rate.saturating_mul(30));
+    let rate = spec.sample_rate as u64;
+    let (start, end) = match from_ms {
+        Some(from_ms) => {
+            let start = (from_ms * rate / 1000).min(end as u64) as u32;
+            (start, end.min(start.saturating_add(spec.sample_rate.saturating_mul(60))))
+        }
+        None => (end.saturating_sub(spec.sample_rate.saturating_mul(30)), end),
+    };
     // Existing samples are append-only. Hound has already captured a finite header length.
     reader.seek(start).map_err(|e| e.to_string())?;
     let mut output = hound::WavWriter::create(target, spec).map_err(|e| e.to_string())?;
@@ -2121,7 +2132,27 @@ impl ActiveCapture {
             .as_ref()
             .and_then(|a| a.snapshot_source.as_ref())
             .ok_or("No live microphone or desktop audio track is available")?;
-        snapshot_track(path, writer, target)
+        snapshot_track(path, writer, target, None)
+    }
+    /// Copies the live track from `from_ms` (at most 60 s) into `target`, for
+    /// the stretches of [`crate::stretches`]. Returns the bounds and the
+    /// track's file name, for example `mic.wav`.
+    pub fn snapshot_audio_from(
+        &self,
+        from_ms: u64,
+        target: &Path,
+    ) -> Result<(u64, u64, String), String> {
+        let (path, writer) = self
+            .audio
+            .as_ref()
+            .and_then(|a| a.snapshot_source.as_ref())
+            .ok_or("No live microphone or desktop audio track is available")?;
+        let (start, end) = snapshot_track(path, writer, target, Some(from_ms))?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok((start, end, name))
     }
     pub fn elapsed_ms(&self) -> u64 {
         self.stopped
@@ -4329,8 +4360,19 @@ mod tests {
         state.frames = 40_000;
         let writer = Arc::new(Mutex::new(state));
         assert_eq!(
-            snapshot_track(&path, &writer, &target).unwrap(),
+            snapshot_track(&path, &writer, &target, None).unwrap(),
             (10_000, 40_000)
+        );
+        // From a point: up to 60 s of it, and nothing past the end.
+        let from = dir.path().join("from.wav");
+        assert_eq!(
+            snapshot_track(&path, &writer, &from, Some(39_500)).unwrap(),
+            (39_500, 40_000)
+        );
+        assert_eq!(hound::WavReader::open(&from).unwrap().duration(), 500);
+        assert_eq!(
+            snapshot_track(&path, &writer, &from, Some(50_000)).unwrap(),
+            (40_000, 40_000)
         );
         let mut snapshot = hound::WavReader::open(&target).unwrap();
         assert_eq!(snapshot.duration(), 30_000);
