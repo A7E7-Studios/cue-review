@@ -5,6 +5,7 @@ import { createRef } from 'react';
 import type { ComponentProps } from 'react';
 import { CompactDragStrip, TitleBar } from './TitleBar';
 import type { WindowSize } from './windowApi';
+import { NAMES } from '../workspace/types';
 
 const api = vi.hoisted(() => ({
   minimize: vi.fn<() => Promise<void>>(),
@@ -35,6 +36,22 @@ function renderBar(overrides: Partial<Props> = {}) {
 const dragRegions = (root: HTMLElement) => [...root.querySelectorAll('[data-tauri-drag-region]'), ...(root.hasAttribute('data-tauri-drag-region') ? [root] : [])];
 
 describe('Windows title bar', () => {
+  test('draws window-control glyphs at 10px and toolbar icons at 20px', () => {
+    renderBar();
+    for (const name of [NAMES.minimizeWindow, NAMES.maximizeWindow, NAMES.closeWindow]) {
+      const glyph = screen.getByRole('button', { name }).querySelector('svg');
+      expect(glyph).toHaveAttribute('viewBox', '0 0 10 10');
+      expect(glyph).toHaveAttribute('width', '10');
+      expect(glyph).toHaveAttribute('height', '10');
+      expect(glyph).toHaveAttribute('stroke-width', '1');
+    }
+    expect(screen.getByRole('button', { name: NAMES.minimizeWindow }).querySelector('svg')).toHaveAttribute('shape-rendering', 'crispEdges');
+    for (const name of [NAMES.hideSidebar, NAMES.settings]) {
+      const icon = screen.getByRole('button', { name }).querySelector('svg');
+      expect(icon).toHaveAttribute('width', '20');
+      expect(icon).toHaveAttribute('height', '20');
+    }
+  });
   test('names its controls and drives the window', async () => {
     const user = userEvent.setup();
     const { props } = renderBar();

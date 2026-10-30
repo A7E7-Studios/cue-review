@@ -40,7 +40,7 @@ async function setTheme(theme){
  await page.waitForFunction(value=>document.documentElement.dataset.theme===value,theme);
  await dialog.getByRole('button',{name:'Close settings',exact:true}).click();await dialog.waitFor({state:'detached'});
 }
-// Windows has no native decorations: a 40px custom title bar with 46×40 window controls, and
+// Windows has no native decorations: a 44px custom title bar with 46×44 window controls, and
 // drag regions only on empty bar areas, never on a control or the search field (decision 9).
 async function windowChrome(){
  const bar=titleBar();await bar.waitFor();
@@ -52,8 +52,8 @@ async function windowChrome(){
   const regions=[header,...header.querySelectorAll('*')].filter(node=>node.hasAttribute('data-tauri-drag-region'));
   return{top:box.top,height:box.height,controls,dragRegions:regions.length,barIsDragRegion:header.hasAttribute('data-tauri-drag-region'),interactiveDragRegions:regions.filter(node=>node.matches('button,input,select,textarea,a,[role=button],[tabindex]')).length};
  });
- assert(near(layout.top,0)&&near(layout.height,40),`Title bar is not a 40px bar at the top: ${JSON.stringify(layout)}`);
- assert(layout.controls.length===3&&layout.controls.every(control=>near(control.width,46)&&near(control.height,40)),`Window controls are not three 46×40 buttons: ${JSON.stringify(layout.controls)}`);
+ assert(near(layout.top,0)&&near(layout.height,44),`Title bar is not a 44px bar at the top: ${JSON.stringify(layout)}`);
+ assert(layout.controls.length===3&&layout.controls.every(control=>near(control.width,46)&&near(control.height,44)),`Window controls are not three 46×44 buttons: ${JSON.stringify(layout.controls)}`);
  assert(layout.controls.at(-1).name==='Close window'&&near(layout.controls.at(-1).right,0),'Close window is not at the right edge.');
  assert(layout.barIsDragRegion&&layout.interactiveDragRegions===0,`Drag regions are wrong: ${JSON.stringify(layout)}`);
  // Maximize and restore through the custom control; the name follows the window state.
