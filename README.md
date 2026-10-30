@@ -20,10 +20,10 @@ CueReview turns a spoken walkthrough into feedback your coding agent can inspect
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/cuereview-dark.png">
-  <img src="docs/images/cuereview-light.png" width="1280" alt="CueReview review workspace with recordings in the sidebar, video playback, a word-highlighted transcript, Record more and Copy for agent.">
+  <img src="docs/images/cuereview-light.png" width="1280" alt="CueReview in a rounded macOS app window with recordings in the sidebar, video playback, a word-highlighted transcript, Record more and Copy for agent.">
 </picture>
 
-<p align="center"><sub>The CueReview workspace in light and dark themes, shown with a sample review from the UI workshop.</sub></p>
+<p align="center"><sub>The CueReview macOS workspace in light and dark themes, shown with a sample review from the UI workshop.</sub></p>
 
 ## Why CueReview
 
