@@ -44,10 +44,11 @@ describe('SearchDialog', () => {
     // A recording whose name matches, then the line that matches, with its time and the word marked.
     expect(options).toHaveLength(2);
     expect(options[0]).toHaveTextContent('Filter panel overlap');
-    expect(options[0].dataset.group).toBe('Recordings');
+    // Each part is a labelled group of the listbox.
+    expect(options[0].closest('[role=group]')).toHaveAccessibleName('Recordings');
     expect(options[1]).toHaveTextContent('Library selection and details');
     expect(options[1]).toHaveTextContent('0:24');
-    expect(options[1].dataset.group).toBe('In transcripts');
+    expect(options[1].closest('[role=group]')).toHaveAccessibleName('In transcripts');
     expect([...options[1].querySelectorAll('mark')].map(mark => mark.textContent)).toEqual(['filter']);
     // Every word, in any order.
     await user.clear(screen.getByRole('combobox'));
@@ -60,6 +61,28 @@ describe('SearchDialog', () => {
     await user.keyboard('{Enter}');
     expect(props.onClose).toHaveBeenCalled();
     expect(props.onOpen).toHaveBeenCalledWith('library', 24000);
+  });
+  it('keeps the active result while transcripts arrive', async () => {
+    const user = userEvent.setup();
+    const { props, rerender } = renderSearch();
+    await user.type(screen.getByRole('combobox'), 'the{ArrowDown}');
+    const active = () => screen.getAllByRole('option').find(option => option.getAttribute('aria-selected') === 'true');
+    expect(active()).toHaveTextContent('The menu follows the controller.');
+    // A newer recording's transcript arrives and its line is listed first.
+    const more = new Map(transcripts).set('filters', { segments: [{ startMs: 1000, endMs: 2000, text: 'The filter chips wrap.', words: [] }] });
+    rerender(<SearchDialog {...props} transcripts={more}/>);
+    expect(active()).toHaveTextContent('The menu follows the controller.');
+    await user.keyboard('{Enter}');
+    expect(props.onOpen).toHaveBeenCalledWith('quest', 5000);
+  });
+  it('starts empty each time it opens', async () => {
+    const user = userEvent.setup();
+    const { props, rerender } = renderSearch();
+    await user.type(screen.getByRole('combobox'), 'zebra');
+    rerender(<SearchDialog {...props} open={false}/>);
+    rerender(<SearchDialog {...props} open/>);
+    expect(screen.getByRole('combobox')).toHaveValue('');
+    expect(screen.getAllByRole('option')).toHaveLength(3);
   });
   it('opens a recording from its start when its name is chosen', async () => {
     const user = userEvent.setup();

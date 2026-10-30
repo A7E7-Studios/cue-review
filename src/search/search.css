@@ -10,12 +10,11 @@
 .search-field input::placeholder { color: var(--color-text-tertiary); opacity: 1; }
 .search-field input::-webkit-search-cancel-button { display: none; }
 
-.search-results { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 4px 8px 8px; list-style: none; }
+.search-results { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 8px; }
 .search-results:empty { display: none; }
 .search-result { display: flex; align-items: flex-start; gap: 12px; padding: 8px 10px; border-radius: 8px; color: var(--color-text); cursor: pointer; }
-/* The first result of each group carries its heading. */
-.search-result.search-group-start { position: relative; margin-top: 30px; }
-.search-result.search-group-start::before { content: attr(data-group); position: absolute; top: -24px; left: 10px; color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
+.search-group + .search-group { margin-top: 6px; }
+.search-group-heading { padding: 10px 10px 4px; color: var(--color-text-tertiary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
 .search-result[aria-selected='true'] { background: var(--color-row-hover); }
 .search-result > svg { flex: none; margin-top: 2px; color: var(--color-text-secondary); }
 .search-result-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }

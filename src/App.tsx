@@ -119,7 +119,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [searchOpen, setSearchOpen] = useState(false);
   /** Transcripts the search window searches, by session id, with the status and length they were read at. */
   const [searchTranscripts, setSearchTranscripts] = useState<ReadonlyMap<string, Transcript>>(() => new Map());
-  const searchRead = useRef(new Map<string, string>());
+  /** The sessions as they are now, for the search window's reader, which starts once per opening. */
+  const searchSessions = useRef<Session[]>([]);
   /** Each Ctrl/⌘+F asks the transcript to open its find bar. */
   const [findRequest, setFindRequest] = useState(0);
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
@@ -432,29 +433,41 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   /** Search waits while recording, like the sidebar's rows. */
   const openSearch = () => { if (!locked) setSearchOpen(true); };
-  // Reads the transcripts of settled recordings when search opens, a few at a time, and again only
-  // for a recording whose status or length changed.
+  searchSessions.current = sessions;
+  // Each opening reads every settled recording's transcript again, four at a time, so a transcript
+  // that changed (a retry, `cue transcribe`) is searched as it is now. Lines read at an earlier
+  // opening stay listed until their new read arrives.
   useEffect(() => {
     if (!searchOpen) return;
     let alive = true;
-    const stale = sessions.filter(item => settled(item) && searchRead.current.get(item.id) !== `${item.status}:${item.durationMs}`);
+    const queue = searchSessions.current.filter(settled);
     const next = async () => {
-      for (let item = stale.shift(); item && alive; item = stale.shift()) {
-        const key = `${item.status}:${item.durationMs}`;
+      for (let item = queue.shift(); item && alive; item = queue.shift()) {
         const read = await backend.transcript(item.id).catch(() => null);
         if (!alive || !read) continue;
-        searchRead.current.set(item.id, key);
         const id = item.id;
         setSearchTranscripts(current => new Map(current).set(id, read));
       }
     };
     void Promise.all([next(), next(), next(), next()]);
     return () => { alive = false; };
-  }, [searchOpen, sessions]);
-  /** A search result: the recording, standing at the line's time when there is one. */
+  }, [searchOpen]);
+  /** A search result: the recording, standing paused at the line's time, or at its start. */
   const openResult = (id: string, atMs?: number) => {
+    if (!draft && session?.id === id) {
+      // Already open: the video does not load again, so seek it here.
+      video.current?.pause();
+      seek(atMs ?? 0);
+      return;
+    }
     void openSession(id);
     if (atMs !== undefined) restorePlayback.current = { id, time: atMs / 1000, playing: false };
+  };
+  /** Ctrl/⌘+F: Find in the transcript; in focus, the transcript comes back first. */
+  const openFind = () => {
+    if (!focusVideo) { setFindRequest(value => value + 1); return; }
+    setFocusVideo(false);
+    requestAnimationFrame(() => setFindRequest(value => value + 1));
   };
   useShortcuts({
     platform: os,
@@ -464,7 +477,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     onTogglePlay: mode === 'review' && videoSrc ? () => void togglePlay() : undefined,
     onSeekBy: mode === 'review' ? delta => seek(time + delta) : undefined,
     onSearch: locked ? undefined : openSearch,
-    onFind: mode === 'review' ? () => setFindRequest(value => value + 1) : undefined,
+    onFind: mode === 'review' ? openFind : undefined,
     onEscape: sidebarOverlay ? dismissOverlay : focusVideo ? () => setFocusVideo(false) : undefined,
   });
 

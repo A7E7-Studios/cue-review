@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { Platform } from '../chrome/windowApi';
 
-// Workspace shortcuts (decision 8). Ctrl/⌘+K lives in the title bar with its field.
+// Workspace shortcuts (decision 8). Ctrl/⌘+K and Ctrl/⌘+F also work from a text field (search spec);
+// the others never fire inside one.
 
 /**
  * The letter a shortcut means. `event.key` follows the keyboard layout, so it is used when it
@@ -81,7 +82,8 @@ export function useShortcuts(shortcuts: Shortcuts) {
       }
       if (!current.enabled || (target instanceof Element && target.closest(BLOCKING))) return;
       if (isCommand(event, current.platform, 'k') && current.onSearch) { event.preventDefault(); if (!event.repeat) current.onSearch(); return; }
-      if (isCommand(event, current.platform, 'f') && current.onFind) { event.preventDefault(); if (!event.repeat) current.onFind(); return; }
+      // Ctrl/⌘+F never opens the webview's own find bar, also where there is no transcript to find in.
+      if (isCommand(event, current.platform, 'f')) { event.preventDefault(); if (!event.repeat) current.onFind?.(); return; }
       if (isEditable(target)) return;
       if (isCommand(event, current.platform, 'r')) { event.preventDefault(); if (!event.repeat) current.onRecord(); return; }
       if (isCommand(event, current.platform, 'n')) { event.preventDefault(); if (!event.repeat) current.onNew(); return; }

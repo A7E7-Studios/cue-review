@@ -52,10 +52,10 @@ Claude app places it, reads cleaner than a field across the window's top.
 - **PROOF** test: src/App.test.tsx::does not open search while recording
 
 ### Requirement: Search finds names and transcript lines
-The app SHALL list, as the person types, the recordings whose name contains the text and the
-transcript lines that contain it, ignoring case, each line with its recording's name, the matching
-text marked and its time, because a person often remembers what was said rather than what the
-recording was called.
+The app SHALL list, as the person types, the recordings whose name and the transcript lines that
+contain every typed word, in any order, ignoring case and accents, each line with its recording's
+name, the matching words marked and its time, because a person often remembers what was said rather
+than what the recording was called, and rarely in the order it was said.
 
 #### Scenario: A person searches for a word
 - **GIVEN** recordings whose names or transcripts contain "filter"
@@ -63,9 +63,18 @@ recording was called.
 - **THEN** Recordings lists the recordings whose names contain it
 - **AND** In transcripts lists each line that contains it, with its recording's name, the word
   marked and the line's time
+- **AND** a transcript that changed since search last opened is searched as it is now
 - **PROOF** test: src/search/searchIndex.test.ts::finds names and transcript lines ignoring case
 - **PROOF** test: src/search/SearchDialog.test.tsx::lists recordings and transcript lines
+- **PROOF** test: src/App.test.tsx::searches each transcript as it is when search opens
 - **PROOF** desk: open
+
+#### Scenario: Words match in any order
+- **GIVEN** a line "Now if I open the filters, the panel covers the first row"
+- **WHEN** the person types "panel filters", or "Filters" with another case or accent
+- **THEN** the line is listed
+- **PROOF** test: src/search/searchIndex.test.ts::matches every word in any order
+- **PROOF** test: src/search/searchIndex.test.ts::folds case and accents one unit at a time
 
 #### Scenario: A person opens a result
 - **GIVEN** search shows results
@@ -73,7 +82,10 @@ recording was called.
 - **THEN** the search window closes, the line's recording opens, and playback stands at the line's
   time
 - **AND** choosing a recording opens it from its start
+- **AND** a line of the recording already open moves its playback there, paused
 - **PROOF** test: src/App.test.tsx::opens a transcript line at its time
+- **PROOF** test: src/App.test.tsx::opens a line of the recording that is already open at its time
+- **PROOF** test: src/search/SearchDialog.test.tsx::keeps the active result while transcripts arrive
 - **PROOF** desk: open
 
 #### Scenario: Nothing matches
@@ -90,8 +102,11 @@ bar that appears in one frame pushes the transcript down with a jolt.
 - **GIVEN** a recording in review
 - **WHEN** the person presses Ctrl+F
 - **THEN** the find bar slides in above the transcript with its field focused
-- **AND** it finds as today, with a count and previous and next
-- **AND** Escape closes it and returns focus to where it was
+- **AND** it finds as before, with a count and previous and next
+- **AND** in Focus video, the transcript comes back first
+- **AND** Escape closes it and returns focus to the Find button
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::opens the find bar with Ctrl+F
 - **PROOF** test: src/App.test.tsx::finds in the transcript with Ctrl+F
+- **PROOF** test: src/App.test.tsx::brings the transcript back for Ctrl+F in focus
+- **PROOF** test: src/workspace/TranscriptPane.test.tsx::finds, steps through matches and closes back to its button
 - **PROOF** desk: open

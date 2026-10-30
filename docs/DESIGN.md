@@ -89,7 +89,7 @@ The dark theme (`:root[data-theme='dark']`) is derived from these roles. It has 
 | Find in transcript, in review | `Ctrl+F` | `⌘F` |
 | Play or pause; seek 5 s | `Space`; `←` / `→` | `Space`; `←` / `→` |
 
-Shortcut hints stay hidden until hover or focus, as in the Claude app ("Ctrl+N", "⌘N"). The `<kbd>` is `aria-hidden` and the control carries `aria-keyshortcuts`, so accessible names never change. Pill buttons put the shortcut in their tooltip. Shortcuts must not fire inside editable fields, dialogs or menus.
+Shortcut hints stay hidden until hover or focus, as in the Claude app ("Ctrl+N", "⌘N"). The `<kbd>` is `aria-hidden` and the control carries `aria-keyshortcuts`, so accessible names never change. Pill buttons put the shortcut in their tooltip. Shortcuts must not fire inside editable fields, dialogs or menus, except `Ctrl+K` and `Ctrl+F` (⌘ on macOS), which also work from a text field outside a dialog or menu, as in other apps' search.
 
 ## Markers removed
 

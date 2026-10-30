@@ -343,6 +343,36 @@ describe('keyboard interaction', () => {
     expect(media.currentTime).toBe(1);
     expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
   });
+  it('opens a line of the recording that is already open at its time', async () => {
+    const user = await review();
+    const media = document.querySelector('video')!;
+    media.currentTime = 7;
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The same video: it seeks there at once, paused.
+    expect(media.currentTime).toBe(1);
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:01');
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+  it('searches each transcript as it is when search opens', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    let dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The transcript changes (a retry, or `cue transcribe`) while the recording's status and length stay.
+    transcript = { segments: [{ id: 'line1', text: 'Watch there', startMs: 1000, endMs: 4000, words: [] }] };
+    await user.keyboard('{Control>}k{/Control}');
+    dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'watch');
+    expect(await within(dialog).findByRole('option', { name: /Watch there/ })).toBeVisible();
+  });
   it('does not open search while recording', async () => {
     const user = await ready();
     await user.keyboard('{Control>}r{/Control}');
@@ -350,6 +380,16 @@ describe('keyboard interaction', () => {
     await user.keyboard('{Control>}k{/Control}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(sidebar().getByRole('button', { name: NAMES.search })).toBeDisabled();
+  });
+  it('brings the transcript back for Ctrl+F in focus', async () => {
+    const user = await review();
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    (document.activeElement as HTMLElement).blur();
+    await user.keyboard('{Control>}f{/Control}');
+    const field = await transcriptPane().findByRole('searchbox', { name: NAMES.findInTranscript });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'false');
   });
   it('finds in the transcript with Ctrl+F', async () => {
     const user = await review();

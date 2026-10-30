@@ -58,8 +58,12 @@ recordings by name and by what was said, while keeping a find inside one transcr
   back the name filter beside the window.
 - The New section button is removed by the recording-flow batch's `sidebar-new-session` change, as
   Q4 asked; this change adds the Search row under that change's New session row.
-- Transcripts are searched by the app, loaded when the window opens and kept until a recording
-  changes; a backend search command waits until a library grows large enough to need it.
+- Transcripts are searched by the app, read again each time the window opens; a backend search
+  command waits until a library grows large enough to need it.
+- Ctrl+K and Ctrl+F also work from a text field, as search shortcuts do in other apps; the other
+  shortcuts still never fire in one. Ctrl+F in Focus video brings the transcript back first.
+- Escape in Find returns focus to the Find button, as before, rather than to wherever Ctrl+F was
+  pressed.
 
 ## Out of scope
 
