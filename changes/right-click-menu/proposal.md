@@ -44,6 +44,10 @@ nothing.
 
 ## Calls for the owner
 
+- **Q11 The menu's look**: the left panel's menu reuses the sidebar's row menu, shown to the owner on
+  the directions page. The owner was away when it was asked and delegated open picks to the
+  agent's recommendation, so the agent took it. Changing it later is a CSS change in
+  `src/Sidebar.css`.
 - The menu's items use the app's names, **New recording** and **New section**, not "New session":
   the button it mirrors is New recording. Renaming both is one string in `NAMES`.
 - The fix is in app code (a document-level `contextmenu` handler), not in the Tauri configuration
