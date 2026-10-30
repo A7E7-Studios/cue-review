@@ -11,12 +11,12 @@ import './workspace.css';
 export function captureEmptyState({ source, loading = false, paused = false, previewError }: {
   source?: Pick<CaptureSource, 'available' | 'detail'>;
   loading?: boolean;
-  /** An exclusive camera is in use by the recording. */
+  /** An exclusive source is in use by the recording. */
   paused?: boolean;
   /** A failed stream says what failed instead of "Loading preview…". */
   previewError?: string;
 }): MediaEmptyState {
-  if (paused) return { title: 'Camera preview paused', detail: 'The camera is in use for recording. Preview returns when you start a new session.' };
+  if (paused) return { title: 'Preview paused', detail: 'The selected source is in use for recording. Preview returns when you start a new session.' };
   if (loading) return { title: 'Loading…' };
   if (source && !source.available) return { title: 'Capture source unavailable', detail: source.detail || 'Reconnect the selected source and refresh, or choose another source.' };
   if (source) return { title: previewError ? 'Preview unavailable' : 'Loading preview…' };

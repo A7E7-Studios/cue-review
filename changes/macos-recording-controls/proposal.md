@@ -1,11 +1,12 @@
 ---
-title: Start buffered recordings and close pickers on a second click
+title: Release macOS previews before recording and fix picker toggles
 capabilities:
   - capture/recording-startup
+  - capture/camera-capture
   - workspace/recording-dock
 review: unreviewed
 ---
-# Start buffered recordings and close pickers on a second click
+# Release macOS previews before recording and fix picker toggles
 
 ## Why
 
@@ -21,6 +22,8 @@ reopens it on macOS, making the trigger behave inconsistently.
 
 - Flush FFmpeg's recording output so a healthy capture reaches the existing readiness check
   promptly, for both static and moving content.
+- Release an AVFoundation preview before recording opens the source; show Preview paused during
+  startup and recording, and resume the draft preview if startup fails.
 - A second click on the source or microphone trigger closes that picker, in a new recording and
   in review. Keep keyboard, outside-click and trigger-switching behavior intact.
 - Test production recording output arguments with real synthetic FFmpeg inputs, and picker
@@ -40,9 +43,15 @@ reopens it on macOS, making the trigger behave inconsistently.
 
 ## Calls for the owner
 
+- The owner reported the installed buffering fix still failed. A native comparison reproduced
+  the remaining cause: with preview active, the recording input never received its first frame;
+  with preview released, the same input encoded 124 frames in about four seconds. Extend the
+  existing V4L2 exclusive-access mechanism to AVFoundation, as the earlier approved camera design
+  allows when contention is demonstrated. The owner authorized all tests needed to verify the fix.
+
 - These are narrow repairs with the existing layout and interaction model. No new visual
   direction is introduced. Real display recording remains an open desk check until the owner
-  authorizes and checks it; previous permission to preview did not authorize recording.
+  checks it; the owner has authorized the attended tests needed to verify the repair.
 
 ## Out of scope
 
