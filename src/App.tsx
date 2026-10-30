@@ -35,7 +35,7 @@ import { useTheme } from './app/useTheme';
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
 const SPEEDS = [1, 1.5, 2, 0.75];
 const STARTING_TAKE: MediaEmptyState = { title: 'Starting the next take…' };
-/** The recording bar's source in review when the session's source is gone, or the listing cannot say it is the same one. */
+/** The recording bar's source in review when the session's source is no longer listed, or a reused window or display id has no stored identity to name it by. */
 const ORIGINAL_SOURCE = 'Original source';
 /** Ids a restart can hand to another window or display (docs/ARCHITECTURE.md, Source identity). */
 const REUSABLE_SOURCE_ID = /^(window|monitor):/;
