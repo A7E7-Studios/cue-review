@@ -20,9 +20,9 @@
 
 ## 4. macOS integration and delivery (after 1, 2 and 3)
 
-- [ ] 4.1 Verify packaged rendering, failures and retry with synthetic moving frames in isolated data; test: the packaged synthetic-preview probe
+- [x] 4.1 Verify packaged rendering, failures and retry with synthetic moving frames in isolated data; test: the packaged synthetic-preview probe
 - [x] 4.2 Keep the existing macOS access coordination, cover preview-to-recording orchestration with the App acceptance test, and leave physical camera transition/playback open for an agreed attended run; test: src/App.test.tsx::starts a macos camera recording from its preview; check: A recording starts while the camera preview is active
 - [x] 4.3 Keep camera preview, blocked-access and retry scenarios open for the owner's real-device review; check: The built-in camera is explicitly selected; Camera access is blocked; The person resolves the camera block and retries
 - [x] 4.4 Refresh the picker and error looks with repository components, align spec code paths and acceptance selectors with the implementation, and update docs/VERIFICATION.md; test: node tools/gate/gate.mjs --local
-- [ ] 4.5 Run all frontend and Rust checks required by AGENTS.md, commit, and run the strict gate; test: docs/VERIFICATION.md unattended set
-- [ ] 4.6 Open the implementation pull request and obtain an independent review through ship, resolving every finding; test: .agents/skills/ship/review-checklist.md
+- [x] 4.5 Run all frontend and Rust checks required by AGENTS.md, commit, and run the strict gate; test: docs/VERIFICATION.md unattended set
+- [x] 4.6 Open the implementation pull request and obtain an independent review through ship, resolving every finding; test: .agents/skills/ship/review-checklist.md
