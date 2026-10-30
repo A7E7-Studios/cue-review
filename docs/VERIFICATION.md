@@ -261,8 +261,8 @@ The decoded host-frame arrival is an approximation of the device/PC clock relati
 - [x] Open the session folder and copy/use the agent handoff instructions.
 - [x] Restart after an interrupted recording/processing job; show an actionable persisted state.
 - [x] Launch the packaged application outside the repository and verify dependency discovery and playback.
-- [ ] (v0.2.0) Record more appends take 2 to the same session: the dock shows no take label or caption, the transcript shows its divider, the scrubber its tick, and `video.mp4` plays across the boundary (`verify-takes.cjs`).
-- [ ] (v0.2.0) Close the app during take 2 recording, finalizing, swapping and transcribing; each restart shows the state the recovery matrix in ARCHITECTURE.md describes.
+- [ ] Record more records take 2 from another window into the same session, with its own video: the dock shows no take label or caption, the transcript shows its divider, the scrubber its tick, and the player switches from take 1's video to take 2's across the boundary (`verify-takes.cjs`).
+- [ ] Close the app during take 2 recording, finalizing and transcribing; each restart shows the state the recovery matrix in ARCHITECTURE.md describes.
 - [ ] (v0.2.0) Display and window recordings write `cursor.jsonl`; `cue frame --mark-cursor` rings the pointer where it was, across monitors and after the window moves.
 - [ ] (v0.2.0) The Windows title bar: drag, double-click to maximize and restore, edge resize, snapping, Minimize/Maximize/Close, and close blocked while recording.
 - [ ] (v0.2.0) `Ctrl+R`, `Ctrl+N` and `Ctrl+K` (⌘ on macOS) behave as documented, with hints only on hover or focus.

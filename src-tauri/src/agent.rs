@@ -1151,6 +1151,8 @@ mod tests {
         fs::write(folder.join("video.mp4"), "2000").unwrap();
         fs::create_dir_all(takes::take_dir(&folder, 2)).unwrap();
         fs::write(takes::video_file(&folder, 2), "1500").unwrap();
+        // A stray temporary file of the old join, deleted on this path too.
+        fs::write(folder.join("video.5d0c-waiting.tmp.mp4"), "3500").unwrap();
         let probe = |path: &Path| -> Result<takes::Media, String> {
             let duration_ms = fs::read_to_string(path)
                 .map_err(|e| e.to_string())?
@@ -1195,6 +1197,7 @@ mod tests {
         );
         assert_eq!(seen.status, "processing");
         assert_eq!(store.session(&id).unwrap().status, "ready");
+        assert!(!folder.join("video.5d0c-waiting.tmp.mp4").exists());
     }
 
     #[test]

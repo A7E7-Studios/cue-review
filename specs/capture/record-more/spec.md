@@ -80,6 +80,7 @@ sessions' takes are already joined in `video.mp4` and their own copies are gone.
 - **AND** the files left from joining it are deleted; while `video.mp4` cannot be read, take 2
   keeps waiting with the files in its own folder, and only stray temporary files in the session
   folder go
+- **AND** a take found in neither video is interrupted, and the session settles without an error
 - **PROOF** test: src-tauri/src/takes.rs::tests::recovery_upgrades_a_take_waiting_to_be_joined
 - **PROOF** test: src-tauri/src/takes.rs::tests::upgrading_a_waiting_take_leaves_the_session_status_alone
 - **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_again_upgrades_a_take_waiting_to_be_joined_first

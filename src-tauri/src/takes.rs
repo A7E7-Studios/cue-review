@@ -513,7 +513,7 @@ pub fn set_status(
     })
 }
 
-/// Startup repair for a session with takes, also run by `cue transcribe`:
+/// Startup repair for a session with takes:
 /// - recording → interrupted, raw tracks kept, earlier takes intact;
 /// - finalizing → on the timeline as `error` (transcript to Retry) when the
 ///   take's own `video.mp4` was finished and probes as valid; otherwise
@@ -617,8 +617,9 @@ fn upgrade_waiting(
     })
 }
 /// Upgrades the format-1 takes of session `id` still waiting to be joined,
-/// as [`recover`] does, but leaves the session's status alone, for a job
-/// about to transcribe them (Retry, `cue transcribe`).
+/// and deletes the stray temporary files of their join, as [`recover`] does,
+/// but leaves the session's status alone, for a job about to transcribe them
+/// (Retry, `cue transcribe`).
 pub fn upgrade(store: &Store, id: &str) -> Result<(), String> {
     upgrade_with(store, id, &probe)
 }
@@ -646,6 +647,7 @@ pub(crate) fn upgrade_with(
     if waiting.is_empty() {
         return Ok(());
     }
+    remove_stray_files(&dir);
     waiting.sort_by_key(|take| take.index);
     for take in waiting {
         if let Some(next) = upgrade_waiting(&dir, &mut session, &take, &Probe(probe)) {

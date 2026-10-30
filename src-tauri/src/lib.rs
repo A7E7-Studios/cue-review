@@ -565,6 +565,8 @@ fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
         .map(|take| take.status)
     {
         Some(status) if takes::on_timeline(status) => (),
+        // Off the timeline, as recovery would leave a waiting take in neither video: nothing to do.
+        Some(TakeStatus::Interrupted) => return Ok(()),
         Some(TakeStatus::Swapping) => {
             return Err(format!(
                 "Take {index} still waits to be added to the recording: video.mp4 could not be read, and only it tells whether the take is already in it. Try again once video.mp4 can be read."
@@ -1368,10 +1370,31 @@ mod orchestration_tests {
         let saved = state.store.session(&session.id).unwrap();
         assert_eq!(saved.takes[1].status, TakeStatus::Swapping);
         assert_eq!(saved.status, "processing");
-        // A take that is off the timeline is never transcribed.
+        // A take off the timeline (as an upgrade leaves a take in neither
+        // video) is never transcribed and is no failure, so the session
+        // settles as recovery would.
+        run_take(&state, &session.id, 3).unwrap();
+        let saved = state.store.session(&session.id).unwrap();
+        assert_eq!(saved.takes[2].status, TakeStatus::Interrupted);
+        state
+            .store
+            .update_session(&session.id, |s| {
+                s.takes.remove(1);
+                Ok(())
+            })
+            .unwrap();
+        state.runtime.lock().unwrap().processing = Some(session.id.clone());
+        finish_takes(
+            ProcessingJob {
+                state: state.clone(),
+                id: session.id.clone(),
+            },
+            vec![3],
+        );
+        let settled = state.store.session(&session.id).unwrap();
         assert_eq!(
-            run_take(&state, &session.id, 3).unwrap_err(),
-            "Take 3 has no usable video."
+            (settled.status.as_str(), settled.error.as_deref()),
+            ("ready", None)
         );
     }
     #[test]
