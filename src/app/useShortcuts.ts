@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
-import type { RefObject } from 'react';
 import type { Platform } from '../chrome/windowApi';
 
 // Workspace shortcuts (decision 8). Ctrl/⌘+K lives in the title bar with its field.
