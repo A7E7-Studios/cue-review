@@ -9,6 +9,13 @@ code:
   - src/ui/fonts.css
   - src/assets/fonts/
   - scripts/hint-figtree.py
+  - src/styles.css
+  - src/ui/tokens.css
+  - src/ui/Dialog.css
+  - src/ui/Dialog.tsx
+  - src/dialogs/SettingsDialog.css
+  - src/workspace/transcript.css
+  - src/workspace/workspace.css
 ---
 # Look and feel
 
@@ -85,3 +92,66 @@ weight without its own face would render in the nearest declared weight instead 
 - **WHEN** a style sets a font weight
 - **THEN** the bundled typeface has a face of that weight for Latin and extended Latin text
 - **PROOF** test: src/ui/fonts.test.ts::declares a face for every weight the styles use
+
+### Requirement: Scrollbars look like the app's
+The app SHALL draw every scrollbar as a slim rounded thumb on a clear track, without arrow buttons,
+darker under the pointer, in both themes, and SHALL keep a dialog's scrollbar clear of its rounded
+corners, because the default Windows scrollbar looks foreign beside the app's controls and its
+square ends cut into a rounded dialog.
+
+#### Scenario: A scrolling area shows the app's scrollbar
+- **GIVEN** the sidebar, the transcript, a picker or a dialog with more content than fits
+- **WHEN** the person looks at its scrollbar
+- **THEN** it is a slim rounded thumb on a clear track with no arrow buttons
+- **AND** the thumb darkens while the pointer is over it
+- **PROOF** test: src/ui/lookAndFeel.test.ts::every scroll area uses the app scrollbar
+- **PROOF** desk: open
+
+#### Scenario: The Settings scrollbar clears the dialog's corners
+- **GIVEN** Settings taller than the window
+- **WHEN** the person scrolls it
+- **THEN** the scrollbar starts and ends inside the dialog's straight edge, clear of its rounded
+  corners
+- **PROOF** test: src/ui/lookAndFeel.test.ts::keeps the dialog scrollbar clear of its corners
+- **PROOF** desk: open
+
+### Requirement: The Appearance dropdown looks like the app's
+The app SHALL show the Appearance choice as a dropdown in the app's own style, its open list
+included, with a check on the current theme, and SHALL keep it a native select, because the
+system's dropdown looks unstyled beside the app's controls while a native select keeps keyboard,
+typeahead and screen reader support.
+
+#### Scenario: Opening the Appearance dropdown
+- **GIVEN** Settings open
+- **WHEN** the person opens the Appearance dropdown
+- **THEN** a list in the app's menu style opens below it, with a check beside the current theme
+- **AND** choosing the other theme applies it
+- **PROOF** test: src/ui/lookAndFeel.test.ts::styles the Appearance dropdown and its open list
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::keeps the appearance, capability statuses and setup actions
+- **PROOF** desk: open
+
+### Requirement: Dialogs stand out from the app behind them
+The app SHALL draw a dialog's close button as a crisp 16 px cross, and in the dark theme SHALL
+darken the app behind a dialog to half black and lift the dialog one step lighter than the sheet,
+because a thin cross looks jagged at 100% scaling, and a dark dialog over a barely dimmed dark app
+does not read as in front.
+
+#### Scenario: A dialog's close button is crisp
+- **WHEN** a dialog with a close button is open
+- **THEN** its cross is 16 px with 1.5 px strokes
+- **PROOF** test: src/ui/Dialog.test.tsx::draws the close icon at 16 px with 1.5 px strokes
+- **PROOF** desk: open
+
+#### Scenario: A dialog in the dark theme stands out
+- **GIVEN** the dark theme
+- **WHEN** a dialog opens
+- **THEN** the app behind it is darkened to half black and the dialog's surface is lighter than the
+  sheet, with its text still legible
+- **PROOF** test: src/ui/lookAndFeel.test.ts::darkens the backdrop in the dark theme and lifts the dialog
+- **PROOF** desk: open
+
+#### Scenario: The light theme keeps its backdrop
+- **GIVEN** the light theme
+- **WHEN** a dialog opens
+- **THEN** the backdrop and the dialog's surface look as they did before this change
+- **PROOF** test: src/ui/lookAndFeel.test.ts::keeps the light theme backdrop
