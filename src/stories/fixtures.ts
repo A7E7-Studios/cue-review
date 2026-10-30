@@ -29,7 +29,9 @@ export const previewImage = 'data:image/svg+xml;charset=utf-8,' + encodeURICompo
 // take 1 runs to 1:20 and take 2 adds 54 seconds.
 export const takeTwoStartMs = 80000;
 export const twoTakeSession: Session = {
-  ...sessions[0], sourceId: 'display', microphoneId: 'microphone', systemAudio: false,
+  ...sessions[0], sourceId: 'monitor:1', microphoneId: 'microphone', systemAudio: false,
+  // A Windows display id; the bar names it by the device the session stored.
+  sourceIdentity: { kind: 'display', device: '\\\\.\\DISPLAY1', left: 0, top: 0, right: 1920, bottom: 1080 },
   takes: [
     { index: 1, offsetMs: 0, durationMs: takeTwoStartMs, status: 'ready', folder: '.', microphoneId: 'microphone', systemAudio: false },
     { index: 2, offsetMs: takeTwoStartMs, durationMs: 54000, status: 'ready', folder: 'takes/2', microphoneId: 'microphone', systemAudio: false },

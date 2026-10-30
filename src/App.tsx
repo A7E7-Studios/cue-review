@@ -3,7 +3,7 @@ import type { FormEvent, RefObject } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { backend, videoUrl } from './backend';
-import type { Project, RecordingStatus, Session, Settings, SetupStatus, Transcript } from './backend';
+import type { CaptureSource, Project, RecordingStatus, Session, Settings, SetupStatus, Transcript } from './backend';
 import { CompactDragStrip, TitleBar } from './chrome/TitleBar';
 import { platform as detectPlatform } from './chrome/windowApi';
 import type { Platform } from './chrome/windowApi';
@@ -42,6 +42,27 @@ function storedSpeed() {
   } catch { return 1; }
 }
 const STARTING_TAKE: MediaEmptyState = { title: 'Starting the next take…' };
+/** The recording bar's source in review when the session's source is no longer listed, or a reused window or display id has no stored identity to name it by. */
+const ORIGINAL_SOURCE = 'Original source';
+/** Ids a restart can hand to another window or display (docs/ARCHITECTURE.md, Source identity). */
+const REUSABLE_SOURCE_ID = /^(window|monitor):/;
+/**
+ * The session's own source, which Record more records, as the recording bar in review names it. A listed
+ * source keeps its listed name only when its id cannot have passed to another source: a `window:` or
+ * `monitor:` id can name another window or display after a restart, and the listing lacks what tells
+ * them apart (the owning process, the display device), so such a source is named by what the session
+ * stored for it: its window's title, or its display's device number ("Display 1" for `\\.\DISPLAY1`),
+ * else as the original source. A source that is no longer listed is the original source.
+ */
+function sessionSourceOf(session: Session, sources: CaptureSource[]): CaptureSource {
+  const id = session.sourceId ?? '';
+  const listed = sources.find(item => item.id === id);
+  if (listed && !REUSABLE_SOURCE_ID.test(id)) return listed;
+  const identity = session.sourceIdentity;
+  const display = identity?.kind === 'display' ? /DISPLAY(\d+)$/i.exec(identity.device)?.[1] : undefined;
+  const stored = identity?.kind === 'window' ? identity.title.trim() : display ? `Display ${display}` : '';
+  return { id, name: listed && stored ? stored : ORIGINAL_SOURCE, kind: id.startsWith('window:') ? 'window' : 'display', available: !!listed };
+}
 /** Runtime status polling: every 700 ms, backing off up to 10 s while the backend keeps failing. */
 const POLL_MS = 700;
 const POLL_MAX_MS = 10000;
@@ -69,7 +90,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
   const { compact, toggleCompact, exitCompact } = useCompactWindow(report);
   const {
-    sourceOptions, microphones, source, microphoneUnavailable, refreshDevices,
+    sources, sourceOptions, microphones, source, microphoneUnavailable, refreshDevices,
     sourceId, setSourceId, microphoneId, setMicrophoneId, systemAudio, setSystemAudio, muted, setMuted,
   } = useCaptureDevices();
 
@@ -92,7 +113,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [deletion, setDeletion] = useState<{ id: string; name: string } | null>(null);
   /** The take whose discard is being confirmed. */
   const [discarding, setDiscarding] = useState<{ id: string; index: number } | null>(null);
-  /** Why Record more failed, shown beside its pill rather than in the workspace banner. */
+  /** Why Record more failed, shown under the recording bar rather than in the workspace banner. */
   const [recordMoreError, setRecordMoreError] = useState('');
   const [search, setSearch] = useState('');
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
@@ -142,11 +163,12 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
   /**
-   * Record more itself unloads the video while its take starts. That is a busy moment for the pill
+   * Record more itself unloads the video while its take starts. That is a busy moment for Record more
    * (aria-disabled), not a reason to disable it, so focus stays on it through a refusal.
    */
   const startingTake = busy && !!session && heldMedia === session.id && !takeInFlight(session);
   const canRecordMore = !!session && !draft && settled(session) && (!!videoSrc || startingTake) && devicesReady;
+  const sessionSource = session ? sessionSourceOf(session, sources) : undefined;
   useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || !!discarding || settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
@@ -359,6 +381,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     actionEpoch.current++; setBusy(true); setError('');
     try {
       const next = await backend.stop();
+      // A mute from the dock lasts for its take: the next one starts unmuted unless Mute is ticked again.
+      setMuted(false);
       setSession(next); setDraft(false);
       runtimeState.current = next.status === 'processing' ? 'processing' : 'idle';
       setStatus({ state: runtimeState.current, sessionId: runtimeState.current === 'processing' ? next.id : undefined }); setDuration(next.durationMs);
@@ -371,13 +395,14 @@ export default function App({ platform: requested }: AppProps = {}) {
     finally { setBusy(false); }
   };
   /**
-   * Continues the open recording as a new take on its own source (decision 10). A refusal, such as a
-   * source that is gone, is shown beside the Record more pill with New recording as the way forward.
+   * Continues the open recording as a new take on its own source (decision 10), with the recording
+   * bar's microphone. A refusal, such as a source that is gone, is shown under the bar with New
+   * recording as the way forward.
    */
   const recordMore = async () => {
     if (!session || !canRecordMore || busy || loading || recording || processing || captureBlocked) return;
     if (microphoneUnavailable) { setRecordMoreError(MICROPHONE_UNAVAILABLE); return; }
-    actionEpoch.current++; setBusy(true); setError(''); setRecordMoreError('');
+    actionEpoch.current++; setBusy(true); setError(''); setRecordMoreError(''); setCaptureMenu(null);
     // Windows keeps an open file locked and the backend replaces video.mp4 after the take,
     // so the video is unloaded first and stays unloaded until processing has finished.
     const playback = unloadVideo(session.id);
@@ -627,23 +652,32 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
 
   const dock = <RecordingDock platform={os} elapsedMs={status.elapsedMs || 0} take={status.takeIndex ?? 1} audioLevel={status.audioLevel}
-    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable} muted={muted} onMuted={next => void changeMuted(next)}
+    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable}
+    microphoneName={microphones.find(item => item.id === microphoneId)?.name} muted={muted} onMuted={next => void changeMuted(next)}
     compact={compact} onToggleCompact={() => void toggleCompact()} stopDisabled={busy} onStop={() => void stop()}/>;
+  // The recording bar in a draft and in review: its microphone picker sets the next recording's or take's microphone.
+  const bar = {
+    platform: os, microphones, microphoneId, microphoneUnavailable, muted, menu: captureMenu, onMenu: setCaptureMenu,
+    onSelectMicrophone: setMicrophoneId, onMuted: setMuted, onRefreshMicrophones: () => void refreshDevices().catch(report),
+    onRefreshSources: () => void refreshDevices().then(() => setPreviewRevision(value => value + 1)).catch(report),
+    locked, busy,
+  };
   // `busy` is a moment, not a state of the control: those buttons stay focusable (aria-disabled), so focus never drops to the page.
   const controls = mode === 'recording' ? dock
-    : mode === 'draft' ? <CaptureControls platform={os} sources={sourceOptions} source={source} microphones={microphones} microphoneId={microphoneId}
-        microphoneUnavailable={microphoneUnavailable} systemAudio={systemAudio} muted={muted} menu={captureMenu} onMenu={setCaptureMenu}
-        onSelectSource={id => { setSourceId(id); setPreviewRevision(value => value + 1); }} onSelectMicrophone={setMicrophoneId}
-        onSystemAudio={setSystemAudio} onMuted={setMuted}
-        onRefreshSources={() => void refreshDevices().then(() => setPreviewRevision(value => value + 1)).catch(report)}
-        onRefreshMicrophones={() => void refreshDevices().catch(report)}
-        locked={locked} busy={busy} recordLabel={busy ? NAMES.pleaseWait : captureBlocked ? NAMES.transcribing : NAMES.record}
+    : mode === 'draft' ? <CaptureControls {...bar} sources={sourceOptions} source={source} systemAudio={systemAudio}
+        onSelectSource={id => { setSourceId(id); setPreviewRevision(value => value + 1); }} onSystemAudio={setSystemAudio}
+        recordLabel={busy ? NAMES.pleaseWait : captureBlocked ? NAMES.transcribing : NAMES.record}
         recordDisabled={captureBlocked || loading || !devicesReady || !source?.available || microphoneUnavailable} recordBusy={busy} onRecord={() => void start()}/>
-      : <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
+      : <>
+        <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
           playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onSpeed={chooseSpeed}
-          focused={focusVideo} onToggleFocus={toggleFocus}
-          recordMoreDisabled={!canRecordMore || loading || processing || captureBlocked} recordMoreBusy={busy} onRecordMore={() => void recordMore()}
-          recordMoreError={recordMoreError || undefined} onNewRecording={prepare} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
+          focused={focusVideo} onToggleFocus={toggleFocus}/>
+        {/* A take records the session's own source, so its picker is locked. */}
+        <CaptureControls {...bar} review sourceLocked sources={sourceOptions} source={sessionSource} systemAudio={session?.systemAudio ?? false}
+          onSelectSource={() => {}} onSystemAudio={() => {}}
+          recordLabel={NAMES.recordMore} recordDisabled={!canRecordMore || loading || processing || captureBlocked} recordBusy={busy} onRecord={() => void recordMore()}
+          recordMoreError={recordMoreError || undefined} onNewRecording={prepare} onDismissRecordMoreError={() => setRecordMoreError('')}/>
+      </>;
 
   // Focus that loses its control goes to the control taking its place (decisions 6 and 9).
   useFocusRescue(appRoot, lost => {
@@ -661,11 +695,11 @@ export default function App({ platform: requested }: AppProps = {}) {
       if (other) return other;
     }
     if (mode === 'recording') return find('.cr-stop');
-    return find('.cr-stage-controls .cr-dark-pill') ?? sheet.current;
+    return find('.cr-stage-controls .cr-record') ?? sheet.current;
   });
   /** The same home for a dialog whose invoking control is gone when it closes (a discarded take's button). */
   const stageFocus = useMemo<RefObject<HTMLElement | null>>(() => ({
-    get current() { return [...(appRoot.current?.querySelectorAll('.cr-stage-controls .cr-dark-pill') ?? [])].find(canTakeFocus) ?? sheet.current; },
+    get current() { return [...(appRoot.current?.querySelectorAll('.cr-stage-controls .cr-record') ?? [])].find(canTakeFocus) ?? sheet.current; },
   }), []);
 
   const errorBanner = error && !dialog && !deletion && !discarding && !settingsOpen && <div className="app-error" role="alert">
