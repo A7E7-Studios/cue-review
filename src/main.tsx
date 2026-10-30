@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 // Base styles load before the components' own stylesheets, as in Storybook (.storybook/preview.tsx).
-import '@fontsource-variable/figtree';
+import './ui/fonts.css';
 import './styles.css';
 import './Sidebar.css';
 import './ui/polish.css';
