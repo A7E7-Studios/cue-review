@@ -166,6 +166,7 @@ export const MuteWhileRecording: Story = {
     const canvas = within(canvasElement);
     const mute = canvas.getByRole('button', { name: 'Mute microphone' });
     const dock = canvasElement.querySelector<HTMLElement>('.cr-dock')!;
+    await document.fonts.ready;
     const width = dock.getBoundingClientRect().width;
     await userEvent.click(mute);
     await expect(mute).toHaveAttribute('aria-pressed', 'true');
