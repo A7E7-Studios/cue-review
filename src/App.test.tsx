@@ -396,6 +396,15 @@ describe('project and session workflows', () => {
     await user.keyboard('{Escape}'); expect(row).toHaveFocus();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
+  it('cancels the webview menu across the workspace and keeps it in text fields', async () => {
+    await review();
+    // fireEvent returns false when a handler cancelled the event, which is what keeps the webview's menu away.
+    expect(fireEvent.contextMenu(screen.getByRole('region', { name: NAMES.recordingVideo }))).toBe(false);
+    expect(fireEvent.contextMenu(screen.getByRole('button', { name: NAMES.settings }))).toBe(false);
+    expect(fireEvent.contextMenu(document.body)).toBe(false);
+    expect(fireEvent.contextMenu(screen.getByRole('searchbox', { name: NAMES.searchRecordings }))).toBe(true);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
   it('creates a section directly from a recording menu and moves only that recording', async () => {
     const user = await review();
     await user.click(screen.getByRole('button', { name: NAMES.recordingOptions }));
