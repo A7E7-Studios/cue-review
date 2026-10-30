@@ -56,8 +56,12 @@ try {
   if (!existsSync(cli)) throw new Error(`Bundled CLI is missing: ${cli}`);
   run(cli, ['--help']);
   const suffix = process.platform === 'win32' ? '.exe' : '';
-  for (const name of ['whisper-cli', 'whisper-vad-speech-segments']) {
-    run(join(resourceDir, 'tools/whisper-b5454', name + suffix), ['-h']);
+  // Windows and Linux x64 also ship the AVX2 build (scripts/build-speech-runtime.mjs).
+  const builds = ['tools/whisper-b5454', ...(process.arch === 'x64' && process.platform !== 'darwin' ? ['tools/whisper-b5454/avx2'] : [])];
+  for (const build of builds) {
+    for (const name of ['whisper-cli', 'whisper-vad-speech-segments']) {
+      run(join(resourceDir, build, name + suffix), ['-h']);
+    }
   }
   const setup = JSON.parse(run(cli, ['setup'], true));
   for (const name of ['whisper-cli', 'whisper-vad-speech-segments']) {

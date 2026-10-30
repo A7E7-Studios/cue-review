@@ -14,6 +14,20 @@ use std::{
     time::Duration,
 };
 
+/// Whisper threads for a final transcription: half the logical threads, 1 to
+/// 8. More than eight barely speed it up (take 3 of a review: 8.9 s with 8,
+/// 8.3 s with 16).
+fn final_threads(logical: usize) -> usize {
+    (logical / 2).clamp(1, 8)
+}
+/// Whisper threads while recording: a quarter, 1 to 4, beside the capture
+/// and its encoder.
+fn live_threads(logical: usize) -> usize {
+    (logical / 4).clamp(1, 4)
+}
+fn logical_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
+}
 // The options live in settings.rs so the saved vocabulary can shape them.
 fn decoding_options(root: &Path) -> Vec<String> {
     settings::decoding_args(&settings::load(root))
@@ -274,7 +288,9 @@ pub fn transcribe_snapshot(
         .arg("-f")
         .arg(&speech)
         .args(decoding_options(root))
-        .args(["-t", "2", "-of"])
+        .arg("-t")
+        .arg(live_threads(logical_threads()).to_string())
+        .arg("-of")
         .arg(&prefix);
     run_live(whisper, &folder.join("transcription.log"), cancel)?;
     accept_whisper_output(&prefix, folder)
@@ -545,6 +561,8 @@ pub fn transcribe_media(
         .arg("-f")
         .arg(speech)
         .args(decoding_options(root))
+        .arg("-t")
+        .arg(final_threads(logical_threads()).to_string())
         .arg("-of")
         .arg(&prefix);
     run_logged(whisper, &folder.join("transcription.log"))?;
@@ -555,6 +573,14 @@ mod tests {
     use super::*;
     use crate::store::read_json;
     use serde_json::json;
+    #[test]
+    fn thread_counts_follow_the_processor() {
+        let counts = |logical| (final_threads(logical), live_threads(logical));
+        assert_eq!(counts(1), (1, 1));
+        assert_eq!(counts(2), (1, 1));
+        assert_eq!(counts(8), (4, 2));
+        assert_eq!(counts(32), (8, 4));
+    }
     #[test]
     fn successful_process_cannot_reuse_old_or_malformed_output() {
         let folder = tempfile::tempdir().unwrap();
@@ -1213,6 +1239,46 @@ mod tests {
             assert!(!found.is_empty(), "Lost {phrase}");
             assert!(found[0].seek_ms.unwrap() < duration);
         }
+    }
+    #[test]
+    #[ignore = "Requires both runtime builds (avx2 subfolder), an AVX2 processor, the model and test-results/speech/reference.wav"]
+    fn actual_vector_build_is_faster_than_the_plain_build() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let speech = root.join("test-results/speech/reference.wav");
+        let plain = deps::locate("whisper-cli").unwrap();
+        let vector = deps::tool("whisper-cli").unwrap();
+        assert_ne!(plain, vector, "no avx2 build beside {}", plain.display());
+        let folder = tempfile::tempdir().unwrap();
+        let time = |binary: &Path, label: &str| {
+            let mut whisper = std::process::Command::new(binary);
+            alignment_options(&mut whisper).unwrap();
+            whisper
+                .arg("-m")
+                .arg(deps::model_path())
+                .arg("-f")
+                .arg(&speech)
+                .args(decoding_options(folder.path()))
+                .args(["-t", "4", "-of"])
+                .arg(folder.path().join(label));
+            let started = std::time::Instant::now();
+            run_logged(whisper, &folder.path().join(format!("{label}.log"))).unwrap();
+            let elapsed = started.elapsed();
+            let words = accept_whisper_output(&folder.path().join(label), folder.path())
+                .unwrap()
+                .segments
+                .iter()
+                .map(|segment| segment.words.len())
+                .sum::<usize>();
+            (elapsed, words)
+        };
+        let (slow, slow_words) = time(&plain, "plain");
+        let (fast, fast_words) = time(&vector, "avx2");
+        println!("plain {slow:?} ({slow_words} words), avx2 {fast:?} ({fast_words} words)");
+        assert!(fast_words > 0 && fast_words.abs_diff(slow_words) <= slow_words / 10);
+        assert!(
+            fast * 3 < slow,
+            "avx2 {fast:?} is not three times faster than {slow:?}"
+        );
     }
     #[test]
     #[ignore = "Requires installed Whisper/model and test-results/speech/reference.wav; transcribes it as take 2"]

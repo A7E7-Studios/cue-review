@@ -136,6 +136,8 @@ Development requires Node.js, the Rust MSVC toolchain, Visual Studio C++ build t
 
 Tools are found in this order: the downloaded runtime in `<root>/tools/whisper-b5454`, `<root>/tools`, the runtime bundled next to the app (`tools/whisper-b5454` in the resource folder or beside the executable), PATH, and on macOS/Linux the standard Homebrew and system binary folders.
 
+The bundled speech runtime is built twice on Windows and Linux x64 (`scripts/build-speech-runtime.mjs`): a plain build that runs on any x64 processor, and a build for AVX2, FMA and F16C in the folder's `avx2` subfolder. Wherever `whisper-cli` or `whisper-vad-speech-segments` is found, `deps::tool` runs the `avx2` build beside it when the processor has all three instructions; the plain build is about eight times slower (take 3 of a review, 314 s of speech with `base`: 102 s against 13 s, both with 4 threads). A final transcription uses half the logical threads, from 1 to 8; a live update uses a quarter, from 1 to 4, beside the capture and its encoder.
+
 Setup checks should distinguish missing executables, missing models, unavailable microphone/output endpoints, and unauthorized/disconnected devices. Only capabilities affected by a missing optional device dependency should be unavailable.
 
 ## Primary references

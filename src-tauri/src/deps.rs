@@ -16,7 +16,42 @@ pub fn set_resource_dir(path: PathBuf) {
     let _ = RESOURCE_DIR.set(path);
 }
 
+/// The executable `name` runs from. A whisper.cpp runtime folder may hold a
+/// second build for AVX2, FMA and F16C in its `avx2` subfolder, about eight
+/// times faster; it runs on processors that support all three.
 pub fn tool(name: &str) -> Result<PathBuf, String> {
+    let path = locate(name)?;
+    Ok(if name.starts_with("whisper-") {
+        vector_build(&path, processor_has_vector())
+    } else {
+        path
+    })
+}
+/// `binary`'s build in the `avx2` folder beside it, when `supported` and it exists.
+fn vector_build(binary: &Path, supported: bool) -> PathBuf {
+    let fast = binary
+        .parent()
+        .zip(binary.file_name())
+        .map(|(dir, name)| dir.join("avx2").join(name));
+    match fast {
+        Some(fast) if supported && fast.is_file() => fast,
+        _ => binary.to_owned(),
+    }
+}
+fn processor_has_vector() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("f16c")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+/// Where `name` is installed, before choosing a processor-specific build.
+pub(crate) fn locate(name: &str) -> Result<PathBuf, String> {
     let exe = if cfg!(windows) {
         format!("{name}.exe")
     } else {
@@ -280,4 +315,37 @@ fn vad_model_ready() -> bool {
         return path.metadata().is_ok_and(|m| m.len() > 100_000);
     }
     fs::read(path).is_ok_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == VAD_MODEL_SHA256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime(with_vector: bool) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("whisper-cli.exe");
+        fs::write(&plain, b"plain").unwrap();
+        if with_vector {
+            fs::create_dir(dir.path().join("avx2")).unwrap();
+            fs::write(dir.path().join("avx2/whisper-cli.exe"), b"avx2").unwrap();
+        }
+        (dir, plain)
+    }
+
+    #[test]
+    fn the_vector_build_runs_where_the_processor_supports_it() {
+        let (dir, plain) = runtime(true);
+        assert_eq!(
+            vector_build(&plain, true),
+            dir.path().join("avx2/whisper-cli.exe")
+        );
+    }
+
+    #[test]
+    fn the_plain_build_runs_where_the_vector_build_cannot() {
+        let (_dir, plain) = runtime(true);
+        assert_eq!(vector_build(&plain, false), plain);
+        let (_dir, plain) = runtime(false);
+        assert_eq!(vector_build(&plain, true), plain);
+    }
 }

@@ -43,6 +43,7 @@ Run each with `cargo test --manifest-path src-tauri/Cargo.toml --lib NAME -- --i
 | `orchestration_tests::recovered_video_becomes_playable_metadata` | FFmpeg | no |
 | `transcribe::tests::cancelling_live_job_terminates_its_media_process` | FFmpeg | no |
 | `transcribe::tests::actual_whisper_take_two_keeps_session_offsets` | Whisper, model, `speech/reference.wav` | no |
+| `transcribe::tests::actual_vector_build_is_faster_than_the_plain_build` | Both runtime builds (`node scripts/build-speech-runtime.mjs`, then `.local/bundle-tools/tools/whisper-b5454` on PATH), an AVX2 processor, model, `speech/reference.wav`: the `avx2` build is at least three times faster and finds the same words within 10 % | no |
 | `settings::tests::actual_vocabulary_prompt_keeps_speech_and_alignment_and_adds_nothing_to_noise` | Whisper, model, speech, quiet-noise and delayed-speech fixtures | no |
 | `transcribe::tests::actual_whisper_snapshot_keeps_absolute_offsets_and_cancels`, `actual_quiet_noise_is_empty_and_quiet_speech_is_preserved`, `actual_vad_gate_preserves_words_clock_and_rejects_noise`, `actual_dtw_anchors_keep_delayed_and_quiet_word_context` | Whisper, models and fixtures | no |
 | `capture::tests::actual_cursor_sampler_follows_the_pointer_over_an_owned_window` | Moves the real pointer and clicks an owned topmost window; records nothing | yes |
