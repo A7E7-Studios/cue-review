@@ -74,8 +74,8 @@ records the session's own source.
 The app SHALL name the session's source in the review bar by its listed name only when its id
 cannot have passed to another source; a window or display (a `window:` or `monitor:` id) is
 named by what the session stored for it, its window's title or its display's device number
-("Display 2"), or "Original source" when it stored neither, because such an id can name another window or display after a
-restart and the listing cannot tell them apart.
+("Display 2"), or "Original source" when it stored neither, because such an id can name another
+window or display after a restart and the listing cannot tell them apart.
 
 #### Scenario: The session's window handle now names another window
 - **GIVEN** a ready session recorded from a window, whose handle now names another listed window
