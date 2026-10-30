@@ -1,10 +1,10 @@
 ---
-title: Replace the webview's right-click menu with menus that matter
+title: Stop the webview's page menu on right-click
 capabilities:
   - workspace/look-and-feel
 review: unreviewed
 ---
-# Replace the webview's right-click menu with menus that matter
+# Stop the webview's page menu on right-click
 
 ## Why
 
@@ -24,18 +24,15 @@ nothing.
   show no menu ("Right-clicking the workspace shows no menu").
 - Text fields keep the system's editing menu ("Right-clicking a text field keeps its editing
   menu").
-- The left panel, outside a row or a section heading, opens the app's own menu with New recording
-  and New section ("Right-clicking the left panel offers New recording and New section"), disabled
-  while recording or processing ("The left panel's menu is disabled while recording").
-- Rows and section headings keep their own menus ("Rows and section headings keep their own
-  menus").
+- The sidebar's own menus are unchanged. Its menu for empty space (New session, New section) is
+  the sidebar capability's, built by the sidebar-new-session change.
 
 ## Settled questions
 
 - **Q1 Right-click**: the right side (workspace, transcript) shows nothing, like the Claude app; the
-  left panel shows New session (here New recording) and New section. Select all and Collapse all /
-  Expand all are not important enough to add. Rejected: nothing anywhere except text fields;
-  nothing anywhere; the native menu over selected text too.
+  left panel shows New session and New section. Select all and Collapse all / Expand all are not
+  important enough to add. Rejected: nothing anywhere except text fields; nothing anywhere; the
+  native menu over selected text too.
 - **Q5 Text fields**: keep the system's Cut / Copy / Paste menu in text fields. Rejected: no menu
   there either.
 - **Q6 While recording**: the left panel's menu opens with both items disabled, as their buttons
@@ -44,12 +41,13 @@ nothing.
 
 ## Calls for the owner
 
-- **Q11 The menu's look**: the left panel's menu reuses the sidebar's row menu, shown to the owner on
-  the directions page. The owner was away when it was asked and delegated open picks to the
-  agent's recommendation, so the agent took it. Changing it later is a CSS change in
-  `src/Sidebar.css`.
-- The menu's items use the app's names, **New recording** and **New section**, not "New session":
-  the button it mirrors is New recording. Renaming both is one string in `NAMES`.
+- **The left panel's menu moved to the sidebar-new-session change.** Both changes built it; the
+  recording-flow batch's version lands first, together with the New session row it belongs to, so
+  this change keeps only the guard. Q1 (anywhere in the sidebar outside rows and headings) and Q6
+  (open with both items disabled while recording) were passed to that change. When this change was
+  reviewed, the sidebar-new-session spec still said the menu opens only in the list and not at all
+  while recording; the recording-flow batch confirmed it is changing both to match Q1 and Q6. If
+  that change lands without them, the owner's Q1 and Q6 answers for the sidebar are not met yet.
 - The fix is in app code (a document-level `contextmenu` handler), not in the Tauri configuration
   or the WebView2 settings, so it needs no protected path. Turning WebView2's default menus off in
   Rust would also drop the editing menu in text fields, which Q5 keeps.
@@ -59,5 +57,5 @@ nothing.
 
 ## Out of scope
 
-- Select all, Collapse all and Expand all in the left panel's menu (Q1).
-- The sidebar's row menu and its Move to section submenu: the layout batch reworks those.
+- Select all, Collapse all and Expand all in the sidebar's menu (Q1).
+- The sidebar's menus themselves: the sidebar capability.

@@ -20,6 +20,8 @@
   --motion-fast: 120ms;
   --motion-normal: 180ms;
   --motion-slow: 220ms;
+  /* Hiding and showing the sidebar (window-chrome spec). */
+  --motion-sidebar: 200ms;
   --ease-out: cubic-bezier(.2, .8, .2, 1);
   --bg: #ffffff;
   --side: #f7f8fa;
@@ -65,8 +67,10 @@
   --radius-current-row: 12px;
 
   /* Sizes */
-  --size-titlebar: 40px;
+  --size-titlebar: 44px;
   --size-window-control: 46px;
+  --size-chrome-icon-button-width: 36px;
+  --size-chrome-icon-button-height: 32px;
   --size-toolbar: 52px;
   --size-traffic-lights-width: 78px;
   --size-traffic-lights-height: 28px;
@@ -127,7 +131,6 @@
   --color-button: #FFFFFF;
   --color-control-ring: #DCDFE5;
   --shadow-button: 0 0 0 1px var(--color-control-ring), 0 1px 2px rgba(16, 24, 40, .06);
-  --shadow-new-recording: var(--shadow-button);
   /* The macOS toolbar's search field. */
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #E4E6EB;
@@ -190,8 +193,7 @@
   --radius-field: 7px;
   --radius-row: 8px;
   --radius-video: 12px;
-  /* FloatV2ReviewMac: a lighter ring on New recording and a cooler search field. */
-  --shadow-new-recording: 0 0 0 1px rgba(24, 24, 27, .07), 0 1px 2px rgba(16, 24, 40, .06);
+  /* FloatV2ReviewMac: a cooler search field. */
   --color-toolbar-search: #F2F3F6;
 }
 
@@ -257,7 +259,6 @@
   --color-text-tertiary-on-selected: #9393A0;
   --color-button: #232328;
   --color-control-ring: #34343B;
-  --shadow-new-recording: var(--shadow-button);
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #232328;
   --color-record-disabled: #6B4446;
@@ -299,6 +300,7 @@
   --motion-fast: 0ms;
   --motion-normal: 0ms;
   --motion-slow: 0ms;
+  --motion-sidebar: 0ms;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -306,5 +308,6 @@
     --motion-fast: 0ms;
     --motion-normal: 0ms;
     --motion-slow: 0ms;
+    --motion-sidebar: 0ms;
   }
 }

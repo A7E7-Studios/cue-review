@@ -29,7 +29,7 @@ import { useContextMenuGuard } from './app/useContextMenuGuard';
 import { canTakeFocus, useFocusRescue } from './app/useFocusRescue';
 import { usePreviewStream } from './app/usePreviewStream';
 import { useShortcuts } from './app/useShortcuts';
-import { useSidebarLayout } from './app/useSidebarLayout';
+import { useSidebarLayout, useSidebarSlide } from './app/useSidebarLayout';
 import { useTheme } from './app/useTheme';
 
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
@@ -97,6 +97,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [focusVideo, setFocusVideo] = useState(false);
+  const [draftSection, setDraftSection] = useState<string | null>(null);
 
   const video = useRef<HTMLVideoElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -157,7 +158,7 @@ export default function App({ platform: requested }: AppProps = {}) {
 
   const openSession = useCallback(async (id: string) => {
     const request = ++selection.current;
-    restorePlayback.current = null; setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
+    restorePlayback.current = null; setDraftSection(null); setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
@@ -268,8 +269,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   // Compact mode exists only while recording.
   useEffect(() => { if (compact && !recording) void exitCompact(); }, [compact, recording, exitCompact]);
 
-  const prepare = useCallback(() => {
+  /** A new session; one started from a section heading is filed in that section when it records. */
+  const prepare = useCallback((sectionId?: unknown) => {
     if (locked) return;
+    setDraftSection(typeof sectionId === 'string' ? sectionId : null);
     selection.current++; shownId.current = null; restorePlayback.current = null; dismissOverlay();
     setLoading(false); setDraft(true); setSession(null); setTranscript(EMPTY_TRANSCRIPT); setPlaying(false); setTime(0); setCaptureMenu(null); setRecordMoreError('');
   }, [locked, dismissOverlay]);
@@ -311,7 +314,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       if (!source?.available) throw new Error(source?.detail || 'Choose an available screen, window, or connected device first.');
       if (microphoneUnavailable) throw new Error(MICROPHONE_UNAVAILABLE);
       setStartingRecording(true);
-      const next = await backend.start(null, null, sourceId, microphoneId || null, systemAudio, muted);
+      const target = draftSection && projects.some(section => section.id === draftSection) ? draftSection : null;
+      const next = await backend.start(target, null, sourceId, microphoneId || null, systemAudio, muted);
       shownId.current = next.id;
       setSession(next); setDraft(false); setTranscript(EMPTY_TRANSCRIPT); runtimeState.current = 'recording';
       setStatus({ state: 'recording', sessionId: next.id, elapsedMs: 0 }); setTime(0); setPlaying(false);
@@ -616,7 +620,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     const toggle = lost.classList.contains('chrome-sidebar-toggle');
     if (toggle || lost.closest('.sidebar')) {
       // A row disabled for a moment keeps its place; a hidden sidebar or toggle hands focus to its counterpart.
-      if (lost.isConnected) return null;
+      if (lost.isConnected && !lost.closest('[inert]')) return null;
       return sidebarVisible ? find('.sidebar .side-collapse') ?? find('.chrome-sidebar-toggle') : find('.chrome-sidebar-toggle');
     }
     // Compact and Expand swap with the layout: focus follows to the other one.
@@ -666,18 +670,22 @@ export default function App({ platform: requested }: AppProps = {}) {
     </div>}
   </main>;
 
-  const sidebarElement = sidebarVisible && <Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
+  // The sidebar slides out and in, except beside a live preview or a recording, so live video is never resized by an animation.
+  const liveVideo = mode !== 'review';
+  const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, liveVideo);
+  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
     onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
     onRenameSection={item => openDialog({ kind: 'renameSection', id: item.id, value: item.name })}
-    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })}
+    onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })} onNewInSection={prepare}
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
-    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/>;
+    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
   const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
     search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
 
-  return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : sidebarOverlay ? 'overlay' : sidebarVisible ? 'docked' : 'hidden'} data-compact={compact || undefined}>
+  return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}
+    data-sidebar-motion={liveVideo ? 'instant' : 'slide'} data-compact={compact || undefined}>
     {compact ? <>
       <CompactDragStrip platform={os}/>
       <main ref={sheet} className="app-compact" tabIndex={-1} data-dialog-focus-fallback>{errorBanner}{dock}</main>

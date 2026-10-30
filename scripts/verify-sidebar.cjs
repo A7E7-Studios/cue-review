@@ -84,11 +84,17 @@ const rowText = () => page.evaluate(() => {
     assert(result.checks.nativeDragEvents.filter(item => item.type === 'drop' && item.trusted).length === 2, 'Drag verification did not use trusted native mouse events.');
     result.checks.reviewPreserved = await page.evaluate(() => window.__sidebarVideo === document.querySelector('video') && Math.abs(document.querySelector('video').currentTime - 2) < .1);
     assert(result.checks.reviewPreserved, 'Moving another recording reset playback.');
-    // Right-click an inactive recording, create a section from the move menu, and rename it.
+    // Right-click an inactive recording, point at Move to section (a submenu opens beside the menu),
+    // create a section from it, and rename it.
     await recents.getByRole('button', { name: 'Workspace issues', exact: true }).click({ button: 'right' });
-    await page.getByRole('menuitem', { name: 'Move to section', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Move to section', exact: true }).hover();
+    const moveMenu = page.getByRole('menu', { name: 'Move to section', exact: true });
+    await moveMenu.waitFor();
+    const [actions, submenu] = await Promise.all([page.getByRole('menu', { name: 'Recording actions', exact: true }).boundingBox(), moveMenu.boundingBox()]);
+    assert(actions && submenu && Math.abs(submenu.x - (actions.x + actions.width)) <= 8, `Move to section did not open beside the menu: ${JSON.stringify({ actions, submenu })}`);
+    result.checks.moveSubmenu = { actions, submenu };
     await page.screenshot({ path: path.join(output, 'move-menu.png') });
-    await page.getByRole('menuitem', { name: 'New section', exact: true }).click();
+    await moveMenu.getByRole('menuitem', { name: 'New section…', exact: true }).click();
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Design feedback');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByRole('region', { name: 'Section: Design feedback', exact: true }).getByRole('button', { name: 'Workspace issues', exact: true }).waitFor();

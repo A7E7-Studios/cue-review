@@ -75,7 +75,7 @@ export function shortcutRows(os: Platform): ShortcutRow[] {
   const command = (key: string) => ({ keys: [shortcut(key, os).label], spoken: `${os === 'macos' ? 'Command' : 'Control'} ${key}` });
   return [
     { action: 'Record, stop or record more', ...command('R') },
-    { action: 'New recording', ...command('N') },
+    { action: 'New session', ...command('N') },
     { action: 'Search recordings', ...command('K') },
     { action: 'Play or pause', keys: ['Space'], spoken: 'Space' },
     { action: 'Seek back or forward 5 seconds', keys: ['←', '→'], spoken: 'Left arrow or Right arrow' },
