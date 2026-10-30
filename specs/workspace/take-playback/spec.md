@@ -32,9 +32,14 @@ session as one recording.
 - **WHEN** the reviewer selects a word of take 2 in the transcript, or a point of take 2 on the
   scrubber
 - **THEN** take 2's video shows that moment, and playback goes on if it was playing
-- **AND** seeking back into take 1 shows take 1's video again, and a search result on a line of
-  take 2 opens the session paused at that moment of take 2's video
+- **AND** seeking back into take 1 shows take 1's video again
 - **PROOF** test: src/App.test.tsx::take playback seeks into another take's video from the scrubber and the transcript
-- **PROOF** test: src/App.test.tsx::take playback opens a search result in the take video its line falls in
 - **PROOF** test: src/app/media.test.ts::videoAt picks the take video by session time
+- **PROOF** desk: open
+
+#### Scenario: Opening a search result in a later take
+- **GIVEN** a session with two takes
+- **WHEN** the reviewer opens a search result on a line of take 2
+- **THEN** the session opens paused at that moment of take 2's video
+- **PROOF** test: src/App.test.tsx::take playback opens a search result in the take video its line falls in
 - **PROOF** desk: open
