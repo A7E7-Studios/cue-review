@@ -185,7 +185,6 @@
 .cr-dock-timer { margin: 0; height: var(--size-dock-control); display: flex; align-items: center; gap: 10px; padding: 0 8px 0 14px; white-space: nowrap; }
 .cr-dock-live { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
 .cr-dock-clock { font-size: var(--font-size-timer); font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
-.cr-dock-take { color: var(--color-dock-text-secondary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); }
 .cr-meter { height: var(--size-dock-control); display: flex; align-items: center; gap: 3px; padding: 0 10px 0 6px; }
 .cr-meter > span { display: block; width: 3px; border-radius: 2px; background: var(--color-meter-off); }
 .cr-meter > span[data-level='low'] { background: var(--color-meter-low); }
@@ -209,14 +208,12 @@
   font-size: 14px; font-weight: 700;
 }
 .cr-stop-square { width: 11px; height: 11px; flex-shrink: 0; border-radius: 3px; background: currentColor; }
-.cr-dock-caption { margin: 0; color: var(--color-text-tertiary); font-size: var(--font-size-control); text-align: center; }
 .cr-dock-slot[data-compact] { --size-dock-control: 36px; gap: 6px; }
 .cr-dock-slot[data-compact] .cr-dock { padding: 4px; }
 .cr-dock-slot[data-compact] .cr-dock-clock { font-size: 16px; }
 .cr-dock-slot[data-compact] .cr-dock-timer { padding: 0 6px 0 10px; gap: 8px; }
 .cr-dock-slot[data-compact] .cr-dock-source { max-width: 132px; padding: 0 8px; }
 .cr-dock-slot[data-compact] .cr-stop { padding: 0 14px 0 12px; }
-.cr-dock-slot[data-compact] .cr-dock-caption { font-size: var(--font-size-meta); }
 
 /* Progressive compaction, measured on the take-2 dock with a microphone (the widest): it needs
    527px with 44px controls and 469px in compact mode. Each step applies just below the width the
@@ -229,7 +226,6 @@
   .cr-dock-slot:not([data-compact]) .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
 @container cr-dock (max-width: 465.5px) {
-  .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-take { display: none; }
   .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-timer { padding-right: 4px; }
 }
 @container cr-dock (max-width: 416px) {
@@ -247,7 +243,6 @@
   .cr-dock-slot[data-compact] .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
 @container cr-dock (max-width: 410.5px) {
-  .cr-dock-slot[data-compact] .cr-dock .cr-dock-take { display: none; }
   .cr-dock-slot[data-compact] .cr-dock .cr-dock-timer { padding-right: 4px; }
 }
 @container cr-dock (max-width: 364px) {
@@ -325,7 +320,6 @@
   .cr-dock-slot { --size-dock-control: 36px; gap: 6px; }
   .cr-dock { padding: 4px; }
   .cr-dock-clock { font-size: 16px; }
-  .cr-dock-caption { font-size: var(--font-size-meta); }
   .cr-playback-row { gap: 6px; }
   .cr-playback { --size-play: 34px; --size-pill-large: 32px; --size-pill: 28px; }
   .cr-capture { --size-pill-large: 32px; }

@@ -10,15 +10,15 @@ const props = (overrides: Partial<RecordingDockProps> = {}): RecordingDockProps 
 });
 
 describe('RecordingDock', () => {
-  it('shows the take timer, level, locked source and caption for take 2', () => {
+  it('shows the take timer, level and locked source for take 2, with no take label or caption', () => {
     render(<RecordingDock {...props()} platform="windows"/>);
     const dock = screen.getByRole('group', { name: 'Recording controls' });
     const timer = within(dock).getByRole('timer', { name: 'Take 2 elapsed time' });
     expect(timer).toHaveTextContent('00:08');
-    expect(timer).toHaveTextContent('Take 2');
+    expect(timer).toHaveTextContent(/^00:08$/);
     expect(within(dock).getByRole('meter', { name: 'Microphone level' })).toHaveAttribute('aria-valuenow', '60');
     expect(within(dock).getByRole('button', { name: 'Display 1' })).toBeDisabled();
-    expect(screen.getByText('Adding to this session. Stop to process take 2 on this device.')).toBeVisible();
+    expect(screen.queryByText(/Take 2|Adding to this session/)).not.toBeInTheDocument();
     expect(dock.querySelector('progress, [role=progressbar]')).toBeNull();
   });
   it('labels a first recording without a take number or caption', () => {
