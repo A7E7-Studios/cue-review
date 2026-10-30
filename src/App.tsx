@@ -664,8 +664,9 @@ export default function App({ platform: requested }: AppProps = {}) {
     </div>}
   </main>;
 
-  // The sidebar slides out and in, except while recording, so live video is never resized by an animation.
-  const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, recording);
+  // The sidebar slides out and in, except beside a live preview or a recording, so live video is never resized by an animation.
+  const liveVideo = mode !== 'review';
+  const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, liveVideo);
   const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
@@ -678,7 +679,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
 
   return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}
-    data-sidebar-motion={recording ? 'instant' : 'slide'} data-compact={compact || undefined}>
+    data-sidebar-motion={liveVideo ? 'instant' : 'slide'} data-compact={compact || undefined}>
     {compact ? <>
       <CompactDragStrip platform={os}/>
       <main ref={sheet} className="app-compact" tabIndex={-1} data-dialog-focus-fallback>{errorBanner}{dock}</main>

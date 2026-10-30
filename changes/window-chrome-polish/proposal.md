@@ -29,9 +29,10 @@ reviewing the app itself, comparing it with the Claude desktop app.
   the sidebar toggle and Settings draw 20px icons in 36×32 buttons: scenario "A person compares the
   window controls with another Windows app".
 - The sidebar slides out and in over 200ms and the workspace follows it: scenario "A person hides
-  and shows the sidebar". It changes at once while recording and under reduced motion: scenarios
-  "The sidebar changes at once while recording" and "The sidebar changes at once under reduced
-  motion".
+  and shows the sidebar". In a narrow window it slides over the sheet: scenario "The sidebar slides
+  over the sheet in a narrow window". It changes at once beside live video and under reduced
+  motion: scenarios "The sidebar changes at once beside live video" and "The sidebar changes at
+  once under reduced motion".
 
 ## Settled questions
 
@@ -54,6 +55,9 @@ reviewing the app itself, comparing it with the Claude desktop app.
   token. Keeping it at 40px would need a token of its own.
 - Below 1000px the sidebar shows over the sheet instead of beside it; there it slides in over the
   sheet the same way, and the sheet does not move.
+- "Instant while recording" (Q3) also covers a new recording's live preview, which is live video
+  too: the reason the owner accepted, no animated resize of live video, applies to both. Sliding
+  beside the preview would only need `liveVideo` in `src/App.tsx` narrowed back to recording.
 
 ## Out of scope
 

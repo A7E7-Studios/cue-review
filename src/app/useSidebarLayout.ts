@@ -35,8 +35,9 @@ export const SIDEBAR_SLIDE_MS = 200;
 /**
  * Keeps the sidebar mounted while it slides out (window-chrome spec). `phase` is `entering` for the
  * first frames of a slide in, `exiting` while it slides out, `open` otherwise; CSS animates the
- * change from one to the next. `instant` (while recording) and reduced motion skip the slide, and
- * the first render never slides. `overlay` holds its last value while the sidebar slides out.
+ * change from one to the next. `instant` (beside live video) and reduced motion skip the slide, and
+ * only a change of `visible` slides, so the first render (also when StrictMode replays effects)
+ * never does. `overlay` holds its last value while the sidebar slides out.
  */
 export function useSidebarSlide(visible: boolean, overlay: boolean, instant: boolean) {
   const reduced = useReducedMotion();
@@ -44,9 +45,10 @@ export function useSidebarSlide(visible: boolean, overlay: boolean, instant: boo
   const skipRef = useRef(skip);
   skipRef.current = skip;
   const [state, setState] = useState<{ present: boolean; phase: PresencePhase }>({ present: visible, phase: 'open' });
-  const first = useRef(true);
+  const lastVisible = useRef(visible);
   useLayoutEffect(() => {
-    if (first.current) { first.current = false; return; }
+    if (lastVisible.current === visible) return;
+    lastVisible.current = visible;
     if (skipRef.current) { setState({ present: visible, phase: 'open' }); return; }
     let frame = 0;
     let secondFrame = 0;

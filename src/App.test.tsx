@@ -483,10 +483,10 @@ describe('layout', () => {
     expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
   });
   it('slides the sidebar out and in', async () => {
-    const user = await ready();
+    const user = await review();
     const app = document.querySelector('.app');
     expect(app).toHaveAttribute('data-sidebar-motion', 'slide');
-    // The first render does not slide.
+    // Opening the app does not slide.
     expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
     await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
     const slot = document.querySelector('.app-sidebar-slot');
@@ -499,15 +499,48 @@ describe('layout', () => {
     await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open'));
     expect(document.querySelector('.app-sidebar-slot')).not.toHaveAttribute('inert');
   });
-  it('hides the sidebar at once while recording', async () => {
+  it('slides the sidebar over the sheet in a narrow window', async () => {
+    window.innerWidth = 900;
     const user = await ready();
-    await user.keyboard('{Control>}r{/Control}');
-    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    // Opening a recording from the overlay hides it again.
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'entering');
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open'));
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await user.keyboard('{Escape}');
+    expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'exiting');
+    // It leaves over the sheet: the layout stays the overlay until it is gone.
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument());
+  });
+  it('hides the sidebar at once beside live video', async () => {
+    // A new recording shows its source's live preview.
+    const user = await ready();
     expect(document.querySelector('.app')).toHaveAttribute('data-sidebar-motion', 'instant');
     await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
     expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
     expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
+    // And while recording.
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar-motion', 'instant');
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument();
+  });
+  it('hides the sidebar at once under reduced motion', async () => {
+    document.documentElement.dataset.motion = 'reduced';
+    try {
+      const user = await review();
+      await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+      expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+      expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
+    } finally { delete document.documentElement.dataset.motion; }
   });
   it('shows the sidebar when a search starts while it is hidden', async () => {
     window.innerWidth = 900;

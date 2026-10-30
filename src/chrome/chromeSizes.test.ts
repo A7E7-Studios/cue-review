@@ -8,7 +8,7 @@ const chrome = readFileSync('src/chrome/chrome.css', 'utf8');
 const shell = readFileSync('src/styles.css', 'utf8');
 
 /** The value of a token in the base `:root` block (its first declaration). */
-const token = (name: string) => new RegExp(`--${name}:\s*([^;]+);`).exec(tokens)?.[1].trim();
+const token = (name: string) => new RegExp(String.raw`--${name}:\s*([^;]+);`).exec(tokens)?.[1].trim();
 /** The declarations of the first rule whose selector list is exactly `selector`. */
 function rule(css: string, selector: string) {
   const start = css.indexOf(`${selector} {`);

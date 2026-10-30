@@ -5,8 +5,6 @@ const paths = {
   panel: 'M3 4.5h18v15H3zM9 4.5v15',
   search: 'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.8-4.8',
   sliders: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4',
-  minimize: 'M4 12h16',
-  maximize: 'M5 5h14v14H5z',
   close: 'm5 5 14 14M19 5 5 19',
   folderPlus: 'M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 10.5v5M9.5 13h5',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
@@ -17,8 +15,7 @@ const paths = {
   // Drawn filled in the mocks: pass `filled`.
   play: 'M8 5.6v12.8a1 1 0 0 0 1.53.85l10.2-6.4a1 1 0 0 0 0-1.7L9.53 4.75A1 1 0 0 0 8 5.6z',
   expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
-  // Companions the mocks imply: the maximized window control and the muted microphone.
-  restore: 'M5 8h11v11H5zM8 8V5h11v11h-3',
+  // A companion the mocks imply: the muted microphone.
   micOff: 'M12 3.5a3 3 0 0 0-3 3V12a3 3 0 0 0 6 0V6.5a3 3 0 0 0-3-3zM5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M4 4l16 16',
   // Earlier icons
   plus: 'M12 5v14M5 12h14', chevron: 'm8 5 7 7-7 7', pause: 'M8 5v14M16 5v14',

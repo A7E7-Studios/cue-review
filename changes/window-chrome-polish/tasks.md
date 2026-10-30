@@ -15,6 +15,7 @@ nearest the code it changes.
 ## 2. Sidebar slide (independent of 1)
 
 - [x] 2.1 `useSidebarSlide` keeps the sidebar mounted and inert while it slides out; test: src/App.test.tsx::slides the sidebar out and in
-- [x] 2.2 Instant while recording; test: src/App.test.tsx::hides the sidebar at once while recording
-- [x] 2.3 `--motion-sidebar`, 0ms under reduced motion; test: src/chrome/chromeSizes.test.ts::the sidebar slide is instant under reduced motion
-- [x] 2.4 Update the motion contract in `docs/DESIGN.md`; test: node tools/gate/gate.mjs --local
+- [x] 2.2 Instant beside a live preview or a recording; test: src/App.test.tsx::hides the sidebar at once beside live video
+- [x] 2.3 Over the sheet in a narrow window; test: src/App.test.tsx::slides the sidebar over the sheet in a narrow window
+- [x] 2.4 `--motion-sidebar`, 0ms under reduced motion, and no delayed unmount; test: src/App.test.tsx::hides the sidebar at once under reduced motion
+- [x] 2.5 Update the motion contract in `docs/DESIGN.md`; test: node tools/gate/gate.mjs --local

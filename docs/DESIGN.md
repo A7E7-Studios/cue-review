@@ -100,7 +100,7 @@ Use motion to explain a state change. Recording start/stop, timecode, video fram
 | Device popover | 120ms opacity and 4px translation | Entry implemented; exit continuity remains open |
 | Dialog | 180ms opacity and 5px translation | Implemented; background stays inert through exit |
 | Section disclosure | 180ms height reveal; chevron rotation | Implemented; collapsed content inert immediately |
-| Sidebar hide and show | 200ms width ease with the sidebar sliding out and the sheet following (over the sheet below 1000px) | Implemented; instant while recording; the leaving sidebar is inert |
+| Sidebar hide and show | 200ms width ease with the sidebar sliding out and the sheet following (over the sheet below 1000px) | Implemented; instant beside a live preview or a recording; the leaving sidebar is inert |
 | Toast | 180ms opacity | Entry implemented; dismissal continuity remains open |
 | Shortcut hints | 120ms opacity on hover or focus | Implemented |
 | Workspace changes | At most 180–220ms restrained transition after content is ready | Proposed; do not animate resize or crossfade live video |
