@@ -41,6 +41,10 @@ struct Runtime {
     last_error: Option<String>,
     live_transcript: Option<Transcript>,
     live_cancel: Option<Arc<AtomicBool>>,
+    /// Stops the whole-take pass that refines a transcript after Stop.
+    refine_cancel: Option<Arc<AtomicBool>>,
+    /// Counts refined transcripts, reported as `transcriptRevision`.
+    refined: u64,
 }
 struct AppState {
     store: Store,
@@ -292,8 +296,9 @@ fn delete_section_from_store(s: &Shared, id: &str) -> Result<(), String> {
     s.store.delete_project(id)
 }
 fn delete_session_from_store(s: &Shared, id: &str) -> Result<(), String> {
-    let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+    let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     ensure_session_not_in_use(&runtime, id)?;
+    stop_refining(&mut runtime);
     s.store.delete_session(id)
 }
 #[tauri::command]
@@ -486,7 +491,57 @@ fn activate(
     runtime.active_take = take;
     cancel
 }
+/// Stops a refinement in progress, before a recording starts, Retry or a
+/// delete; the fast transcript stays.
+fn stop_refining(runtime: &mut Runtime) {
+    if let Some(cancel) = runtime.refine_cancel.take() {
+        cancel.store(true, Ordering::Release);
+    }
+}
+/// After Stop has saved a transcript made from stretches, transcribes those
+/// takes whole in the background and replaces their words, because one pass
+/// over stretches makes more word errors. Waits for the inference lock, and
+/// gives up when a recording is running or starts, or Retry or a delete
+/// stops it.
+fn spawn_refine(s: &Shared, id: &str) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    match s.runtime.lock() {
+        Ok(mut runtime) => {
+            stop_refining(&mut runtime);
+            runtime.refine_cancel = Some(cancel.clone());
+        }
+        Err(_) => return,
+    }
+    let state = s.clone();
+    let id = id.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("refine-transcript".into())
+        .spawn(move || {
+            let Ok(_inference) = state.inference.lock() else {
+                return;
+            };
+            let recording = state
+                .runtime
+                .lock()
+                .map_or(true, |runtime| runtime.active.is_some());
+            if recording || cancel.load(Ordering::Acquire) {
+                return;
+            }
+            match transcribe::refine(&state.store, &id, &cancel) {
+                Ok(true) => {
+                    if let Ok(mut runtime) = state.runtime.lock() {
+                        runtime.refined += 1;
+                    }
+                }
+                Ok(false) => (),
+                Err(error) => eprintln!("The transcript of {id} was not refined: {error}"),
+            }
+        });
+}
 fn spawn_live(s: &Shared, id: &str, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
+    if let Ok(mut runtime) = s.runtime.lock() {
+        stop_refining(&mut runtime);
+    }
     let state = s.clone();
     let id = id.to_owned();
     if let Err(error) = std::thread::Builder::new()
@@ -598,6 +653,7 @@ fn finish_transcription(job: ProcessingJob) {
             result.err().unwrap_or(update)
         }),
     }
+    spawn_refine(&job.state, &job.id);
 }
 /// Transcribes only one finished take, which ends ready or error. A take of
 /// a session saved before takes kept their own videos, still waiting to be
@@ -668,6 +724,7 @@ fn finish_takes(job: ProcessingJob, indices: Vec<u32>) {
     if let Some(error) = failure.or(settled.err()) {
         job.fail(error);
     }
+    spawn_refine(&job.state, &job.id);
 }
 #[tauri::command]
 async fn stop_recording(s: CmdState<'_>) -> Result<Session, String> {
@@ -794,6 +851,9 @@ async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> 
         let plan = (!session.takes.is_empty()).then(|| takes::retry_plan(&session));
         // Retry transcribes whole takes, never the stretches saved while recording.
         stretches::forget_session(&s.store, &id)?;
+        if let Ok(mut runtime) = s.runtime.lock() {
+            stop_refining(&mut runtime);
+        }
         let prepared = s.store.update_session(&id, |session| {
             attach_finished_video(&s.store, session)?;
             session.status = "processing".into();
@@ -978,6 +1038,7 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
                 live_transcript: runtime.live_transcript.clone(),
                 take_index: runtime.active_take.map(|take| take.index),
                 take_offset_ms: runtime.active_take.map(|take| take.offset_ms),
+                transcript_revision: runtime.refined,
             });
         }
         Ok(idle_status(&runtime))
@@ -999,6 +1060,7 @@ fn idle_status(runtime: &Runtime) -> RecordingStatus {
         live_transcript: None,
         take_index: runtime.processing_take.map(|take| take.index),
         take_offset_ms: runtime.processing_take.map(|take| take.offset_ms),
+        transcript_revision: runtime.refined,
     }
 }
 pub fn run() {

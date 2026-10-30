@@ -258,6 +258,10 @@ pub struct RecordingStatus {
     /// Where that take starts on the session timeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_offset_ms: Option<u64>,
+    /// Counts the transcripts refined after Stop; the app reloads the open
+    /// recording's transcript when it changes.
+    #[serde(default)]
+    pub transcript_revision: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -533,6 +537,7 @@ mod tests {
             live_transcript: None,
             take_index: None,
             take_offset_ms: None,
+            transcript_revision: 0,
         };
         let idle = serde_json::to_value(&status).unwrap();
         assert!(idle.get("takeIndex").is_none() && idle.get("takeOffsetMs").is_none());

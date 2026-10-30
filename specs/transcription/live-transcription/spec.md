@@ -4,23 +4,27 @@ code:
   - src-tauri/src/lib.rs
   - src-tauri/src/transcribe.rs
   - src-tauri/src/stretches.rs
+  - src-tauri/src/capture.rs
+  - src-tauri/src/agent.rs
+  - src/App.tsx
+  - src/review.ts
   - src/workspace/TranscriptPane.tsx
-  - src/workspace/transcript.css
 ---
 # Live transcription
 
 ## Purpose
 
 Turning speech into words while a take is being recorded, so the person sees what they said within
-a couple of seconds and the take's transcript is ready almost as soon as they stop.
+a few seconds, the take's transcript is there as soon as they stop, and its final words are as
+accurate as transcribing the whole take.
 
 ## Requirements
 
-### Requirement: Speech is transcribed once, while recording
-The app SHALL cut a take's speech into stretches at pauses of at least 0.6 s (at most 30 s each),
-transcribe each finished stretch once with the language's model while the recording goes on, and
-keep those words as the take's transcript, because the person should not wait after Stop for the
-whole take to be transcribed again.
+### Requirement: Speech is transcribed while recording, so Stop leaves little to do
+The app SHALL cut a take's speech into stretches of 10 to 30 s that end at a pause of at least
+0.6 s, transcribe each finished stretch once with the language's model while the recording goes
+on, and make the take's transcript from them at Stop, because the person should not wait after
+Stop for the whole take to be transcribed.
 
 #### Scenario: The transcript is ready seconds after Stop
 - **GIVEN** a take recorded with a PC microphone or system audio, of any length
@@ -31,9 +35,10 @@ whole take to be transcribed again.
 
 #### Scenario: Every spoken word appears once
 - **GIVEN** a take whose speech was cut into several stretches
-- **WHEN** its transcript is ready
-- **THEN** it holds the words of every stretch in order, none skipped and none doubled at a cut
+- **WHEN** its transcript is made from them
+- **THEN** it holds the words of every stretch in order, none doubled at a cut
 - **PROOF** test: src-tauri/src/stretches.rs::tests::stretches_join_without_gaps_or_overlaps
+- **PROOF** test: src-tauri/src/stretches.rs::tests::cuts_at_pauses_and_never_past_thirty_seconds
 - **PROOF** test: src-tauri/src/stretches.rs::tests::actual_replay_matches_a_whole_take_pass
 
 #### Scenario: Retry transcribes the whole take again
@@ -49,17 +54,32 @@ whole take to be transcribed again.
 - **THEN** the whole take is transcribed after Stop
 - **PROOF** test: src-tauri/src/stretches.rs::tests::saved_stretches_are_used_only_when_they_match
 
-### Requirement: The words being spoken appear within about two seconds
-The app SHALL re-guess the words after the last finished stretch about every two seconds and show
-them, greyed in the live box with the caret, below the finished stretches, which show as ordinary
-rows that no longer change, because the person wants to see that they are heard without the words
-they already said shifting around.
+### Requirement: A transcript made from stretches is refined after Stop
+The app SHALL transcribe each take whose transcript came from stretches once more as a whole, in
+the background after Stop, and replace its words, and SHALL give that up when a recording starts,
+Retry runs or the recording is deleted, because stretches made about 4 points more word errors than
+a whole-take pass on a five-minute review.
+
+#### Scenario: The words improve shortly after Stop
+- **GIVEN** a take whose transcript was made from stretches at Stop
+- **WHEN** nothing is recorded for the next while
+- **THEN** the take is transcribed as a whole in the background and the shown transcript is replaced
+  by its words
+- **PROOF** test: src-tauri/src/transcribe.rs::tests::stop_s_stretches_are_refined_by_a_whole_take_pass
+- **PROOF** test: src/App.test.tsx::reads the open transcript again once it is refined after Stop
+- **PROOF** desk: open
+
+### Requirement: The words being spoken appear within a few seconds
+The app SHALL guess the words after the last finished stretch about every second and show them,
+greyed in the live box with the caret, below the finished stretches, which show as ordinary rows
+that no longer change while recording, because the person wants to see that they are heard without
+the words they already said shifting around.
 
 #### Scenario: Live words follow the speaker
 - **GIVEN** a recording with a PC microphone
 - **WHEN** the person speaks
-- **THEN** their words appear in the live box about two seconds after they are said, on the
-  reference PC
+- **THEN** their words appear in the live box about three seconds after they are said, or sooner,
+  on the reference PC
 - **PROOF** test: src-tauri/src/stretches.rs::tests::actual_replay_shows_words_within_seconds
 - **PROOF** desk: open
 

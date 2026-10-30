@@ -1,4 +1,4 @@
-# Look: Transcribe a take once, while it is recorded
+# Look: Transcribe a take while it is recorded and refine it after Stop
 
 ## Pick
 

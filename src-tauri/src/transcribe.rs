@@ -748,6 +748,18 @@ pub fn transcribe_media(
     duration_ms: u64,
     has_audio: bool,
 ) -> Result<Transcript, String> {
+    transcribe_media_with(root, folder, duration_ms, has_audio, true, None)
+}
+/// [`transcribe_media`], reusing saved stretches only when `reuse`, and
+/// stopped by `cancel`.
+fn transcribe_media_with(
+    root: &Path,
+    folder: &Path,
+    duration_ms: u64,
+    has_audio: bool,
+    reuse: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<Transcript, String> {
     if !has_audio {
         return Ok(Transcript {
             status: Some("complete".into()),
@@ -766,9 +778,7 @@ pub fn transcribe_media(
     // A take without a microphone was cut into stretches from its system
     // audio, which then replaces the mix it would otherwise read.
     let saved_from = |name: &str| {
-        folder
-            .join(name)
-            .is_file()
+        (reuse && folder.join(name).is_file())
             .then(|| stretches::usable(folder, name, &model_file, language))
             .flatten()
     };
@@ -798,10 +808,11 @@ pub fn transcribe_media(
             &folder.join("transcode.log"),
             None,
         )?;
-        if has_speech(&speech, folder, &AtomicBool::new(false))? {
+        let never = AtomicBool::new(false);
+        if has_speech(&speech, folder, cancel.unwrap_or(&never))? {
             let threads = final_threads(logical_threads());
             let raw = folder.join("whisper.json");
-            run_whisper(root, &speech, folder, &model, threads, None, &raw)?
+            run_whisper(root, &speech, folder, &model, threads, cancel, &raw)?
         } else {
             empty_transcript()
         }
@@ -810,6 +821,45 @@ pub fn transcribe_media(
         Some(saved) => saved.join(rest, rest_ms),
         None => rest,
     })
+}
+/// Replaces the words of every take of session `id` that Stop transcribed
+/// from stretches with a whole-take pass, then forgets the stretches.
+/// Returns whether any take was refined. Stops when `cancel` is set.
+pub fn refine(store: &Store, id: &str, cancel: &AtomicBool) -> Result<bool, String> {
+    let root = store.root.clone();
+    refine_with(store, id, &|folder, duration_ms, has_audio| {
+        transcribe_media_with(&root, folder, duration_ms, has_audio, false, Some(cancel))
+    })
+}
+/// [`refine`] with each folder's whole-take pass done by `media`.
+pub(crate) fn refine_with(store: &Store, id: &str, media: Transcriber<'_>) -> Result<bool, String> {
+    let session = store.session(id)?;
+    let dir = store.session_dir(id)?;
+    let saved = |folder: &Path| stretches::folder(folder).join("stretches.json").is_file();
+    if session.takes.is_empty() {
+        if !saved(&dir) || session.status != "ready" {
+            return Ok(false);
+        }
+        let transcript = media(
+            &dir,
+            session.duration_ms,
+            session.microphone_id.is_some() || session.system_audio,
+        )?;
+        store.save_transcript(id, &transcript)?;
+        stretches::forget(&dir);
+        return Ok(true);
+    }
+    let mut refined = false;
+    for take in takes::list(&session) {
+        let folder = takes::take_dir(&dir, take.index);
+        if take.status != TakeStatus::Ready || !saved(&folder) {
+            continue;
+        }
+        transcribe_take_with(store, id, take.index, media)?;
+        stretches::forget(&folder);
+        refined = true;
+    }
+    Ok(refined)
 }
 #[cfg(test)]
 mod tests {
@@ -1121,6 +1171,47 @@ Speech segment 0: start = 1.0, end = 2.0
         (temp, store, session.id)
     }
     /// What a take's own transcript looks like: one segment 100 ms in.
+    #[test]
+    fn stop_s_stretches_are_refined_by_a_whole_take_pass() {
+        let (_temp, store, id) = take_session(vec![
+            take(1, 0, 60_000, TakeStatus::Ready, true),
+            take(2, 60_000, 30_000, TakeStatus::Ready, true),
+        ]);
+        let dir = store.session_dir(&id).unwrap();
+        // Take 2 stopped with stretches; take 1 was transcribed whole.
+        let take_two = takes::take_dir(&dir, 2);
+        let mut saved = Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        saved.push(spoken("fast"), 20_000);
+        stretches::save(&take_two, &saved).unwrap();
+        let fast = takes::merge_take(
+            &Transcript::default(),
+            spoken("fast"),
+            2,
+            60_000,
+            Vec::new(),
+        );
+        store.save_transcript(&id, &fast).unwrap();
+        let folders = std::cell::RefCell::new(Vec::new());
+        let whole = |folder: &Path, _: u64, _: bool| {
+            folders.borrow_mut().push(folder.to_owned());
+            Ok(spoken("whole"))
+        };
+        assert!(refine_with(&store, &id, &whole).unwrap());
+        assert_eq!(folders.borrow().as_slice(), std::slice::from_ref(&take_two));
+        let words: Vec<_> = store
+            .transcript(&id)
+            .unwrap()
+            .segments
+            .iter()
+            .flat_map(|s| &s.words)
+            .map(|w| w.text.clone())
+            .collect();
+        assert_eq!(words, ["whole"]);
+        // Refined once: the stretches are forgotten, so nothing is left to refine.
+        assert!(stretches::usable(&take_two, "mic.wav", "ggml-small.en.bin", "en").is_none());
+        assert!(!refine_with(&store, &id, &whole).unwrap());
+        assert_eq!(folders.borrow().len(), 1);
+    }
     fn spoken(text: &str) -> Transcript {
         let mut transcript = sample_transcript(&[(text, 100, 900)]);
         transcript.segments[0].id = "segment-0".into();

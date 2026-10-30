@@ -33,7 +33,9 @@ export interface Segment { id?: string; startMs: number; endMs: number; text: st
 export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string; takes?: TakeMark[] }
 export interface CaptureSource { id: string; name: string; kind: 'display' | 'window' | 'android' | 'quest' | 'camera'; available: boolean; detail?: string }
 export interface Microphone { id: string; name: string }
-export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 'error'; sessionId?: string; elapsedMs?: number; audioLevel?: number; liveTranscript?: Transcript; error?: string; takeIndex?: number; takeOffsetMs?: number }
+export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 'error'; sessionId?: string; elapsedMs?: number; audioLevel?: number; liveTranscript?: Transcript; error?: string; takeIndex?: number; takeOffsetMs?: number;
+  /** Counts transcripts refined in the background after Stop; the open recording's transcript is read again when it changes. */
+  transcriptRevision?: number }
 /** A transcription language: English by default, or German. */
 export type Language = 'en' | 'de';
 /** The chosen language's speech model: base transcribes until it is `ready`. A failed or missing one is fetched with `downloadLanguageModel`. */
