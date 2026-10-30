@@ -100,14 +100,17 @@ describe('takes and transcript layout', () => {
   it('keeps the divider of a take without speech at the end', () => {
     expect(transcriptItems(segments.slice(0, 2), [{ index: 2, startMs: 80000 }]).at(-1)).toEqual({ kind: 'divider', take: 2, startMs: 80000, live: false });
   });
-  it('marks the recording take live, its last row as the tail, and shows its divider before it has words', () => {
-    const items = transcriptItems(segments, [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }], { index: 2, startMs: 80000 });
+  it('marks the recording take live, its words still being heard as the tail, and shows its divider before it has words', () => {
+    const heard = [...segments.slice(0, 3), { ...segments[3], id: 'live-90000' }];
+    const items = transcriptItems(heard, [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }], { index: 2, startMs: 80000 });
     expect(items.filter(item => item.kind === 'divider')).toEqual([{ kind: 'divider', take: 2, startMs: 80000, live: true }]);
     expect(items.slice(-2)).toEqual([{ kind: 'segment', index: 2, live: true, tail: false }, { kind: 'segment', index: 3, live: true, tail: true }]);
+    // Only finished stretches: no tail.
+    expect(transcriptItems(segments, [], { index: 2, startMs: 80000 }).slice(-2)).toEqual([{ kind: 'segment', index: 2, live: true, tail: false }, { kind: 'segment', index: 3, live: true, tail: false }]);
     expect(transcriptItems(segments.slice(0, 2), [], { index: 2, startMs: 80000 }).at(-1)).toEqual({ kind: 'divider', take: 2, startMs: 80000, live: true });
   });
   it('treats a first recording as one live take without a divider', () => {
-    const items = transcriptItems(segments.slice(0, 2), undefined, { index: 1, startMs: 0 });
+    const items = transcriptItems([segments[0], { ...segments[1], id: 'live-5000' }], undefined, { index: 1, startMs: 0 });
     expect(items).toEqual([{ kind: 'segment', index: 0, live: true, tail: false }, { kind: 'segment', index: 1, live: true, tail: true }]);
   });
   it('finds segments by their words or text, ignoring case and surrounding space', () => {

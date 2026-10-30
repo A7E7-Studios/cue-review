@@ -3,6 +3,7 @@ use crate::{
     models::{Segment, TakeStatus, Transcript, Word},
     settings,
     store::{atomic_write, Store},
+    stretches::{self, Stretches},
     takes,
 };
 use serde_json::Value;
@@ -198,7 +199,13 @@ fn run_live_output(
         }
     }
 }
+#[cfg(test)]
 fn vad_count(output: &str) -> Result<usize, String> {
+    vad_regions(output).map(|regions| regions.len())
+}
+/// The detector's speech regions, start and end in milliseconds (it prints
+/// centiseconds).
+fn vad_regions(output: &str) -> Result<Vec<(u64, u64)>, String> {
     let mut lines = output
         .lines()
         .map(str::trim)
@@ -210,30 +217,61 @@ fn vad_count(output: &str) -> Result<usize, String> {
         .filter(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|count| count.parse::<usize>().ok())
         .ok_or("Speech detector returned an invalid result; see vad.txt.")?;
-    let regions: Vec<_> = lines.collect();
-    if regions.len() != count
-        || regions
-            .iter()
-            .enumerate()
-            .any(|(i, line)| !line.starts_with(&format!("Speech segment {i}: start = ")))
-    {
+    let regions: Vec<_> = lines
+        .enumerate()
+        .map(|(i, line)| {
+            let (start, end) = line
+                .strip_prefix(&format!("Speech segment {i}: start = "))?
+                .split_once(", end = ")?;
+            let ms = |value: &str| {
+                value
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .map(|v| (v * 10.0).round() as u64)
+            };
+            Some((ms(start)?, ms(end)?))
+        })
+        .collect::<Option<_>>()
+        .ok_or("Speech detector returned inconsistent regions; see vad.txt.")?;
+    if regions.len() != count {
         return Err("Speech detector returned inconsistent regions; see vad.txt.".into());
     }
-    Ok(count)
+    Ok(regions)
 }
-// Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
-// JSON token times are not mapped back to the original recording timeline.
-fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
+fn detect(
+    speech: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+    pad_ms: u32,
+) -> Result<Vec<(u64, u64)>, String> {
     let mut detector = deps::command("whisper-vad-speech-segments")?;
     detector
         .args(["-vm"])
         .arg(deps::vad_model_path())
         .arg("-f")
         .arg(speech)
-        .args(["-vt", "0.35", "-vp", "500", "-vspd", "100", "-np"]);
+        .args(["-vt", "0.35", "-vp"])
+        .arg(pad_ms.to_string())
+        .args(["-vspd", "100", "-np"]);
     let output = folder.join("vad.txt");
     run_live_output(detector, &folder.join("vad.log"), cancel, Some(&output))?;
-    Ok(vad_count(&fs::read_to_string(output).map_err(|e| e.to_string())?)? > 0)
+    vad_regions(&fs::read_to_string(output).map_err(|e| e.to_string())?)
+}
+/// Where `speech` (16 kHz) holds speech, padded by only 100 ms so the pauses
+/// that end a stretch stay visible.
+pub(crate) fn speech_regions(
+    speech: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+) -> Result<Vec<(u64, u64)>, String> {
+    detect(speech, folder, cancel, 100)
+}
+// Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
+// JSON token times are not mapped back to the original recording timeline.
+fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
+    Ok(!detect(speech, folder, cancel, 500)?.is_empty())
 }
 fn empty_transcript() -> Transcript {
     Transcript {
@@ -241,7 +279,7 @@ fn empty_transcript() -> Transcript {
         ..Default::default()
     }
 }
-fn accept_whisper_output(prefix: &Path, folder: &Path) -> Result<Transcript, String> {
+fn accept_whisper_output(prefix: &Path, kept: &Path) -> Result<Transcript, String> {
     let fresh = prefix.with_extension("json");
     let bytes = fs::read(&fresh).map_err(|error| format!(
         "The speech runtime produced no readable fresh transcript ({}: {error}). Reinstall local transcription and retry; see transcription.log. Previous raw output was retained.",
@@ -254,9 +292,243 @@ fn accept_whisper_output(prefix: &Path, folder: &Path) -> Result<Transcript, Str
         )
     })?;
     let transcript = parse_whisper(&raw)?;
-    atomic_write(&folder.join("whisper.json"), &bytes)?;
+    atomic_write(kept, &bytes)?;
     let _ = fs::remove_file(fresh);
     Ok(transcript)
+}
+/// Converts `source` to 16 kHz mono PCM in `target`, optionally from
+/// `from_ms` and for `length_ms`.
+fn to_speech(
+    source: &Path,
+    target: &Path,
+    from_ms: Option<u64>,
+    length_ms: Option<u64>,
+    log: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), String> {
+    let mut ffmpeg = deps::command("ffmpeg")?;
+    ffmpeg.args(["-hide_banner", "-y", "-i"]).arg(source);
+    if let Some(from_ms) = from_ms {
+        ffmpeg.args(["-ss", &format!("{:.3}", from_ms as f64 / 1000.)]);
+    }
+    if let Some(length_ms) = length_ms {
+        ffmpeg.args(["-t", &format!("{:.3}", length_ms as f64 / 1000.)]);
+    }
+    ffmpeg
+        .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+        .arg(target);
+    match cancel {
+        Some(cancel) => run_live(ffmpeg, log, cancel),
+        None => run_logged(ffmpeg, log),
+    }
+}
+/// Copies `from_ms..to_ms` of a 16 kHz PCM file into `target`.
+fn wav_slice(source: &Path, target: &Path, from_ms: u64, to_ms: u64) -> Result<(), String> {
+    let mut reader = hound::WavReader::open(source).map_err(|e| e.to_string())?;
+    let spec = reader.spec();
+    let rate = spec.sample_rate as u64;
+    let total = reader.duration() as u64;
+    let start = (from_ms * rate / 1000).min(total);
+    let end = (to_ms * rate / 1000).clamp(start, total);
+    reader.seek(start as u32).map_err(|e| e.to_string())?;
+    let mut writer = hound::WavWriter::create(target, spec).map_err(|e| e.to_string())?;
+    for sample in reader.samples::<i16>().take((end - start) as usize) {
+        writer
+            .write_sample(sample.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    writer.finalize().map_err(|e| e.to_string())
+}
+/// Runs Whisper on `speech` (16 kHz) with `model`; its raw output is kept as `raw`.
+fn run_whisper(
+    root: &Path,
+    speech: &Path,
+    folder: &Path,
+    model: &deps::ModelChoice,
+    threads: usize,
+    cancel: Option<&AtomicBool>,
+    raw: &Path,
+) -> Result<Transcript, String> {
+    let mut whisper = deps::command("whisper-cli")?;
+    alignment_options(&mut whisper, model)?;
+    run_whisper_with(whisper, root, speech, folder, model, threads, cancel, raw)
+}
+/// A quick guess of the words of `speech` with base: one beam and no
+/// alignment points, which a guess shown while recording never needs.
+fn guess_words(
+    root: &Path,
+    speech: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+) -> Result<Transcript, String> {
+    let mut whisper = deps::command("whisper-cli")?;
+    whisper.args(["-bs", "1", "-bo", "1"]);
+    let model = deps::live_model();
+    let threads = live_threads(logical_threads());
+    let raw = folder.join("whisper.json");
+    run_whisper_with(
+        whisper,
+        root,
+        speech,
+        folder,
+        &model,
+        threads,
+        Some(cancel),
+        &raw,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn run_whisper_with(
+    mut whisper: std::process::Command,
+    root: &Path,
+    speech: &Path,
+    folder: &Path,
+    model: &deps::ModelChoice,
+    threads: usize,
+    cancel: Option<&AtomicBool>,
+    raw: &Path,
+) -> Result<Transcript, String> {
+    let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
+    whisper
+        .arg("-m")
+        .arg(&model.path)
+        .arg("-f")
+        .arg(speech)
+        .args(decoding_options(root, &model.path))
+        .arg("-t")
+        .arg(threads.to_string())
+        .arg("-of")
+        .arg(&prefix);
+    let log = folder.join("transcription.log");
+    match cancel {
+        Some(cancel) => run_live(whisper, &log, cancel)?,
+        None => run_logged(whisper, &log)?,
+    }
+    accept_whisper_output(&prefix, raw)
+}
+/// [`media_source`] for Stop: saved stretches it cannot use are forgotten,
+/// for they are no transcript to refine later.
+fn reused_source(
+    folder: &Path,
+    usable: impl Fn(&str) -> Option<Stretches>,
+) -> (std::path::PathBuf, Option<Stretches>) {
+    let (source, saved) = media_source(folder, usable);
+    if saved.is_none() {
+        stretches::forget(folder);
+    }
+    (source, saved)
+}
+/// The audio a take folder is transcribed from, and the saved stretches to
+/// reuse with it (`usable` gives them for a file name): `mic.wav`; else
+/// `system.wav` when it has usable stretches, for a take without a
+/// microphone was cut into stretches from its system audio; else the mix
+/// `audio.wav`; else `video.mp4`.
+fn media_source(
+    folder: &Path,
+    usable: impl Fn(&str) -> Option<Stretches>,
+) -> (std::path::PathBuf, Option<Stretches>) {
+    if folder.join("mic.wav").exists() {
+        return (folder.join("mic.wav"), usable("mic.wav"));
+    }
+    if folder.join("system.wav").exists() {
+        if let Some(saved) = usable("system.wav") {
+            return (folder.join("system.wav"), Some(saved));
+        }
+    }
+    if folder.join("audio.wav").exists() {
+        return (folder.join("audio.wav"), None);
+    }
+    (folder.join("video.mp4"), None)
+}
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+/// The take's live audio after its finished stretches, as one live update
+/// found it: converted to 16 kHz, with its speech regions.
+pub struct LiveAudio {
+    speech: std::path::PathBuf,
+    regions: Vec<(u64, u64)>,
+    length_ms: u64,
+}
+/// The first half of a live update, which the person sees at once: converts
+/// `snapshot` (the live audio from `stretches.until_ms`, `length_ms` long),
+/// finds its speech and guesses its words with base. Returns the guess,
+/// timed from the snapshot's start, and the audio for [`live_commit`].
+pub fn live_guess(
+    root: &Path,
+    folder: &Path,
+    snapshot: &Path,
+    length_ms: u64,
+    cancel: &AtomicBool,
+) -> Result<(Transcript, Option<LiveAudio>), String> {
+    // Too short to hold a word; the detector refuses an empty file.
+    if length_ms < 300 {
+        return Ok((Transcript::default(), None));
+    }
+    let speech = folder.join("speech.wav");
+    to_speech(
+        snapshot,
+        &speech,
+        None,
+        None,
+        &folder.join("transcode.log"),
+        Some(cancel),
+    )?;
+    let regions = speech_regions(&speech, folder, cancel)?;
+    let guess = if regions.is_empty() {
+        Transcript::default()
+    } else {
+        guess_words(root, &speech, folder, cancel)?
+    };
+    let audio = LiveAudio {
+        speech,
+        regions,
+        length_ms,
+    };
+    Ok((guess, Some(audio)))
+}
+/// The second half of a live update: transcribes every stretch of `audio`
+/// that a pause has finished once with `model` and saves it, then returns the
+/// words of `guess` after them, timed from the new `stretches.until_ms`, and
+/// how long the audio after them is.
+#[allow(clippy::too_many_arguments)]
+pub fn live_commit(
+    root: &Path,
+    take: &Path,
+    folder: &Path,
+    model: &deps::ModelChoice,
+    stretches: &mut Stretches,
+    audio: &LiveAudio,
+    guess: Transcript,
+    cancel: &AtomicBool,
+) -> Result<(Transcript, u64), String> {
+    let after = |done: u64| -> Vec<(u64, u64)> {
+        audio
+            .regions
+            .iter()
+            .filter(|region| region.1 > done)
+            .map(|&(start, end)| (start.saturating_sub(done), end - done))
+            .collect()
+    };
+    let mut done = 0;
+    while let Some(cut) = stretches::cut(&after(done), audio.length_ms.saturating_sub(done)) {
+        let words = if cut.speech {
+            let part = folder.join("stretch.wav");
+            wav_slice(&audio.speech, &part, done, done + cut.at_ms)?;
+            fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
+            let raw = stretches::folder(take).join(format!("{}.json", stretches.until_ms));
+            let threads = live_threads(logical_threads());
+            run_whisper(root, &part, folder, model, threads, Some(cancel), &raw)?
+        } else {
+            Transcript::default()
+        };
+        stretches.push(words, stretches.until_ms + cut.at_ms);
+        stretches::save(take, stretches)?;
+        done += cut.at_ms;
+    }
+    Ok((stretches::after(guess, done), audio.length_ms - done))
 }
 /// Only scratch files are written here; final session transcript files are untouched.
 /// `root` is the data root whose settings choose the decoding options.
@@ -267,32 +539,28 @@ pub fn transcribe_snapshot(
     cancel: &AtomicBool,
 ) -> Result<Transcript, String> {
     let speech = folder.join("speech.wav");
-    let mut ffmpeg = deps::command("ffmpeg")?;
-    ffmpeg
-        .args(["-hide_banner", "-y", "-i"])
-        .arg(source)
-        .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
-        .arg(&speech);
-    run_live(ffmpeg, &folder.join("transcode.log"), cancel)?;
+    to_speech(
+        source,
+        &speech,
+        None,
+        None,
+        &folder.join("transcode.log"),
+        Some(cancel),
+    )?;
     if !has_speech(&speech, folder, cancel)? {
         return Ok(empty_transcript());
     }
-    let model = deps::live_model();
-    let mut whisper = deps::command("whisper-cli")?;
-    alignment_options(&mut whisper, &model)?;
-    let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
-    whisper
-        .arg("-m")
-        .arg(&model.path)
-        .arg("-f")
-        .arg(&speech)
-        .args(decoding_options(root, &model.path))
-        .arg("-t")
-        .arg(live_threads(logical_threads()).to_string())
-        .arg("-of")
-        .arg(&prefix);
-    run_live(whisper, &folder.join("transcription.log"), cancel)?;
-    accept_whisper_output(&prefix, folder)
+    let threads = live_threads(logical_threads());
+    let raw = folder.join("whisper.json");
+    run_whisper(
+        root,
+        &speech,
+        folder,
+        &deps::live_model(),
+        threads,
+        Some(cancel),
+        &raw,
+    )
 }
 /// Replace the overlapping provisional tail, retaining words wholly before the snapshot.
 pub fn merge_live(
@@ -509,21 +777,24 @@ pub fn transcribe_media(
     duration_ms: u64,
     has_audio: bool,
 ) -> Result<Transcript, String> {
+    transcribe_media_with(root, folder, duration_ms, has_audio, true, None)
+}
+/// [`transcribe_media`], reusing saved stretches only when `reuse`, and
+/// stopped by `cancel`.
+fn transcribe_media_with(
+    root: &Path,
+    folder: &Path,
+    duration_ms: u64,
+    has_audio: bool,
+    reuse: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<Transcript, String> {
     if !has_audio {
         return Ok(Transcript {
             status: Some("complete".into()),
             ..Default::default()
         });
     }
-    let mic = folder.join("mic.wav");
-    let mix = folder.join("audio.wav");
-    let source = if mic.exists() {
-        mic
-    } else if mix.exists() {
-        mix
-    } else {
-        folder.join("video.mp4")
-    };
     let model = final_model(root);
     if !model.path.is_file() {
         return Err(
@@ -531,42 +802,83 @@ pub fn transcribe_media(
                 .into(),
         );
     }
-    let speech = folder.join("speech.wav");
-    let mut ffmpeg = deps::command("ffmpeg")?;
-    ffmpeg
-        .args(["-hide_banner", "-y", "-i"])
-        .arg(source)
-        .args([
-            "-t",
-            &format!("{:.3}", duration_ms as f64 / 1000.),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-        ])
-        .arg(&speech);
-    run_logged(ffmpeg, &folder.join("transcode.log"))?;
-    if !has_speech(&speech, folder, &AtomicBool::new(false))? {
-        return Ok(empty_transcript());
+    let language = settings::language(&settings::load(root));
+    let (source, saved) = if reuse {
+        reused_source(folder, |name| {
+            stretches::usable(folder, name, &file_name(&model.path), language)
+        })
+    } else {
+        media_source(folder, |_| None)
+    };
+    let from_ms = saved
+        .as_ref()
+        .map_or(0, |saved| saved.until_ms.min(duration_ms));
+    let rest_ms = duration_ms - from_ms;
+    let rest = if rest_ms == 0 {
+        empty_transcript()
+    } else {
+        let speech = folder.join("speech.wav");
+        let from = (from_ms > 0).then_some(from_ms);
+        to_speech(
+            &source,
+            &speech,
+            from,
+            Some(rest_ms),
+            &folder.join("transcode.log"),
+            None,
+        )?;
+        let never = AtomicBool::new(false);
+        if has_speech(&speech, folder, cancel.unwrap_or(&never))? {
+            let threads = final_threads(logical_threads());
+            let raw = folder.join("whisper.json");
+            run_whisper(root, &speech, folder, &model, threads, cancel, &raw)?
+        } else {
+            empty_transcript()
+        }
+    };
+    Ok(match saved {
+        Some(saved) => saved.join(rest, rest_ms),
+        None => rest,
+    })
+}
+/// Replaces the words of every take of session `id` that Stop transcribed
+/// from stretches with a whole-take pass, then forgets the stretches.
+/// Returns whether any take was refined. Stops when `cancel` is set.
+pub fn refine(store: &Store, id: &str, cancel: &AtomicBool) -> Result<bool, String> {
+    let root = store.root.clone();
+    refine_with(store, id, &|folder, duration_ms, has_audio| {
+        transcribe_media_with(&root, folder, duration_ms, has_audio, false, Some(cancel))
+    })
+}
+/// [`refine`] with each folder's whole-take pass done by `media`.
+pub(crate) fn refine_with(store: &Store, id: &str, media: Transcriber<'_>) -> Result<bool, String> {
+    let session = store.session(id)?;
+    let dir = store.session_dir(id)?;
+    let saved = |folder: &Path| stretches::folder(folder).join("stretches.json").is_file();
+    if session.takes.is_empty() {
+        if !saved(&dir) || session.status != "ready" {
+            return Ok(false);
+        }
+        let transcript = media(
+            &dir,
+            session.duration_ms,
+            session.microphone_id.is_some() || session.system_audio,
+        )?;
+        store.save_transcript(id, &transcript)?;
+        stretches::forget(&dir);
+        return Ok(true);
     }
-    let mut whisper = deps::command("whisper-cli")?;
-    alignment_options(&mut whisper, &model)?;
-    let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
-    whisper
-        .arg("-m")
-        .arg(&model.path)
-        .arg("-f")
-        .arg(speech)
-        .args(decoding_options(root, &model.path))
-        .arg("-t")
-        .arg(final_threads(logical_threads()).to_string())
-        .arg("-of")
-        .arg(&prefix);
-    run_logged(whisper, &folder.join("transcription.log"))?;
-    accept_whisper_output(&prefix, folder)
+    let mut refined = false;
+    for take in takes::list(&session) {
+        let folder = takes::take_dir(&dir, take.index);
+        if take.status != TakeStatus::Ready || !saved(&folder) {
+            continue;
+        }
+        transcribe_take_with(store, id, take.index, media)?;
+        stretches::forget(&folder);
+        refined = true;
+    }
+    Ok(refined)
 }
 #[cfg(test)]
 mod tests {
@@ -584,6 +896,26 @@ mod tests {
         assert_eq!(counts(32), (8, 4));
     }
     #[test]
+    fn detector_regions_are_read_in_milliseconds() {
+        let output = "Detected 2 speech segments:
+Speech segment 0: start = 136.00, end = 962.00
+Speech segment 1: start = 984.00, end = 1131.50
+";
+        assert_eq!(vad_regions(output).unwrap(), [(1360, 9620), (9840, 11315)]);
+        assert!(vad_regions(
+            "Detected 1 speech segments:
+Speech segment 0: start = x, end = 1.0
+"
+        )
+        .is_err());
+        assert!(vad_regions(
+            "Detected 2 speech segments:
+Speech segment 0: start = 1.0, end = 2.0
+"
+        )
+        .is_err());
+    }
+    #[test]
     fn successful_process_cannot_reuse_old_or_malformed_output() {
         let folder = tempfile::tempdir().unwrap();
         let canonical = folder.path().join("whisper.json");
@@ -597,9 +929,11 @@ mod tests {
         let mut no_output = std::process::Command::new(std::env::current_exe().unwrap());
         no_output.arg("--list");
         run_logged(no_output, &folder.path().join("transcription.log")).unwrap();
-        assert!(accept_whisper_output(&prefix, folder.path())
-            .unwrap_err()
-            .contains("fresh transcript"));
+        assert!(
+            accept_whisper_output(&prefix, &folder.path().join("whisper.json"))
+                .unwrap_err()
+                .contains("fresh transcript")
+        );
         assert_eq!(fs::read(&canonical).unwrap(), original);
         let fresh = prefix.with_extension("json");
         for malformed in [
@@ -607,16 +941,18 @@ mod tests {
             br#"{"transcription":[{"text":"untimed","tokens":[]}]}"#,
         ] {
             fs::write(&fresh, malformed).unwrap();
-            assert!(accept_whisper_output(&prefix, folder.path()).is_err());
+            assert!(accept_whisper_output(&prefix, &folder.path().join("whisper.json")).is_err());
             assert_eq!(fs::read(&canonical).unwrap(), original);
             assert_eq!(fs::read(&fresh).unwrap(), malformed);
         }
         let valid = b"{\n  \"transcription\": []\n}\n";
         fs::write(&fresh, valid).unwrap();
-        assert!(accept_whisper_output(&prefix, folder.path())
-            .unwrap()
-            .segments
-            .is_empty());
+        assert!(
+            accept_whisper_output(&prefix, &folder.path().join("whisper.json"))
+                .unwrap()
+                .segments
+                .is_empty()
+        );
         assert_eq!(fs::read(&canonical).unwrap(), valid);
         assert!(!fresh.exists());
     }
@@ -852,6 +1188,80 @@ mod tests {
         session.takes = takes;
         store.save_session(&session).unwrap();
         (temp, store, session.id)
+    }
+    #[test]
+    fn the_audio_a_take_is_transcribed_from() {
+        let folder = tempfile::tempdir().unwrap();
+        let has = |name: &str| fs::write(folder.path().join(name), b"").unwrap();
+        let saved = |name: &str| Some(Stretches::new(name, "ggml-small.en.bin", "en"));
+        let source = |usable: &dyn Fn(&str) -> Option<Stretches>| {
+            let (path, stretches) = media_source(folder.path(), usable);
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                stretches.map(|s| s.source),
+            )
+        };
+        assert_eq!(source(&|_| None), ("video.mp4".into(), None));
+        has("audio.wav");
+        has("system.wav");
+        // System audio replaces the mix only with stretches cut from it.
+        assert_eq!(source(&|_| None), ("audio.wav".into(), None));
+        assert_eq!(
+            source(&saved),
+            ("system.wav".into(), Some("system.wav".into()))
+        );
+        has("mic.wav");
+        assert_eq!(source(&saved), ("mic.wav".into(), Some("mic.wav".into())));
+        assert_eq!(source(&|_| None), ("mic.wav".into(), None));
+        // Stop forgets stretches it cannot use, and keeps those it uses.
+        let kept = Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        stretches::save(folder.path(), &kept).unwrap();
+        let file = stretches::folder(folder.path()).join("stretches.json");
+        reused_source(folder.path(), saved);
+        assert!(file.exists());
+        reused_source(folder.path(), |_| None);
+        assert!(!file.exists());
+    }
+    #[test]
+    fn stop_s_stretches_are_refined_by_a_whole_take_pass() {
+        let (_temp, store, id) = take_session(vec![
+            take(1, 0, 60_000, TakeStatus::Ready, true),
+            take(2, 60_000, 30_000, TakeStatus::Ready, true),
+        ]);
+        let dir = store.session_dir(&id).unwrap();
+        // Take 2 stopped with stretches; take 1 was transcribed whole.
+        let take_two = takes::take_dir(&dir, 2);
+        let mut saved = Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        saved.push(spoken("fast"), 20_000);
+        stretches::save(&take_two, &saved).unwrap();
+        let fast = takes::merge_take(
+            &Transcript::default(),
+            spoken("fast"),
+            2,
+            60_000,
+            Vec::new(),
+        );
+        store.save_transcript(&id, &fast).unwrap();
+        let folders = std::cell::RefCell::new(Vec::new());
+        let whole = |folder: &Path, _: u64, _: bool| {
+            folders.borrow_mut().push(folder.to_owned());
+            Ok(spoken("whole"))
+        };
+        assert!(refine_with(&store, &id, &whole).unwrap());
+        assert_eq!(folders.borrow().as_slice(), std::slice::from_ref(&take_two));
+        let words: Vec<_> = store
+            .transcript(&id)
+            .unwrap()
+            .segments
+            .iter()
+            .flat_map(|s| &s.words)
+            .map(|w| w.text.clone())
+            .collect();
+        assert_eq!(words, ["whole"]);
+        // Refined once: the stretches are forgotten, so nothing is left to refine.
+        assert!(stretches::usable(&take_two, "mic.wav", "ggml-small.en.bin", "en").is_none());
+        assert!(!refine_with(&store, &id, &whole).unwrap());
+        assert_eq!(folders.borrow().len(), 1);
     }
     /// What a take's own transcript looks like: one segment 100 ms in.
     fn spoken(text: &str) -> Transcript {
@@ -1266,12 +1676,15 @@ mod tests {
             let started = std::time::Instant::now();
             run_logged(whisper, &folder.path().join(format!("{label}.log"))).unwrap();
             let elapsed = started.elapsed();
-            let words = accept_whisper_output(&folder.path().join(label), folder.path())
-                .unwrap()
-                .segments
-                .iter()
-                .map(|segment| segment.words.len())
-                .sum::<usize>();
+            let words = accept_whisper_output(
+                &folder.path().join(label),
+                &folder.path().join("whisper.json"),
+            )
+            .unwrap()
+            .segments
+            .iter()
+            .map(|segment| segment.words.len())
+            .sum::<usize>();
             (elapsed, words)
         };
         let (slow, slow_words) = time(&plain, "plain");

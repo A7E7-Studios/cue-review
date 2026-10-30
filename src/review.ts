@@ -72,15 +72,23 @@ export function findMatches(segments: Segment[], query: string): number[] {
   return segments.flatMap((segment, index) => segmentText(segment).toLocaleLowerCase().includes(needle) ? [index] : []);
 }
 
+/** The id prefix of the live transcript's segment of words still being heard (see `Segment`). */
+export const LIVE_SEGMENT_PREFIX = 'live-';
+/** The live transcript's words still being heard, which may change (see `Segment`). */
+export function stillHeard(segment: Segment): boolean {
+  return !!segment.id?.startsWith(LIVE_SEGMENT_PREFIX);
+}
+
 export type TranscriptItem =
   /** "Take N · m:ss", or "Take N · recording" for the take being recorded. */
   | { kind: 'divider'; take: number; startMs: number; live: boolean }
-  /** `live` rows belong to the take being recorded; `tail` is its last row. */
+  /** `live` rows belong to the take being recorded; `tail` is its words still being heard. */
   | { kind: 'segment'; index: number; live: boolean; tail: boolean };
 /**
  * Segments in order with a divider before the first segment of each take after
- * take 1. While a take records, pass it as `liveTake`: its segments are live, the
- * last one is the tail, and its divider is shown even before it has any words.
+ * take 1. While a take records, pass it as `liveTake`: its segments are live, its
+ * segment of words still being heard (a last `live-` one, see `Segment`) is the tail, and
+ * its divider is shown even before it has any words.
  */
 export function transcriptItems(segments: Segment[], takes: TakeMark[] = [], liveTake?: TakeMark): TranscriptItem[] {
   const dividers = takes.filter(take => take.index > 1 && take.index !== liveTake?.index)
@@ -93,7 +101,7 @@ export function transcriptItems(segments: Segment[], takes: TakeMark[] = [], liv
   segments.forEach((segment, index) => {
     while (next < dividers.length && dividers[next].startMs <= segment.startMs) items.push(dividers[next++]);
     const live = !!liveTake && segment.startMs >= liveTake.startMs;
-    items.push({ kind: 'segment', index, live, tail: live && index === lastLive });
+    items.push({ kind: 'segment', index, live, tail: live && index === lastLive && stillHeard(segment) });
   });
   while (next < dividers.length) items.push(dividers[next++]);
   return items;

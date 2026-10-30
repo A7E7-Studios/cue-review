@@ -123,6 +123,8 @@ pub(crate) fn transcribe_existing_with(
         session.error = None;
         Ok(())
     })?;
+    // The whole recording again, never the stretches saved while recording.
+    crate::stretches::forget_session(store, id)?;
     let result = transcribe(store, id);
     store.update_session(id, |session| {
         if let Ok(transcript) = &result {
@@ -1243,6 +1245,9 @@ mod tests {
         let media = |path: &Path, _: u64, _: bool| {
             Ok::<_, String>(words(if path == folder { "First" } else { "Second" }))
         };
+        let take_two = crate::takes::take_dir(&folder, 2);
+        let saved = crate::stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        crate::stretches::save(&take_two, &saved).unwrap();
         let transcript = transcribe_existing_with(
             &store,
             &id,
@@ -1251,6 +1256,10 @@ mod tests {
             |store, id| crate::transcribe::transcribe_with(store, id, &media),
         )
         .unwrap();
+        assert!(
+            !take_two.join("stretches/stretches.json").exists(),
+            "cue transcribe forgets the stretches saved while recording"
+        );
         let placed: Vec<_> = transcript
             .segments
             .iter()

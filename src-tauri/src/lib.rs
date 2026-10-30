@@ -7,6 +7,7 @@ pub mod models;
 pub mod preview;
 pub mod settings;
 pub mod store;
+pub mod stretches;
 pub mod takes;
 pub mod touch;
 pub mod transcribe;
@@ -40,6 +41,11 @@ struct Runtime {
     last_error: Option<String>,
     live_transcript: Option<Transcript>,
     live_cancel: Option<Arc<AtomicBool>>,
+    /// The whole-take passes refining transcripts after Stop, by session id,
+    /// each with its stop flag.
+    refining: Vec<(String, Arc<AtomicBool>)>,
+    /// Counts refined transcripts, reported as `transcriptRevision`.
+    refined: u64,
 }
 struct AppState {
     store: Store,
@@ -135,19 +141,14 @@ fn accepts_live_update(runtime: &Runtime, id: &str, cancel: &AtomicBool) -> bool
             .as_ref()
             .is_some_and(|(session, _)| session.id == id)
 }
-fn publish_live(
-    s: &Shared,
-    id: &str,
-    cancel: &AtomicBool,
-    result: Result<(Transcript, u64, u64), String>,
-) {
+fn publish_live(s: &Shared, id: &str, cancel: &AtomicBool, result: Result<Transcript, String>) {
     if let Ok(mut runtime) = s.runtime.lock() {
         if !accepts_live_update(&runtime, id, cancel) {
             return;
         }
         let previous = runtime.live_transcript.take().unwrap_or_default();
         runtime.live_transcript = Some(match result {
-            Ok((update, start, end)) => transcribe::merge_live(&previous, update, start, end),
+            Ok(live) => live,
             Err(error) => Transcript {
                 status: Some("error".into()),
                 error: Some(error),
@@ -156,37 +157,54 @@ fn publish_live(
         });
     }
 }
-/// Moves a snapshot's take-relative bounds onto the session timeline.
-fn on_session_clock(take: Option<TakeRef>, (start, end): (u64, u64)) -> (u64, u64) {
-    let offset = take.map_or(0, |take| take.offset_ms);
-    (start.saturating_add(offset), end.saturating_add(offset))
-}
 /// The live transcript covers only the capture in progress: a whole first
 /// recording, or just the take being recorded, timed on the session timeline.
+///
+/// About every second it copies the take's live audio from the end of the last
+/// finished stretch, transcribes each stretch that a pause has finished once
+/// with the language's model and saves it for Stop ([`stretches`]), then
+/// guesses the words after them with base. Whisper runs outside the runtime
+/// lock and under the shared inference lock. Stop cancels a stretch in
+/// progress, and Stop's transcription covers its audio instead.
 fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
     if !deps::setup_status().ready {
         publish_live(&s,&id,&cancel,Err("Install local transcription tools to see words while recording. The recording will still be saved.".into()));
         return;
     }
-    let folder = match s.store.session_dir(&id) {
-        Ok(folder) => takes::take_dir(&folder, take.map_or(1, |take| take.index)).join("live"),
+    let take_folder = match s.store.session_dir(&id) {
+        Ok(folder) => takes::take_dir(&folder, take.map_or(1, |take| take.index)),
         Err(_) => return,
     };
+    let folder = take_folder.join("live");
     if let Err(error) = std::fs::create_dir_all(&folder) {
         publish_live(&s, &id, &cancel, Err(error.to_string()));
         return;
     }
+    let root = s.store.root.clone();
+    let language = settings::language(&settings::load(&root));
+    // Chosen once, so every stretch of the take comes from the same model.
+    let model = deps::final_model(language);
+    let model_file = model
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let offset = take.map_or(0, |take| take.offset_ms);
     let snapshot = folder.join("snapshot.wav");
-    let mut next = Instant::now() + Duration::from_secs(8);
+    stretches::forget(&take_folder);
+    let mut saved: Option<stretches::Stretches> = None;
+    let mut next = Instant::now() + stretches::LIVE_CYCLE;
     loop {
         while Instant::now() < next {
             if cancel.load(Ordering::Acquire) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(50));
         }
-        // Snapshot copying is bounded to 30 seconds. Never hold runtime during inference.
-        let bounds = {
+        next = Instant::now() + stretches::LIVE_CYCLE;
+        let from = saved.as_ref().map_or(0, |saved| saved.until_ms);
+        // Copying is bounded to 60 s. Never hold runtime during inference.
+        let copied = {
             let runtime = match s.runtime.lock() {
                 Ok(runtime) => runtime,
                 Err(_) => return,
@@ -194,22 +212,49 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             if !accepts_live_update(&runtime, &id, &cancel) {
                 return;
             }
-            runtime.active.as_ref().unwrap().1.snapshot_audio(&snapshot)
+            runtime
+                .active
+                .as_ref()
+                .unwrap()
+                .1
+                .snapshot_audio_from(from, &snapshot)
         };
-        let result = bounds.and_then(|bounds| {
-            let (start, end) = on_session_clock(take, bounds);
+        let result = copied.and_then(|(start, end, source)| {
+            let stretches = saved
+                .get_or_insert_with(|| stretches::Stretches::new(&source, &model_file, language));
             let _inference = s.inference.lock().map_err(|e| e.to_string())?;
             if cancel.load(Ordering::Acquire) {
                 return Err("Live transcription cancelled.".into());
             }
-            transcribe::transcribe_snapshot(&s.store.root, &snapshot, &folder, &cancel)
-                .map(|update| (update, start, end))
+            // The guess shows at once; finishing stretches takes longer.
+            let length = end - start;
+            let (guess, audio) =
+                transcribe::live_guess(&root, &folder, &snapshot, length, &cancel)?;
+            publish_live(
+                &s,
+                &id,
+                &cancel,
+                Ok(stretches.live(guess.clone(), length, offset)),
+            );
+            let (guess, guess_ms) = match audio {
+                Some(audio) => transcribe::live_commit(
+                    &root,
+                    &take_folder,
+                    &folder,
+                    &model,
+                    stretches,
+                    &audio,
+                    guess,
+                    &cancel,
+                )?,
+                None => (guess, length),
+            };
+            Ok(stretches.live(guess, guess_ms, offset))
         });
         publish_live(&s, &id, &cancel, result);
         if cancel.load(Ordering::Acquire) {
             return;
         }
-        next = Instant::now() + Duration::from_secs(8);
     }
 }
 #[tauri::command]
@@ -252,6 +297,17 @@ fn delete_section_from_store(s: &Shared, id: &str) -> Result<(), String> {
     s.store.delete_project(id)
 }
 fn delete_session_from_store(s: &Shared, id: &str) -> Result<(), String> {
+    let refining = {
+        let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+        ensure_session_not_in_use(&runtime, id)?;
+        stop_refining(&mut runtime, Some(id))
+    };
+    // A refinement of it holds the inference lock until its Whisper is gone.
+    let _inference = if refining {
+        Some(s.inference.lock().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
     ensure_session_not_in_use(&runtime, id)?;
     s.store.delete_session(id)
@@ -446,6 +502,69 @@ fn activate(
     runtime.active_take = take;
     cancel
 }
+/// Stops the refinements of session `only`, or every one with `None` (a
+/// recording starts); the transcript from Stop stays. Returns whether one
+/// was running.
+fn stop_refining(runtime: &mut Runtime, only: Option<&str>) -> bool {
+    let before = runtime.refining.len();
+    runtime.refining.retain(|(id, cancel)| {
+        let stop = only.is_none_or(|only| only == id);
+        if stop {
+            cancel.store(true, Ordering::Release);
+        }
+        !stop
+    });
+    runtime.refining.len() != before
+}
+/// Retry transcribes whole takes: it forgets the stretches saved while
+/// recording and stops a refinement of the recording.
+fn forget_stretches_for_retry(s: &Shared, id: &str) -> Result<(), String> {
+    stretches::forget_session(&s.store, id)?;
+    if let Ok(mut runtime) = s.runtime.lock() {
+        stop_refining(&mut runtime, Some(id));
+    }
+    Ok(())
+}
+/// After Stop has saved a transcript made from stretches, transcribes those
+/// takes whole in the background and replaces their words, because one pass
+/// over stretches makes more word errors. Waits for the inference lock, and
+/// gives up when a recording is running or starts, or Retry or a delete
+/// stops it.
+fn spawn_refine(s: &Shared, id: &str) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    match s.runtime.lock() {
+        Ok(mut runtime) => {
+            stop_refining(&mut runtime, Some(id));
+            runtime.refining.push((id.to_owned(), cancel.clone()));
+        }
+        Err(_) => return,
+    }
+    let state = s.clone();
+    let id = id.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("refine-transcript".into())
+        .spawn(move || {
+            let outcome = state.inference.lock().ok().and_then(|_inference| {
+                let recording = state
+                    .runtime
+                    .lock()
+                    .map_or(true, |runtime| runtime.active.is_some());
+                (!recording && !cancel.load(Ordering::Acquire))
+                    .then(|| transcribe::refine(&state.store, &id, &cancel))
+            });
+            if let Ok(mut runtime) = state.runtime.lock() {
+                runtime
+                    .refining
+                    .retain(|(_, flag)| !Arc::ptr_eq(flag, &cancel));
+                if matches!(outcome, Some(Ok(true))) {
+                    runtime.refined += 1;
+                }
+            }
+            if let Some(Err(error)) = outcome {
+                eprintln!("The transcript of {id} was not refined: {error}");
+            }
+        });
+}
 fn spawn_live(s: &Shared, id: &str, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
     let state = s.clone();
     let id = id.to_owned();
@@ -474,6 +593,33 @@ async fn start_recording(
 ) -> Result<Session, String> {
     let s = s.inner().clone();
     blocking(move || {
+        start_recording_with(
+            &s,
+            project_id,
+            name,
+            source_id,
+            microphone_id,
+            system_audio,
+            muted,
+            capture::start_muted,
+        )
+    })
+    .await
+}
+/// [`start_recording`] with the capture started by `start`, so tests can
+/// fake it.
+#[allow(clippy::too_many_arguments)]
+fn start_recording_with(
+    s: &Shared,
+    project_id: Option<String>,
+    name: Option<String>,
+    source_id: String,
+    microphone_id: Option<String>,
+    system_audio: bool,
+    muted: Option<bool>,
+    start: impl FnOnce(CaptureConfig, &std::path::Path, bool) -> Result<capture::ActiveCapture, String>,
+) -> Result<Session, String> {
+    {
         let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
         if runtime.active.is_some() || runtime.processing.is_some() {
             return Err("Finish the current recording or processing job first.".into());
@@ -498,7 +644,9 @@ async fn start_recording(
             session.source_identity = identity;
             s.store.save_session(&session)?;
         }
-        match capture::start_muted(
+        // Whisper beside a capture runs only with the live threads.
+        stop_refining(&mut runtime, None);
+        match start(
             config,
             &s.store.session_dir(&session.id)?,
             muted.unwrap_or(false),
@@ -509,7 +657,7 @@ async fn start_recording(
                 if session.microphone_id.is_some()
                     || (session.system_audio && !session.source_id.starts_with("android:"))
                 {
-                    spawn_live(&s, &session.id, cancel, None);
+                    spawn_live(s, &session.id, cancel, None);
                 }
                 Ok(session)
             }
@@ -520,8 +668,7 @@ async fn start_recording(
                 Err(e)
             }
         }
-    })
-    .await
+    }
 }
 fn finish_transcription(job: ProcessingJob) {
     let s = &job.state;
@@ -558,6 +705,7 @@ fn finish_transcription(job: ProcessingJob) {
             result.err().unwrap_or(update)
         }),
     }
+    spawn_refine(&job.state, &job.id);
 }
 /// Transcribes only one finished take, which ends ready or error. A take of
 /// a session saved before takes kept their own videos, still waiting to be
@@ -628,6 +776,7 @@ fn finish_takes(job: ProcessingJob, indices: Vec<u32>) {
     if let Some(error) = failure.or(settled.err()) {
         job.fail(error);
     }
+    spawn_refine(&job.state, &job.id);
 }
 #[tauri::command]
 async fn stop_recording(s: CmdState<'_>) -> Result<Session, String> {
@@ -752,6 +901,7 @@ async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> 
         };
         // Sessions with takes retry only their unfinished takes.
         let plan = (!session.takes.is_empty()).then(|| takes::retry_plan(&session));
+        forget_stretches_for_retry(&s, &id)?;
         let prepared = s.store.update_session(&id, |session| {
             attach_finished_video(&s.store, session)?;
             session.status = "processing".into();
@@ -839,6 +989,8 @@ fn start_take_with(
     };
     let device = config.source_id.starts_with("android:");
     let folder = takes::take_dir(&s.store.session_dir(id)?, take.index);
+    // Whisper beside a capture runs only with the live threads.
+    stop_refining(&mut runtime, None);
     match start(config, &folder, muted) {
         Ok(active) => {
             let session = started.session.clone();
@@ -936,6 +1088,7 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
                 live_transcript: runtime.live_transcript.clone(),
                 take_index: runtime.active_take.map(|take| take.index),
                 take_offset_ms: runtime.active_take.map(|take| take.offset_ms),
+                transcript_revision: runtime.refined,
             });
         }
         Ok(idle_status(&runtime))
@@ -957,6 +1110,7 @@ fn idle_status(runtime: &Runtime) -> RecordingStatus {
         live_transcript: None,
         take_index: runtime.processing_take.map(|take| take.index),
         take_offset_ms: runtime.processing_take.map(|take| take.offset_ms),
+        transcript_revision: runtime.refined,
     }
 }
 pub fn run() {
@@ -1043,6 +1197,74 @@ pub fn run() {
 #[cfg(test)]
 mod orchestration_tests {
     use super::*;
+    #[test]
+    fn a_new_recording_stops_refining_even_when_its_capture_fails() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let refining = Arc::new(AtomicBool::new(false));
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .refining
+            .push(("earlier".into(), refining.clone()));
+        let error = start_recording_with(
+            &state,
+            None,
+            None,
+            "fixture:1".into(),
+            None,
+            false,
+            None,
+            |_, _, _| Err("No display.".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "No display.");
+        assert!(refining.load(Ordering::Acquire));
+        assert!(state.runtime.lock().unwrap().refining.is_empty());
+    }
+    #[test]
+    fn retry_forgets_stretches_and_refinements_stop_only_for_their_recording() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let session = ready_with_takes(&state);
+        let take = takes::take_dir(&state.store.session_dir(&session.id).unwrap(), 1);
+        stretches::save(
+            &take,
+            &stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en"),
+        )
+        .unwrap();
+        let ours = Arc::new(AtomicBool::new(false));
+        let other = Arc::new(AtomicBool::new(false));
+        {
+            let mut runtime = state.runtime.lock().unwrap();
+            runtime.refining.push((session.id.clone(), ours.clone()));
+            runtime.refining.push(("another".into(), other.clone()));
+        }
+        forget_stretches_for_retry(&state, &session.id).unwrap();
+        assert!(!take.join("stretches/stretches.json").exists());
+        assert!(
+            ours.load(Ordering::Acquire),
+            "Retry stops its own refinement"
+        );
+        assert!(
+            !other.load(Ordering::Acquire),
+            "and leaves another recording's"
+        );
+        // Deleting a recording stops its own refinement only.
+        let deleted = ready_with_takes(&state);
+        let theirs = Arc::new(AtomicBool::new(false));
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .refining
+            .push((deleted.id.clone(), theirs.clone()));
+        delete_session_from_store(&state, &deleted.id).unwrap();
+        assert!(theirs.load(Ordering::Acquire));
+        assert!(!other.load(Ordering::Acquire));
+        assert_eq!(state.runtime.lock().unwrap().refining.len(), 1);
+    }
     #[test]
     fn changing_the_language_starts_its_model_download() {
         let root = tempfile::tempdir().unwrap();
@@ -1181,7 +1403,7 @@ mod orchestration_tests {
             &state,
             "stopped-session",
             &cancel,
-            Ok((Transcript::default(), 0, 1000)),
+            Ok(Transcript::default()),
         );
         publish_live(
             &state,
@@ -1205,13 +1427,6 @@ mod orchestration_tests {
     }
     #[test]
     fn take_snapshots_are_placed_on_the_session_timeline() {
-        assert_eq!(on_session_clock(None, (5000, 8000)), (5000, 8000));
-        let take = Some(TakeRef {
-            index: 2,
-            offset_ms: 80000,
-        });
-        let (start, end) = on_session_clock(take, (5000, 8000));
-        assert_eq!((start, end), (85000, 88000));
         let update = Transcript {
             segments: vec![Segment {
                 id: "segment-0".into(),
@@ -1222,14 +1437,19 @@ mod orchestration_tests {
             }],
             ..Default::default()
         };
-        let live = transcribe::merge_live(&Transcript::default(), update, start, end);
-        assert_eq!(live.segments[0].id, "live-85000-0");
+        let mut stretches = stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        stretches.push(update.clone(), 5000);
+        // Take 2 starts at 80 s on the session timeline.
+        let live = stretches.live(update, 3000, 80_000);
+        assert_eq!(live.segments.len(), 2);
+        assert_eq!(live.segments[0].words[0].start_ms, 80_100);
+        assert_eq!(live.segments[1].id, "live-5000");
         assert_eq!(
             (
-                live.segments[0].words[0].start_ms,
-                live.segments[0].words[0].end_ms
+                live.segments[1].words[0].start_ms,
+                live.segments[1].words[0].end_ms
             ),
-            (85100, 85500)
+            (85_100, 85_500)
         );
     }
     #[test]
@@ -1365,6 +1585,14 @@ mod orchestration_tests {
             })
             .unwrap();
         let mut asked = None;
+        // A refinement running in the background stops when a take starts.
+        let refining = Arc::new(AtomicBool::new(false));
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .refining
+            .push(("another".into(), refining.clone()));
         let error = start_take_with(
             &state,
             &session.id,
@@ -1379,6 +1607,7 @@ mod orchestration_tests {
         )
         .unwrap_err();
         assert_eq!(error, "The window closed.");
+        assert!(refining.load(Ordering::Acquire));
         let (config, take_folder, muted) = asked.unwrap();
         assert_eq!(config.source_id, "window:4242");
         assert_eq!(config.microphone_id.as_deref(), Some("mic:Headset"));

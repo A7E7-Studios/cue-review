@@ -135,6 +135,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const runtimeState = useRef<RecordingStatus['state']>('idle');
   /** The last runtime error shown, so the poll does not bring back a dismissed one. */
   const runtimeError = useRef('');
+  /** The last `transcriptRevision` seen, so a refined transcript is read again once. */
+  const transcriptRevision = useRef<number | undefined>(undefined);
   /** The last poll failure shown, so a backend that keeps failing reports it once. */
   const pollError = useRef('');
   /** Whether a dialog is open, for errors that arrive from outside it. */
@@ -261,6 +263,14 @@ export default function App({ platform: requested }: AppProps = {}) {
         if (!current()) return;
         if (next.error && next.error !== runtimeError.current) setError(next.error);
         runtimeError.current = next.error || '';
+        // A transcript refined after Stop replaces the shown one.
+        const revision = next.transcriptRevision ?? 0;
+        const refined = transcriptRevision.current !== undefined && revision !== transcriptRevision.current;
+        transcriptRevision.current = revision;
+        if (refined && session && settled(session) && stillOpen()) {
+          const text = await backend.transcript(session.id);
+          if (stillOpen()) setTranscript(text);
+        }
         if (session && inProgress(session) && next.state !== 'recording' && stillOpen()) {
           const fresh = await backend.session(session.id);
           if (!stillOpen()) return;

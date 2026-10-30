@@ -65,7 +65,7 @@ Shortcut hints appear when you hover over or focus a control. Settings lists the
 
 Before transcription, a local detector checks for speech. An explicit successful no-speech result produces an empty transcript; detector failures remain actionable errors. When speech is present, the original audio goes through Whisper without cutting silence or changing its word-to-time mapping. Speech detection and recognition are imperfect, particularly with mixed speech/noise; review the transcript alongside the recording. Raw model output and detector diagnostics are retained when produced.
 
-During recording, local transcription updates in short batches from the latest 30 seconds of microphone audio, or Windows system audio when no microphone is selected (roughly every eight seconds plus inference time). These provisional words may change; stopping recomputes the take's authoritative transcript. If local speech setup is missing, the recording remains usable and can be transcribed later. Device audio without a PC microphone is transcribed after stopping. System audio uses WASAPI loopback for Windows sources; supported Android devices use scrcpy's device audio.
+During recording, the microphone audio, or Windows system audio when no microphone is selected, is transcribed as you speak: finished stretches of speech show as ordinary rows, and the words still being heard show greyed in the live box, about three seconds after you say them. When you stop, the take's transcript is there within a few seconds; it is then transcribed once more as a whole in the background, and the transcript updates with those words, typically half a minute later for five minutes of speech. Starting another recording before then stops that pass and keeps the first transcript; Retry transcribes the recording whole. If local speech setup is missing, the recording remains usable and can be transcribed later. Device audio without a PC microphone is transcribed after stopping. System audio uses WASAPI loopback for Windows sources; supported Android devices use scrcpy's device audio.
 
 On Windows, display and window recordings also record where the pointer was and when buttons were pressed (`cursor.jsonl`). Android device recordings record where the screen was touched, on every platform: the first finger of each touch, as a left-button press. The agent CLI reports it with frames and moments, and can draw a ring at the pointer on exported frames. Nothing is recorded for Quest, cameras, or macOS and Linux desktops.
 
@@ -87,11 +87,12 @@ CueReview\
     mic.wav  system.wav    take 1's lossless audio tracks, as recorded
     transcript.json  transcript.txt
     whisper.json  vad.txt  vad.log
+    stretches\             take 1's speech transcribed while recording: stretches.json and each stretch's Whisper output
     cursor.jsonl           take 1's pointer track (Windows display and window sources, Android touches)
     capture-timing.json    take 1's capture clock and canvas
     markers.json           v0.1 markers, kept readable for one release
     exports\               frames and clips written by cue
-    takes\2\               take 2: its video.mp4, audio tracks, cursor.jsonl, capture-timing.json and Whisper output
+    takes\2\               take 2: its video.mp4, audio tracks, cursor.jsonl, capture-timing.json, stretches\ and Whisper output
 ```
 
 Take 1 uses the session folder itself, so sessions recorded before v0.2.0 are single-take sessions with no migration. A later take records into `takes\<N>\` and keeps its own `video.mp4` there; `videos` in `session.json` lists where each take video starts on the session timeline. Sessions saved by earlier versions joined their takes into one `video.mp4`, which still plays them all.

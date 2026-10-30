@@ -2144,6 +2144,17 @@ describe('reload keys, device readiness and request races', () => {
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
   });
 
+  it('reads the open transcript again once it is refined after Stop', async () => {
+    const user = await ready();
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    expect(await transcriptPane().findByText('Look')).toBeVisible();
+    transcript = { segments: [{ id: 'segment-0', text: 'Look there', startMs: 1000, endMs: 4000, words: [{ text: 'Look', startMs: 1000, endMs: 1800 }, { text: 'there', startMs: 2500, endMs: 3500 }] }] };
+    await poll();
+    expect(transcriptPane().queryByText('there')).not.toBeInTheDocument();
+    status = { ...status, transcriptRevision: 1 };
+    await poll();
+    expect(await transcriptPane().findByText('there')).toBeVisible();
+  });
   it('reports a failing poll once and polls less often until the backend answers', async () => {
     await ready();
     backend.status.mockRejectedValue('The recorder stopped answering.');
