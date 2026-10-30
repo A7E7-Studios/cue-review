@@ -63,7 +63,7 @@
 /* The hint sits over the button's right padding, so showing it never takes width from the label. */
 .sidebar .new-session .kbd-hint { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none; }
 
-.recording-list { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; margin: 0 -5px; padding: 0 5px; }
+.recording-list { flex: 1; min-height: 0; overflow: auto; margin: 0 -5px; padding: 0 5px; }
 .recording-section { position: relative; margin-bottom: 14px; border-radius: var(--radius-row); outline: 1px solid transparent; outline-offset: 2px; }
 .recording-section:last-of-type { margin-bottom: 4px; }
 
@@ -146,7 +146,7 @@
 .sidebar-submenu { z-index: 26; animation: sidebar-submenu-in var(--motion-fast) var(--ease-out); }
 @keyframes sidebar-submenu-in { from { opacity: 0; } }
 .sidebar-menu button[aria-expanded='true'] { background: var(--color-row-hover); }
-.section-destinations { max-height: 192px; overflow: auto; scrollbar-width: thin; }
+.section-destinations { max-height: 192px; overflow: auto; }
 
 .dragging-section { opacity: .45; }
 .insert-before::before, .insert-after::after { content: ''; position: absolute; left: 1px; right: 1px; height: 2px; background: var(--color-accent); border-radius: 2px; pointer-events: none; }

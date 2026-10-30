@@ -106,3 +106,11 @@ describe('Dialog', () => {
     expect(existing).toHaveAttribute('inert'); existing.remove();
   });
 });
+
+it('draws the close icon at 16 px with 1.5 px strokes', () => {
+  render(<Dialog open onClose={() => {}} title="Settings" closeLabel="Close settings"><p>Body</p></Dialog>);
+  const icon = screen.getByRole('button', { name: 'Close settings' }).querySelector('svg')!;
+  expect(icon).toHaveAttribute('width', '16');
+  // 2.25 user units in the 24-unit viewBox, drawn at 16 px: 1.5 px.
+  expect(Number(icon.getAttribute('stroke-width')) * 16 / 24).toBe(1.5);
+});
