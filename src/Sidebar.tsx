@@ -146,12 +146,13 @@ export function Sidebar(props: SidebarProps) {
   const openMenu = (item: Session, anchor: HTMLElement, x?: number, y?: number) => {
     if (!movable(item)) return;
     const rect = anchor.getBoundingClientRect();
-    returnFocus.current = anchor; menuAnchor.current = anchor;
+    // Only a … toggle is an anchor; a menu opened by right-click closes on any press outside it.
+    returnFocus.current = anchor; menuAnchor.current = x === undefined ? anchor : null;
     setMenu({ kind: 'session', id: item.id, x: x ?? rect.right, y: y ?? rect.top });
   };
   const openSectionMenu = (section: Project, anchor: HTMLElement, x?: number, y?: number) => {
     if (locked) return;
-    const rect = anchor.getBoundingClientRect(); returnFocus.current = anchor; menuAnchor.current = anchor;
+    const rect = anchor.getBoundingClientRect(); returnFocus.current = anchor; menuAnchor.current = x === undefined ? anchor : null;
     setMenu({ kind: 'section', id: section.id, x: x ?? rect.right, y: y ?? rect.top });
   };
   // No anchor: a press anywhere outside the menu closes it, the New session row included.

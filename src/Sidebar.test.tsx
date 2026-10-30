@@ -246,6 +246,18 @@ describe('the sidebar menu', () => {
     expect(screen.getByRole('menu', {name:'Sidebar actions'})).toBeVisible();
   });
 
+  test('closes a section menu opened by right-click when its + is clicked', async () => {
+    const user = userEvent.setup();
+    const onNewInSection = vi.fn();
+    renderSidebar({onNewInSection});
+    const plus = screen.getByRole('button', {name:'New session in Workspace'});
+    fireEvent.contextMenu(plus);
+    expect(screen.getByRole('menu', {name:'Section actions'})).toBeVisible();
+    await user.click(plus);
+    expect(screen.queryByRole('menu', {name:'Section actions'})).not.toBeInTheDocument();
+    expect(onNewInSection).toHaveBeenCalledWith('work');
+  });
+
   test('closes when the New session row it was opened from is clicked', async () => {
     const user = userEvent.setup();
     const {onNew} = renderSidebar();

@@ -54,7 +54,7 @@ actions in a right-click menu.
   only the sidebar's command is renamed. The always-shown recording bar removes that refusal.
 - The accessible name changes from "New recording" to "New session", a breaking change for
   scripts: `verify-desktop`, `verify-installed`, `verify-native-ux` and `verify-recovery` now find
-  the new name. `--size-new-recording` keeps its name; the unused `--shadow-new-recording` goes.
+  the new name, and `verify-device-ui` makes its section from the sidebar's menu. `--size-new-recording` keeps its name; the unused `--shadow-new-recording` goes.
 
 ## Out of scope
 

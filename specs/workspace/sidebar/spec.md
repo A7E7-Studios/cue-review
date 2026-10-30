@@ -34,7 +34,7 @@ beside it reads as a folder on disk.
 
 ### Requirement: The sidebar has its own menu
 The app SHALL offer New session and New section in a menu that right-clicking anywhere in the
-sidebar outside its rows, section headings and their options buttons opens, the New session row
+sidebar outside its rows, section headings and their buttons opens, the New session row
 included, because that is where a desktop app's list keeps its create actions, and the context
 menu key reaches it from the keyboard.
 
@@ -44,13 +44,14 @@ menu key reaches it from the keyboard.
   the bottom area
 - **THEN** a menu offers "New session" and "New section", and a click anywhere outside it, the New
   session row included, closes it
-- **AND** a right-click on a session row or a section heading, or on its options button, still opens
-  that row's own menu
+- **AND** a right-click on a session row or a section heading, or on one of their buttons, still
+  opens that row's own menu
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu right-clicking empty space in the list offers New session and New section
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu closes the sidebar menu on a click outside it
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu opens from anywhere in the sidebar outside rows and headings
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu closes when the New session row it was opened from is clicked
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu a right-click on a row or section options button opens its own menu
+- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu closes a section menu opened by right-click when its + is clicked
 - **PROOF** desk: open
 
 #### Scenario: Reaching the sidebar menu from the keyboard
