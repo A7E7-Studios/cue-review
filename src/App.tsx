@@ -14,7 +14,7 @@ import { Sidebar } from './Sidebar';
 import { CaptureControls } from './workspace/CaptureControls';
 import { captureEmptyState, MediaStage, reviewEmptyState } from './workspace/MediaStage';
 import type { MediaStageViewProps } from './workspace/MediaStage';
-import { PlaybackBar } from './workspace/PlaybackBar';
+import { PLAYBACK_SPEEDS, PlaybackBar } from './workspace/PlaybackBar';
 import { RecordingDock } from './workspace/RecordingDock';
 import { SessionHeader } from './workspace/SessionHeader';
 import { TranscriptPane } from './workspace/TranscriptPane';
@@ -33,7 +33,14 @@ import { useSidebarLayout, useSidebarSlide } from './app/useSidebarLayout';
 import { useTheme } from './app/useTheme';
 
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
-const SPEEDS = [1, 1.5, 2, 0.75];
+/** The chosen playback speed stays for every recording and the next start (playback-controls spec). */
+const SPEED_KEY = 'cuereview.playbackSpeed';
+function storedSpeed() {
+  try {
+    const value = Number(localStorage.getItem(SPEED_KEY));
+    return (PLAYBACK_SPEEDS as readonly number[]).includes(value) ? value : 1;
+  } catch { return 1; }
+}
 /** Runtime status polling: every 700 ms, backing off up to 10 s while the backend keeps failing. */
 const POLL_MS = 700;
 const POLL_MAX_MS = 10000;
@@ -95,8 +102,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const [speed, setSpeed] = useState(storedSpeed);
   const [focusVideo, setFocusVideo] = useState(false);
+  /** Whether leaving focus docks the sidebar again: only when it was docked before focus. */
+  const focusRestoresSidebar = useRef(false);
   const [draftSection, setDraftSection] = useState<string | null>(null);
 
   const video = useRef<HTMLVideoElement>(null);
@@ -301,9 +310,31 @@ export default function App({ platform: requested }: AppProps = {}) {
     if (media.paused && media.ended && shownVideo > 0) { setTime(0); loadVideo(0, 0, true); return; }
     try { if (media.paused) await media.play(); else media.pause(); } catch (problem) { report(problem); }
   }, [mode, report, shownVideo, loadVideo]);
-  const cycleSpeed = () => {
-    const next = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+  // Focus video hides the sidebar and the transcript; leaving it docks the sidebar again if it was docked before.
+  const toggleFocus = () => {
+    if (focusVideo) { setFocusVideo(false); return; }
+    // Focus clears the docked preference at any width, so a window that widens meanwhile shows no
+    // sidebar; an overlay (a narrow window) simply closes. Leaving focus docks it again if it was.
+    focusRestoresSidebar.current = sidebar.docked;
+    sidebar.undock(); dismissOverlay();
+    setFocusVideo(true);
+  };
+  /** Showing the sidebar while focused ends focus, so the transcript returns with it. */
+  const toggleSidebar = () => {
+    // It shows the sidebar now; leaving focus still docks it again if it was docked before focus.
+    if (focusVideo && !sidebarVisible) { setFocusVideo(false); sidebar.show(); } else sidebar.toggle();
+  };
+  const wasFocused = useRef(false);
+  useEffect(() => {
+    if (wasFocused.current && !focusVideo && focusRestoresSidebar.current) sidebar.dock();
+    if (!focusVideo) focusRestoresSidebar.current = false;
+    wasFocused.current = focusVideo;
+  }, [focusVideo, sidebar.dock]);
+  // Focus belongs to review: a new recording or a recording in progress ends it.
+  useEffect(() => { if (focusVideo && mode !== 'review') setFocusVideo(false); }, [focusVideo, mode]);
+  const chooseSpeed = (next: number) => {
     setSpeed(next);
+    try { localStorage.setItem(SPEED_KEY, String(next)); } catch { /* the speed still applies now */ }
     if (video.current) video.current.playbackRate = next;
   };
 
@@ -391,7 +422,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     onSeekBy: mode === 'review' ? delta => seek(time + delta) : undefined,
     search: searchRef,
     onClearSearch: () => setSearch(''),
-    onEscape: sidebarOverlay ? dismissOverlay : undefined,
+    onEscape: sidebarOverlay ? dismissOverlay : focusVideo ? () => setFocusVideo(false) : undefined,
   });
 
   const changeMuted = async (next: boolean) => {
@@ -593,8 +624,8 @@ export default function App({ platform: requested }: AppProps = {}) {
         recordDisabled={captureBlocked || loading || !devicesReady || !source?.available || microphoneUnavailable} recordBusy={busy} onRecord={() => void start()}/>
       : <>
         <PlaybackBar platform={os} timeMs={time} durationMs={timeline} segments={shownTranscript.segments} takes={marks} onSeek={seek}
-          playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onCycleSpeed={cycleSpeed}
-          focused={focusVideo} onToggleFocus={() => setFocusVideo(value => !value)}/>
+          playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onSpeed={chooseSpeed}
+          focused={focusVideo} onToggleFocus={toggleFocus}/>
         <CaptureControls {...bar} review
           recordLabel={NAMES.recordMore} recordDisabled={!canRecordMore || loading || processing || captureBlocked || !source?.available} recordBusy={busy} onRecord={() => void recordMore()}
           recordMoreError={recordMoreError || undefined} onNewRecording={prepare} onDismissRecordMoreError={() => setRecordMoreError('')}/>
@@ -661,7 +692,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })} onNewInSection={prepare}
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
     onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
-  const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
+  const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={toggleSidebar}
     search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
 
   return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}

@@ -14,7 +14,6 @@ import { takeTwoLiveTranscript, takeTwoStartMs, transcript as firstTakeTranscrip
 // The recorded screen from the Float v2 mocks. The review video is a still: the
 // <video> shows it as its poster and never loads media.
 const sample = new URL('../../docs/design/float-v2/sample-capture.svg', import.meta.url).href;
-const SPEEDS = [1, 1.5, 2, 0.75];
 const sources: CaptureSource[] = [
   { id: 'monitor:1', name: 'Display 1', kind: 'display', available: true },
   { id: 'window', name: 'Library — Component browser', kind: 'window', available: true },
@@ -86,7 +85,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
       : <>
         <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
-          onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
+          onSpeed={setSpeed} focused={focused}
           onToggleFocus={() => setFocused(value => !value)}/>
         <CaptureControls {...bar} review recordLabel="Record more" recordDisabled={scenario === 'processing' || !source?.available}
           onRecord={() => scenario === 'window-closed' && sourceId === 'window' ? setRecordMoreError(WINDOW_CLOSED) : setNotice('Record more selected.')}
