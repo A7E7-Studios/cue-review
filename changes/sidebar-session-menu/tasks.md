@@ -11,8 +11,9 @@ nearest the code it changes.
 - [x] 1.2 Move to section opens the submenu on pointer rest, click, → and Enter; ← and Escape close it; test: src/Sidebar.test.tsx::opens Move to section as a submenu on hover
 - [x] 1.3 Moving with the keyboard, focus back on the moved row; test: src/Sidebar.test.tsx::moves a recording through the submenu with the keyboard
 - [x] 1.4 → into a submenu the pointer opened, and a timed close returns focus; test: src/Sidebar.test.tsx::moves focus into a submenu the pointer already opened
-- [x] 1.5 New section… ends the submenu; test: src/Sidebar.test.tsx::offers New section at the end of the submenu
-- [x] 1.6 `scripts/verify-sidebar.cjs` opens the submenu by hovering and checks it sits beside the menu; test: node scripts/verify-sidebar.cjs
+- [x] 1.5 Leaving the menu cancels a pending open; test: src/Sidebar.test.tsx::does not open the submenu when the pointer only crosses Move to section
+- [x] 1.6 New section… ends the submenu; test: src/Sidebar.test.tsx::offers New section at the end of the submenu
+- [x] 1.7 `scripts/verify-sidebar.cjs` opens the submenu by hovering and checks it sits beside the menu; test: node scripts/verify-sidebar.cjs
 
 ## 2. Making sections and sessions (independent of 1)
 

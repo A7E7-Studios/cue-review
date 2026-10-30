@@ -137,14 +137,15 @@ export const MoveToSectionSubmenu: Story = {
     await userEvent.click(canvas.getAllByRole('button', { name: 'Recording options' })[0]);
     await userEvent.hover(canvas.getByRole('menuitem', { name: 'Move to section' }));
     const submenu = await canvas.findByRole('menu', { name: 'Move to section' });
-    await expect(within(submenu).getByRole('menuitem', { name: 'New section…' })).toBeVisible();
+    await waitFor(() => expect(within(submenu).getByRole('menuitem', { name: 'New section…' })).toBeVisible());
   },
 };
 export const SectionNewSession: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.hover(canvas.getByRole('button', { name: 'Interface' }));
-    await expect(canvas.getByRole('button', { name: 'New session in Interface' })).toBeVisible();
+    // Keyboard focus in the heading shows its + as hovering does (synthetic hover applies no :hover).
+    canvas.getByRole('button', { name: 'Interface' }).focus();
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'New session in Interface' })).toBeVisible());
   },
 };
 export const ContextMenu: Story = {

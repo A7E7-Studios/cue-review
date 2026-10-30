@@ -216,6 +216,16 @@ describe('Move to section submenu', () => {
     await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole('button', { name: 'Library review' })).toHaveFocus());
   });
+  test('does not open the submenu when the pointer only crosses Move to section', async () => {
+    const user = userEvent.setup();
+    renderSidebar({ sections: twoSections });
+    await user.click(screen.getByRole('button', { name: 'Recording options' }));
+    await user.hover(screen.getByRole('menuitem', { name: 'Move to section' }));
+    // Out of the menu within the 100ms pause.
+    await user.unhover(screen.getByRole('menu', { name: 'Recording actions' }));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(screen.queryByRole('menu', { name: 'Move to section' })).not.toBeInTheDocument();
+  });
   test('moves focus into a submenu the pointer already opened', async () => {
     const user = userEvent.setup();
     renderSidebar({ sections: twoSections });
