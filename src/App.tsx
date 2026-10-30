@@ -298,9 +298,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   // Focus video hides the sidebar and the transcript; leaving it shows the sidebar again if it showed before.
   const toggleFocus = () => {
     if (focusVideo) { setFocusVideo(false); return; }
-    // Focus changes only the docked sidebar; an overlay (a narrow window) simply closes.
-    focusRestoresSidebar.current = sidebarVisible && !sidebarOverlay;
-    if (sidebarVisible) sidebar.hide();
+    // Focus clears the docked preference at any width, so a window that widens meanwhile shows no
+    // sidebar; an overlay (a narrow window) simply closes. Leaving focus docks it again if it was.
+    focusRestoresSidebar.current = sidebar.docked;
+    sidebar.undock(); dismissOverlay();
     setFocusVideo(true);
   };
   /** Showing the sidebar while focused ends focus, so the transcript returns with it. */

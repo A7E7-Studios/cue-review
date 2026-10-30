@@ -544,6 +544,21 @@ describe('playback controls', () => {
     expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'true');
   });
+  it('keeps both sidebars hidden in focus when a narrow window widens', async () => {
+    window.innerWidth = 900;
+    const user = await ready();
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
+    // Leaving focus docks it again, as it was before focus.
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
   it('docks the sidebar again after focus even if the window narrowed meanwhile', async () => {
     const user = await review();
     await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));

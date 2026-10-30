@@ -66,9 +66,11 @@ because one toggle that keeps its icon reads as one control in two states.
 - **GIVEN** a recording in review with the sidebar and the transcript showing
 - **WHEN** the person presses Focus video
 - **THEN** the sidebar and the transcript hide and the video takes the window's width
+- **AND** they stay hidden if the window widens meanwhile
 - **AND** Focus video keeps its icon and shows pressed
 - **PROOF** test: src/workspace/PlaybackBar.test.tsx::shows Focus video pressed with the same icon
 - **PROOF** test: src/App.test.tsx::hides the sidebar and the transcript in focus
+- **PROOF** test: src/App.test.tsx::keeps both sidebars hidden in focus when a narrow window widens
 - **PROOF** desk: open
 
 #### Scenario: A person leaves focus
@@ -84,7 +86,8 @@ because one toggle that keeps its icon reads as one control in two states.
 #### Scenario: Focus ends when the sidebar or another recording takes over
 - **GIVEN** the video is focused
 - **WHEN** the person presses Show sidebar, or starts a new recording
-- **THEN** focus ends: the sidebar and the transcript show, and Focus video shows not pressed
+- **THEN** focus ends: the transcript shows, and Focus video shows not pressed
+- **AND** Show sidebar shows the sidebar; a new recording brings it back as leaving focus does
 - **AND** a search that shows the sidebar leaves focus on, and Hide sidebar hides it again
 - **PROOF** test: src/App.test.tsx::ends focus when the sidebar is shown or the workspace leaves review
 - **PROOF** test: src/App.test.tsx::keeps focus when a search shows the sidebar, and hides it again with its toggle
