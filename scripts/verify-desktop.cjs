@@ -1,5 +1,5 @@
 // Records the default source for about three seconds in a running test app with the local CDP port (9224),
-// then checks playback. It opens New recording first, so it works whichever recording the app shows.
+// then checks playback. It opens New session first, so it works whichever recording the app shows.
 // Controls are found by the accessible names in src/workspace/types.ts (NAMES).
 const {chromium}=require('playwright');
 const fs=require('fs');
@@ -10,7 +10,7 @@ const fs=require('fs');
  try {
  await page.waitForFunction(async()=>(await window.__TAURI_INTERNALS__.invoke('get_recording_status')).state==='idle',undefined,{timeout:60000});
  // A data folder with recordings opens the latest one; Record is on the new-recording draft.
- await page.getByRole('complementary',{name:'Recordings',exact:true}).getByRole('button',{name:'New recording',exact:true}).click();
+ await page.getByRole('complementary',{name:'Recordings',exact:true}).getByRole('button',{name:'New session',exact:true}).click();
  await page.getByRole('button',{name:'Record',exact:true}).waitFor({timeout:20000});
  ownsRecording=true;await page.getByRole('button',{name:'Record',exact:true}).click();
  await page.getByRole('button',{name:'Stop',exact:true}).waitFor({timeout:20000});
