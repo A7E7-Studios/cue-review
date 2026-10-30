@@ -339,7 +339,7 @@ const SPECS: &[Spec] = &[
         required: 0,
         options: &[switch(
             "--install",
-            "Download and install the transcription tools and model (the only network access); takes the recording lock",
+            "Download and install the transcription tools, the base model and the chosen language's model (the only network access); takes the recording lock",
         )],
         notes: "",
     },

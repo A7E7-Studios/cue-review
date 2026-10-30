@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
-import type { Settings, SetupStatus } from '../backend';
+import type { LanguageModel, Settings, SetupStatus } from '../backend';
 import type { WindowTheme } from '../chrome/windowApi';
 import { estimateTokens, FONT_CREDIT, normalizeVocabulary, SettingsDialog } from './SettingsDialog';
 
@@ -17,14 +17,24 @@ function Harness({ initial = {}, setup = ready, installing = false, error, save 
   const [theme, setTheme] = useState<WindowTheme>('light');
   return <SettingsDialog open onClose={handlers.close} theme={theme} onTheme={next => { handlers.theme(next); setTheme(next); }}
     setup={setup} installing={installing} onInstall={handlers.install} onCheckAgain={handlers.checkAgain}
+    onPollLanguageModel={() => handlers.poll()} onDownloadLanguageModel={async () => { await handlers.download(); }}
     settings={settings} onSaveSettings={async next => { handlers.save(next); setSettings(await save(next)); }} error={error}/>;
 }
-const handlers = { close: vi.fn(), theme: vi.fn(), install: vi.fn(), checkAgain: vi.fn(), save: vi.fn() };
+const handlers = { close: vi.fn(), theme: vi.fn(), install: vi.fn(), checkAgain: vi.fn(), poll: vi.fn(), download: vi.fn(), save: vi.fn() };
 
-beforeEach(() => { document.documentElement.dataset.motion = 'reduced'; for (const handler of Object.values(handlers)) handler.mockReset(); });
-afterEach(() => { delete document.documentElement.dataset.motion; vi.unstubAllGlobals(); });
+beforeEach(() => {
+  document.documentElement.dataset.motion = 'reduced';
+  for (const handler of Object.values(handlers)) handler.mockReset();
+  handlers.poll.mockResolvedValue(undefined);
+});
+afterEach(() => { delete document.documentElement.dataset.motion; vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 const field = () => screen.getByRole('textbox', { name: 'Vocabulary' });
+/** The Recording tools row of a capability, apart from the Transcription section's heading. */
+const toolRow = (label: string) => within(screen.getByRole('region', { name: 'Recording tools' })).getByText(label).parentElement;
+const withModel = (model: Partial<LanguageModel>): SetupStatus => ({ ...ready, languageModel: { language: 'en', model: 'small.en', state: 'ready', receivedBytes: 487_614_201, totalBytes: 487_614_201, ...model } });
+const transcription = () => within(screen.getByRole('region', { name: 'Transcription' }));
+const modelRow = (language: string) => transcription().getByText(`${language} model`).parentElement;
 async function enter(text: string) {
   const user = userEvent.setup();
   await user.clear(field());
@@ -152,9 +162,9 @@ describe('SettingsDialog', () => {
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeVisible();
     await user.selectOptions(screen.getByRole('combobox', { name: 'Appearance' }), 'dark');
     expect(handlers.theme).toHaveBeenCalledWith('dark');
-    expect(screen.getByText('Capture and playback').parentElement).toHaveTextContent('Available');
-    expect(screen.getByText('Transcription').parentElement).toHaveTextContent('Setup needed');
-    expect(screen.getByText('USB devices').parentElement).toHaveTextContent('Optional setup');
+    expect(toolRow('Capture and playback')).toHaveTextContent('Available');
+    expect(toolRow('Transcription')).toHaveTextContent('Setup needed');
+    expect(toolRow('USB devices')).toHaveTextContent('Optional setup');
     expect(screen.getByText('Local speech model is missing.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Install transcription' }));
     expect(handlers.install).toHaveBeenCalledOnce();
@@ -176,7 +186,7 @@ describe('SettingsDialog', () => {
 
     rerender(<Harness setup={ready} error="Download failed. Check your connection and retry."/>);
     expect(screen.getByRole('alert')).toHaveTextContent('Check your connection');
-    expect(screen.getByText('Transcription').parentElement).toHaveTextContent('Available');
+    expect(toolRow('Transcription')).toHaveTextContent('Available');
     expect(screen.queryByRole('button', { name: 'Install transcription' })).not.toBeInTheDocument();
   });
 
@@ -200,7 +210,7 @@ describe('SettingsDialog', () => {
       const [open, setOpen] = useState(true);
       return <><button onClick={() => setOpen(true)}>Open settings</button>
         <SettingsDialog open={open} onClose={() => setOpen(false)} theme="light" onTheme={() => {}} setup={ready} installing={false}
-          onInstall={() => {}} onCheckAgain={() => {}} settings={{ vocabulary: 'Figtree' }} onSaveSettings={async () => {}}/></>;
+          onInstall={() => {}} onCheckAgain={() => {}} onPollLanguageModel={async () => {}} onDownloadLanguageModel={async () => {}} settings={{ vocabulary: 'Figtree' }} onSaveSettings={async () => {}}/></>;
     }
     render(<Reopen/>);
     await user.type(field(), ', Nadia');
@@ -208,5 +218,165 @@ describe('SettingsDialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(field()).toHaveValue('Figtree');
+  });
+
+  it('shows the chosen language and its ready model', () => {
+    const { unmount } = render(<Harness initial={{ language: 'en' }} setup={withModel({})}/>);
+    expect(screen.getByRole('heading', { name: 'Transcription' })).toBeVisible();
+    expect(transcription().getByRole('combobox', { name: 'Language' })).toHaveValue('en');
+    expect(transcription().getByRole('combobox', { name: 'Language' })).toHaveDisplayValue('English');
+    expect(modelRow('English')).toHaveTextContent('Ready');
+    expect(modelRow('English')).toHaveAttribute('data-available');
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    // The section comes directly before the vocabulary.
+    expect(screen.getByRole('region', { name: 'Transcription' }).nextElementSibling).toContainElement(field());
+
+    unmount();
+    render(<Harness initial={{ language: 'de' }} setup={withModel({ language: 'de', model: 'small' })}/>);
+    expect(screen.getByRole('combobox', { name: 'Language' })).toHaveDisplayValue('German');
+    expect(modelRow('German')).toHaveTextContent('Ready');
+  });
+
+  it('defaults to English and shows no model row for a custom model', () => {
+    render(<Harness initial={{}}/>);
+    expect(screen.getByRole('combobox', { name: 'Language' })).toHaveValue('en');
+    expect(transcription().queryByText(/model$/)).not.toBeInTheDocument();
+  });
+
+  it("shows the language model's download progress", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let reply!: () => void;
+    handlers.poll.mockImplementation(() => new Promise<void>(resolve => { reply = resolve; }));
+    const downloading = withModel({ language: 'de', model: 'small', state: 'downloading', receivedBytes: 212_000_000, totalBytes: 487_601_967 });
+    const { rerender } = render(<Harness initial={{ language: 'de' }} setup={downloading}/>);
+    expect(modelRow('German')).toHaveTextContent('Downloading · 212 of 488 MB');
+    const bar = screen.getByRole('progressbar', { name: 'German model download' });
+    expect(bar).toHaveAttribute('aria-valuenow', '212');
+    expect(bar).toHaveAttribute('aria-valuemax', '488');
+    expect(bar).toHaveAttribute('aria-valuetext', '212 of 488 MB');
+    expect(transcription().getByText('Until it finishes, recordings are transcribed with the base model.')).toBeVisible();
+
+    // The model's state is read about each second while it downloads, the next read only after the last reply.
+    expect(handlers.poll).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.poll).toHaveBeenCalledOnce();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.poll).toHaveBeenCalledOnce();
+    await act(async () => { reply(); });
+    rerender(<Harness initial={{ language: 'de' }} setup={withModel({ language: 'de', model: 'small', state: 'downloading', receivedBytes: 300_000_000, totalBytes: 487_601_967 })}/>);
+    expect(modelRow('German')).toHaveTextContent('Downloading · 300 of 488 MB');
+    act(() => { vi.advanceTimersByTime(999); });
+    expect(handlers.poll).toHaveBeenCalledOnce();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(handlers.poll).toHaveBeenCalledTimes(2);
+
+    // Once it is ready, the reading stops, even when the last reply arrives afterwards.
+    rerender(<Harness initial={{ language: 'de' }} setup={withModel({ language: 'de', model: 'small' })}/>);
+    await act(async () => { reply(); });
+    expect(modelRow('German')).toHaveTextContent('Ready');
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.poll).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops reading the downloading model when Settings closes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let reply!: () => void;
+    handlers.poll.mockImplementation(() => new Promise<void>(resolve => { reply = resolve; }));
+    const downloading = withModel({ state: 'downloading', receivedBytes: 212_000_000 });
+    const dialog = (open: boolean) => <SettingsDialog open={open} onClose={() => {}} theme="light" onTheme={() => {}} setup={downloading} installing={false}
+      onInstall={() => {}} onCheckAgain={() => {}} onPollLanguageModel={() => handlers.poll()} onDownloadLanguageModel={async () => {}} settings={{}} onSaveSettings={async () => {}}/>;
+    const { rerender } = render(dialog(true));
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.poll).toHaveBeenCalledOnce();
+    rerender(dialog(false));
+    await act(async () => { reply(); });
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.poll).toHaveBeenCalledOnce();
+  });
+
+  it('offers to retry a failed model download', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Harness setup={withModel({ state: 'failed', receivedBytes: 0, error: 'The download was cut off.' })}/>);
+    expect(modelRow('English')).toHaveTextContent('Download failed');
+    expect(transcription().getByText('The download was cut off. Recordings are transcribed with the base model until it is installed.')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(handlers.download).toHaveBeenCalledOnce();
+    // The backend marks the download running before it returns: one read shows it and starts the polling.
+    await waitFor(() => expect(handlers.poll).toHaveBeenCalledOnce());
+
+    handlers.download.mockRejectedValueOnce('Open CueReview as a desktop app.');
+    rerender(<Harness setup={withModel({ state: 'failed', receivedBytes: 0 })}/>);
+    expect(transcription().getByText('The download did not finish. Recordings are transcribed with the base model until it is installed.')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Open CueReview as a desktop app.');
+    expect(handlers.poll).toHaveBeenCalledOnce();
+
+    rerender(<Harness setup={withModel({ state: 'missing', receivedBytes: 0 })}/>);
+    expect(modelRow('English')).toHaveTextContent('Not downloaded yet');
+    await user.click(screen.getByRole('button', { name: 'Download' }));
+    expect(handlers.download).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(handlers.poll).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows a rejected model download under the section', async () => {
+    const user = userEvent.setup();
+    const refusal = 'Install transcription first, then the language model downloads by itself.';
+    handlers.download.mockRejectedValueOnce(refusal);
+    render(<Harness setup={withModel({ state: 'missing', receivedBytes: 0 })}/>);
+    await user.click(screen.getByRole('button', { name: 'Download' }));
+    expect(await transcription().findByRole('alert')).toHaveTextContent(refusal);
+    expect(handlers.poll).not.toHaveBeenCalled();
+    // Trying again clears it.
+    await user.click(screen.getByRole('button', { name: 'Download' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(handlers.poll).toHaveBeenCalledOnce();
+  });
+
+  it('asks to install transcription before the language model downloads', async () => {
+    const user = userEvent.setup();
+    const beforeInstall = (model: Partial<LanguageModel>): SetupStatus => ({ ...withModel(model), ready: false, modelReady: false, issues: ['Local speech model is missing.'] });
+    const { rerender } = render(<Harness initial={{ language: 'de' }} setup={beforeInstall({ language: 'de', model: 'small', state: 'missing', receivedBytes: 0 })}/>);
+    expect(modelRow('German')).toHaveTextContent('Not downloaded yet');
+    expect(transcription().getByText('Install transcription first; this model then downloads by itself.')).toBeVisible();
+    expect(transcription().queryByText(/base model/)).not.toBeInTheDocument();
+    expect(transcription().queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Install transcription' })).toBeVisible();
+
+    rerender(<Harness initial={{ language: 'de' }} setup={beforeInstall({ language: 'de', model: 'small', state: 'failed', receivedBytes: 0, error: 'Hugging Face could not be reached.' })}/>);
+    expect(transcription().getByText('Hugging Face could not be reached.')).toBeVisible();
+    expect(transcription().getByText('Install transcription first; this model then downloads by itself.')).toBeVisible();
+    expect(transcription().queryByText(/base model/)).not.toBeInTheDocument();
+    expect(transcription().queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+
+    // The language can still be chosen.
+    const select = screen.getByRole('combobox', { name: 'Language' });
+    expect(select).toBeEnabled();
+    await user.selectOptions(select, 'en');
+    expect(handlers.save).toHaveBeenLastCalledWith({ language: 'en' });
+  });
+
+  it('saves a chosen language at once and keeps the vocabulary', async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={{ vocabulary: 'Figtree' }} setup={withModel({})}/>);
+    await user.type(field(), ', Nadia');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Language' }), 'de');
+    expect(handlers.save).toHaveBeenLastCalledWith({ vocabulary: 'Figtree', language: 'de' });
+    await waitFor(() => expect(handlers.poll).toHaveBeenCalledOnce());
+    expect(screen.getByRole('combobox', { name: 'Language' })).toHaveValue('de');
+    // The unsaved vocabulary draft stays as typed.
+    expect(field()).toHaveValue('Figtree, Nadia');
+  });
+
+  it('shows a rejected language choice and keeps the stored language', async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={{ language: 'en' }} setup={withModel({})} save={() => Promise.reject('Settings could not be saved: access is denied.')}/>);
+    const select = screen.getByRole('combobox', { name: 'Language' });
+    await user.selectOptions(select, 'de');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Settings could not be saved: access is denied.');
+    expect(select).toHaveValue('en');
+    expect(select).toHaveAccessibleDescription('Settings could not be saved: access is denied.');
+    expect(handlers.poll).not.toHaveBeenCalled();
   });
 });
