@@ -132,12 +132,34 @@
 .cr-play[data-playing='false'] svg { margin-left: 2px; }
 .cr-time { margin: 0 0 0 4px; white-space: nowrap; color: var(--color-text); font-size: 14px; font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums; }
 .cr-time > span { color: var(--color-text-tertiary); font-weight: 400; }
+/* The speed button keeps one width for every speed (1× to 1.75×), so nothing beside it moves. */
 .cr-speed {
   --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
   --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text));
-  height: var(--size-pill); padding: 0 12px; border-radius: var(--radius-pill);
+  width: var(--size-speed-button); height: var(--size-pill); padding: 0; justify-content: center; border-radius: var(--radius-pill);
   font-size: var(--font-size-control); font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums;
 }
+.cr-speed[aria-expanded='true'] { --cr-bg: var(--cr-bg-hover); }
+/* The speed list opens above the button, over the video, as YouTube's does. */
+.cr-speed-anchor { position: relative; display: inline-flex; }
+.cr-speed-menu {
+  position: absolute; z-index: 20; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  width: 132px; padding: 5px; box-sizing: border-box; border: 1px solid var(--color-sheet-edge); border-radius: var(--radius-panel);
+  background: var(--color-sheet); box-shadow: var(--shadow); color: var(--color-text); font-size: var(--font-size-control);
+  animation: cr-speed-menu-in var(--motion-fast) var(--ease-out);
+}
+@keyframes cr-speed-menu-in { from { opacity: 0; } }
+.cr-speed-menu button {
+  width: 100%; min-height: 30px; display: flex; align-items: center; justify-content: flex-start; gap: 6px; padding: 0 8px; border-radius: var(--radius-field);
+  background: transparent; color: inherit; font: inherit; font-variant-numeric: tabular-nums; text-align: left;
+}
+.cr-speed-menu button:hover, .cr-speed-menu button:focus-visible { background: var(--color-row-hover); outline: none; }
+.cr-speed-menu button[aria-checked='true'] { font-weight: var(--font-weight-strong); }
+.cr-speed-check { width: 14px; display: inline-grid; place-items: center; color: var(--color-accent); }
+.cr-speed-check svg { width: 13px; height: 13px; }
+.cr-speed-normal { margin-left: 4px; color: var(--color-text-tertiary); font-weight: 400; }
+/* Focus video, pressed while both sidebars are hidden. */
+.cr-round-button.cr-ghost[aria-pressed='true'] { --cr-bg: var(--color-pill); --cr-fg: var(--color-text); }
 .cr-control-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-control-divider); }
 /* Why Record more failed, right under the pill, with the way forward (New recording) beside it. */
 .cr-record-more-error {

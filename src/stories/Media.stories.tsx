@@ -14,7 +14,6 @@ import { SOURCE_GONE, takeTwoLiveTranscript, takeTwoStartMs, transcript as first
 // The recorded screen from the Float v2 mocks. The review video is a still: the
 // <video> shows it as its poster and never loads media.
 const sample = new URL('../../docs/design/float-v2/sample-capture.svg', import.meta.url).href;
-const SPEEDS = [1, 1.5, 2, 0.75];
 const sources: CaptureSource[] = [
   { id: 'display', name: 'Display 1', kind: 'display', available: true },
   { id: 'window', name: 'Library — Component browser', kind: 'window', available: true },
@@ -82,7 +81,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
           locked={false} busy={false} recordLabel="Record" recordDisabled={!source?.available} onRecord={() => setNotice('Record selected.')}/>
       : <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
-          onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
+          onSpeed={setSpeed} focused={focused}
           onToggleFocus={() => setFocused(value => !value)} recordMoreDisabled={scenario === 'processing'}
           onRecordMore={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
           recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
