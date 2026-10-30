@@ -311,7 +311,7 @@
 }
 .cr-popover-refresh { --cr-fg: var(--color-text-secondary); --cr-bg-hover: var(--color-pill); width: 28px; height: 28px; border-radius: 7px; }
 .cr-popover-refresh svg { width: 15px; height: 15px; }
-.cr-option-list { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 1px; scrollbar-width: thin; }
+.cr-option-list { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
 .cr-option {
   --cr-fg: var(--color-row-text); --cr-bg-hover: var(--color-row-hover);
   width: 100%; min-height: 34px; justify-content: space-between; gap: 10px; padding: 6px 10px;
