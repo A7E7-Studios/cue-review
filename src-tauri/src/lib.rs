@@ -593,6 +593,33 @@ async fn start_recording(
 ) -> Result<Session, String> {
     let s = s.inner().clone();
     blocking(move || {
+        start_recording_with(
+            &s,
+            project_id,
+            name,
+            source_id,
+            microphone_id,
+            system_audio,
+            muted,
+            capture::start_muted,
+        )
+    })
+    .await
+}
+/// [`start_recording`] with the capture started by `start`, so tests can
+/// fake it.
+#[allow(clippy::too_many_arguments)]
+fn start_recording_with(
+    s: &Shared,
+    project_id: Option<String>,
+    name: Option<String>,
+    source_id: String,
+    microphone_id: Option<String>,
+    system_audio: bool,
+    muted: Option<bool>,
+    start: impl FnOnce(CaptureConfig, &std::path::Path, bool) -> Result<capture::ActiveCapture, String>,
+) -> Result<Session, String> {
+    {
         let mut runtime = s.runtime.lock().map_err(|e| e.to_string())?;
         if runtime.active.is_some() || runtime.processing.is_some() {
             return Err("Finish the current recording or processing job first.".into());
@@ -619,7 +646,7 @@ async fn start_recording(
         }
         // Whisper beside a capture runs only with the live threads.
         stop_refining(&mut runtime, None);
-        match capture::start_muted(
+        match start(
             config,
             &s.store.session_dir(&session.id)?,
             muted.unwrap_or(false),
@@ -630,7 +657,7 @@ async fn start_recording(
                 if session.microphone_id.is_some()
                     || (session.system_audio && !session.source_id.starts_with("android:"))
                 {
-                    spawn_live(&s, &session.id, cancel, None);
+                    spawn_live(s, &session.id, cancel, None);
                 }
                 Ok(session)
             }
@@ -641,8 +668,7 @@ async fn start_recording(
                 Err(e)
             }
         }
-    })
-    .await
+    }
 }
 fn finish_transcription(job: ProcessingJob) {
     let s = &job.state;
@@ -1171,6 +1197,32 @@ pub fn run() {
 #[cfg(test)]
 mod orchestration_tests {
     use super::*;
+    #[test]
+    fn a_new_recording_stops_refining_even_when_its_capture_fails() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = state(folder.path().into());
+        let refining = Arc::new(AtomicBool::new(false));
+        state
+            .runtime
+            .lock()
+            .unwrap()
+            .refining
+            .push(("earlier".into(), refining.clone()));
+        let error = start_recording_with(
+            &state,
+            None,
+            None,
+            "fixture:1".into(),
+            None,
+            false,
+            None,
+            |_, _, _| Err("No display.".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "No display.");
+        assert!(refining.load(Ordering::Acquire));
+        assert!(state.runtime.lock().unwrap().refining.is_empty());
+    }
     #[test]
     fn retry_forgets_stretches_and_refinements_stop_only_for_their_recording() {
         let folder = tempfile::tempdir().unwrap();

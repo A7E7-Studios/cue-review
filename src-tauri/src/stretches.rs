@@ -94,9 +94,10 @@ pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
             at_ms: (end + start) / 2,
             speech: true,
         },
+        // Speech only when some region starts before the cut.
         None => Cut {
             at_ms: MAX_STRETCH_MS,
-            speech: true,
+            speech: regions[0].0 < MAX_STRETCH_MS,
         },
     })
 }
@@ -378,6 +379,14 @@ mod tests {
             cut(&[(20_000, 33_000)], 33_100),
             Some(Cut {
                 at_ms: 10_000,
+                speech: false
+            })
+        );
+        // Silence all the way past 30 s is skipped, not sent to Whisper.
+        assert_eq!(
+            cut(&[(31_000, 59_000)], 60_000),
+            Some(Cut {
+                at_ms: 30_000,
                 speech: false
             })
         );
