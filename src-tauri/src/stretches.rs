@@ -9,7 +9,8 @@
 //! Retry and `cue transcribe` forget them first.
 use crate::{
     models::{Segment, Transcript},
-    store::{atomic_write, read_json},
+    store::{atomic_write, read_json, Store},
+    takes,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -49,15 +50,11 @@ pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
             speech: false,
         });
     }
-    let paused = regions
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &(_, end))| {
-            let next = regions.get(i + 1).map_or(pending_ms, |region| region.0);
-            let at_ms = end + PAUSE_LEAD_MS;
-            (next.saturating_sub(end) >= MIN_PAUSE_MS && at_ms <= MAX_STRETCH_MS).then_some(at_ms)
-        })
-        .last();
+    let paused = regions.iter().enumerate().rev().find_map(|(i, &(_, end))| {
+        let next = regions.get(i + 1).map_or(pending_ms, |region| region.0);
+        let at_ms = end + PAUSE_LEAD_MS;
+        (next.saturating_sub(end) >= MIN_PAUSE_MS && at_ms <= MAX_STRETCH_MS).then_some(at_ms)
+    });
     if let Some(at_ms) = paused {
         return Some(Cut {
             at_ms,
@@ -245,6 +242,17 @@ pub fn usable(take: &Path, source: &str, model: &str, language: &str) -> Option<
 pub fn forget(take: &Path) {
     let _ = fs::remove_file(file(take));
 }
+/// Forgets the stretches of every take of session `id`, before Retry or
+/// `cue transcribe` transcribe it again.
+pub fn forget_session(store: &Store, id: &str) -> Result<(), String> {
+    let session = store.session(id)?;
+    let dir = store.session_dir(id)?;
+    forget(&dir);
+    for take in &session.takes {
+        forget(&takes::take_dir(&dir, take.index));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -393,5 +401,176 @@ mod tests {
         // A damaged file is not used.
         fs::write(file(take.path()), b"{broken").unwrap();
         assert!(usable(take.path(), "mic.wav", "ggml-small.en.bin", "en").is_none());
+    }
+
+    /// What a real-time replay of a recorded take through the live worker
+    /// measured: when each word first showed live, how long Stop took, and
+    /// the words of the one-pass and of a whole-take transcript.
+    struct Replay {
+        /// Seconds from a word's end in the audio to its first live showing.
+        delays: Vec<f64>,
+        stop: std::time::Duration,
+        one_pass: Vec<String>,
+        whole: Vec<String>,
+    }
+
+    fn normalized(transcript: &Transcript) -> Vec<String> {
+        transcript
+            .segments
+            .iter()
+            .flat_map(|s| &s.words)
+            .map(|w| {
+                w.text
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '\'')
+                    .collect::<String>()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+
+    fn word_errors(reference: &[String], hypothesis: &[String]) -> f64 {
+        let mut row: Vec<usize> = (0..=hypothesis.len()).collect();
+        for (i, r) in reference.iter().enumerate() {
+            let mut previous = row[0];
+            row[0] = i + 1;
+            for (j, h) in hypothesis.iter().enumerate() {
+                let next = (row[j + 1] + 1)
+                    .min(row[j] + 1)
+                    .min(previous + usize::from(r != h));
+                previous = row[j + 1];
+                row[j + 1] = next;
+            }
+        }
+        row[hypothesis.len()] as f64 / reference.len().max(1) as f64
+    }
+
+    /// Feeds `test-results/replay/mic.wav` (a recorded take) through
+    /// [`crate::transcribe::live_cycle`] at real speed, as the live worker
+    /// does, then transcribes the take as Stop does, and once more whole.
+    fn replay() -> &'static Replay {
+        static REPLAY: std::sync::OnceLock<Replay> = std::sync::OnceLock::new();
+        REPLAY.get_or_init(|| {
+            use std::time::{Duration, Instant};
+            let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-results/replay");
+            let mic = fixtures.join("mic.wav");
+            let mut reader = hound::WavReader::open(&mic).expect("test-results/replay/mic.wav");
+            let spec = reader.spec();
+            let samples: Vec<f32> = reader.samples::<f32>().map(Result::unwrap).collect();
+            let rate = spec.sample_rate as u64;
+            let length_ms = samples.len() as u64 * 1000 / rate;
+            let root = tempfile::tempdir().unwrap();
+            let take = root.path().join("take");
+            let live = take.join("live");
+            fs::create_dir_all(&live).unwrap();
+            let model = crate::deps::final_model("en");
+            let model_file = model.path.file_name().unwrap().to_string_lossy().into_owned();
+            let mut stretches = Stretches::new("mic.wav", &model_file, "en");
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let snapshot = live.join("snapshot.wav");
+            let mut first_seen: Vec<(String, f64)> = Vec::new();
+            let started = Instant::now();
+            loop {
+                let now_ms = (started.elapsed().as_millis() as u64).min(length_ms);
+                let from = stretches.until_ms;
+                let mut writer = hound::WavWriter::create(&snapshot, spec).unwrap();
+                let (a, b) = ((from * rate / 1000) as usize, (now_ms * rate / 1000) as usize);
+                for sample in &samples[a.min(b)..b] {
+                    writer.write_sample(*sample).unwrap();
+                }
+                writer.finalize().unwrap();
+                let (guess, guess_ms) = crate::transcribe::live_cycle(
+                    root.path(),
+                    &take,
+                    &live,
+                    &snapshot,
+                    &model,
+                    &mut stretches,
+                    now_ms - from,
+                    &cancel,
+                )
+                .unwrap();
+                let shown = stretches.live(guess, guess_ms, 0);
+                let at = started.elapsed().as_secs_f64();
+                for word in shown.segments.iter().flat_map(|s| &s.words) {
+                    let key = format!("{}@{}", word.text, word.start_ms / 1000);
+                    if !first_seen.iter().any(|(seen, _)| *seen == key) {
+                        first_seen.push((key, at - word.end_ms as f64 / 1000.));
+                    }
+                }
+                if now_ms >= length_ms {
+                    break;
+                }
+                let next = Duration::from_millis(1500);
+                let spent = started.elapsed() - Duration::from_millis(now_ms);
+                if spent < next {
+                    std::thread::sleep(next - spent.min(next));
+                }
+            }
+            fs::copy(&mic, take.join("mic.wav")).unwrap();
+            let stopped = Instant::now();
+            let one_pass =
+                crate::transcribe::transcribe_media(root.path(), &take, length_ms, true).unwrap();
+            let stop = stopped.elapsed();
+            forget(&take);
+            let whole =
+                crate::transcribe::transcribe_media(root.path(), &take, length_ms, true).unwrap();
+            let mut delays: Vec<f64> = first_seen.into_iter().map(|(_, delay)| delay).collect();
+            delays.sort_by(f64::total_cmp);
+            let replay = Replay {
+                delays,
+                stop,
+                one_pass: normalized(&one_pass),
+                whole: normalized(&whole),
+            };
+            eprintln!(
+                "replay of {} s: {} stretches; live delay median {:.1} s, 90th {:.1} s; Stop {:?}; {} words one-pass, {} whole, {:.1} % apart",
+                length_ms / 1000,
+                stretches.segments.len(),
+                replay.delays[replay.delays.len() / 2],
+                replay.delays[replay.delays.len() * 9 / 10],
+                replay.stop,
+                replay.one_pass.len(),
+                replay.whole.len(),
+                100. * word_errors(&replay.whole, &replay.one_pass)
+            );
+            eprintln!("one-pass: {}", replay.one_pass.join(" "));
+            eprintln!("whole:    {}", replay.whole.join(" "));
+            replay
+        })
+    }
+
+    #[test]
+    #[ignore = "Requires Whisper, small.en, base, the speech detector and test-results/replay/mic.wav; runs in real time"]
+    fn actual_replay_shows_words_within_seconds() {
+        let replay = replay();
+        let median = replay.delays[replay.delays.len() / 2];
+        assert!(
+            median <= 2.5,
+            "live words showed {median:.1} s after they were said"
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires Whisper, small.en, base, the speech detector and test-results/replay/mic.wav; runs in real time"]
+    fn actual_replay_finishes_within_seconds_of_stop() {
+        let stop = replay().stop;
+        assert!(stop.as_secs_f64() < 5.0, "Stop took {stop:?}");
+    }
+
+    #[test]
+    #[ignore = "Requires Whisper, small.en, base, the speech detector and test-results/replay/mic.wav; runs in real time"]
+    fn actual_replay_matches_a_whole_take_pass() {
+        let replay = replay();
+        let apart = word_errors(&replay.whole, &replay.one_pass);
+        assert!(
+            apart <= 0.08,
+            "one-pass differs from a whole-take pass in {:.1} % of words",
+            100. * apart
+        );
+        // No stretch boundary doubles words: no run of four words repeats back to back.
+        let doubled = replay.one_pass.windows(8).any(|w| w[..4] == w[4..]);
+        assert!(!doubled, "a run of words is doubled");
     }
 }

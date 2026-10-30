@@ -1668,7 +1668,10 @@ fn snapshot_track(
     let (start, end) = match from_ms {
         Some(from_ms) => {
             let start = (from_ms * rate / 1000).min(end as u64) as u32;
-            (start, end.min(start.saturating_add(spec.sample_rate.saturating_mul(60))))
+            (
+                start,
+                end.min(start.saturating_add(spec.sample_rate.saturating_mul(60))),
+            )
         }
         None => (end.saturating_sub(spec.sample_rate.saturating_mul(30)), end),
     };

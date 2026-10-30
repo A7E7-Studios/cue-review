@@ -92,7 +92,10 @@ pub fn transcribe_existing(store: &Store, id: &str) -> Result<Transcript, String
         id,
         takes::upgrade,
         crate::attach_finished_video,
-        crate::transcribe::transcribe,
+        |store, id| {
+            crate::stretches::forget_session(store, id)?;
+            crate::transcribe::transcribe(store, id)
+        },
     )
 }
 /// [`transcribe_existing`] with the take upgrade, the video check and the

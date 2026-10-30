@@ -136,19 +136,14 @@ fn accepts_live_update(runtime: &Runtime, id: &str, cancel: &AtomicBool) -> bool
             .as_ref()
             .is_some_and(|(session, _)| session.id == id)
 }
-fn publish_live(
-    s: &Shared,
-    id: &str,
-    cancel: &AtomicBool,
-    result: Result<(Transcript, u64, u64), String>,
-) {
+fn publish_live(s: &Shared, id: &str, cancel: &AtomicBool, result: Result<Transcript, String>) {
     if let Ok(mut runtime) = s.runtime.lock() {
         if !accepts_live_update(&runtime, id, cancel) {
             return;
         }
         let previous = runtime.live_transcript.take().unwrap_or_default();
         runtime.live_transcript = Some(match result {
-            Ok((update, start, end)) => transcribe::merge_live(&previous, update, start, end),
+            Ok(live) => live,
             Err(error) => Transcript {
                 status: Some("error".into()),
                 error: Some(error),
@@ -157,37 +152,56 @@ fn publish_live(
         });
     }
 }
-/// Moves a snapshot's take-relative bounds onto the session timeline.
-fn on_session_clock(take: Option<TakeRef>, (start, end): (u64, u64)) -> (u64, u64) {
-    let offset = take.map_or(0, |take| take.offset_ms);
-    (start.saturating_add(offset), end.saturating_add(offset))
-}
+/// How often the live worker looks at the audio again.
+const LIVE_CYCLE: Duration = Duration::from_millis(1500);
 /// The live transcript covers only the capture in progress: a whole first
 /// recording, or just the take being recorded, timed on the session timeline.
+///
+/// About every 1.5 s it copies the take's live audio from the end of the last
+/// finished stretch, transcribes each stretch that a pause has finished once
+/// with the language's model and saves it for Stop ([`stretches`]), then
+/// guesses the words after them with base. Whisper runs outside the runtime
+/// lock and under the shared inference lock, so Stop's transcription waits
+/// for a stretch in progress and then finds it saved.
 fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
     if !deps::setup_status().ready {
         publish_live(&s,&id,&cancel,Err("Install local transcription tools to see words while recording. The recording will still be saved.".into()));
         return;
     }
-    let folder = match s.store.session_dir(&id) {
-        Ok(folder) => takes::take_dir(&folder, take.map_or(1, |take| take.index)).join("live"),
+    let take_folder = match s.store.session_dir(&id) {
+        Ok(folder) => takes::take_dir(&folder, take.map_or(1, |take| take.index)),
         Err(_) => return,
     };
+    let folder = take_folder.join("live");
     if let Err(error) = std::fs::create_dir_all(&folder) {
         publish_live(&s, &id, &cancel, Err(error.to_string()));
         return;
     }
+    let root = s.store.root.clone();
+    let language = settings::language(&settings::load(&root));
+    // Chosen once, so every stretch of the take comes from the same model.
+    let model = deps::final_model(language);
+    let model_file = model
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let offset = take.map_or(0, |take| take.offset_ms);
     let snapshot = folder.join("snapshot.wav");
-    let mut next = Instant::now() + Duration::from_secs(8);
+    stretches::forget(&take_folder);
+    let mut saved: Option<stretches::Stretches> = None;
+    let mut next = Instant::now() + LIVE_CYCLE;
     loop {
         while Instant::now() < next {
             if cancel.load(Ordering::Acquire) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(50));
         }
-        // Snapshot copying is bounded to 30 seconds. Never hold runtime during inference.
-        let bounds = {
+        next = Instant::now() + LIVE_CYCLE;
+        let from = saved.as_ref().map_or(0, |saved| saved.until_ms);
+        // Copying is bounded to 60 s. Never hold runtime during inference.
+        let copied = {
             let runtime = match s.runtime.lock() {
                 Ok(runtime) => runtime,
                 Err(_) => return,
@@ -195,22 +209,36 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             if !accepts_live_update(&runtime, &id, &cancel) {
                 return;
             }
-            runtime.active.as_ref().unwrap().1.snapshot_audio(&snapshot)
+            runtime
+                .active
+                .as_ref()
+                .unwrap()
+                .1
+                .snapshot_audio_from(from, &snapshot)
         };
-        let result = bounds.and_then(|bounds| {
-            let (start, end) = on_session_clock(take, bounds);
+        let result = copied.and_then(|(start, end, source)| {
+            let stretches = saved
+                .get_or_insert_with(|| stretches::Stretches::new(&source, &model_file, language));
             let _inference = s.inference.lock().map_err(|e| e.to_string())?;
             if cancel.load(Ordering::Acquire) {
                 return Err("Live transcription cancelled.".into());
             }
-            transcribe::transcribe_snapshot(&s.store.root, &snapshot, &folder, &cancel)
-                .map(|update| (update, start, end))
+            let (guess, guess_ms) = transcribe::live_cycle(
+                &root,
+                &take_folder,
+                &folder,
+                &snapshot,
+                &model,
+                stretches,
+                end - start,
+                &cancel,
+            )?;
+            Ok(stretches.live(guess, guess_ms, offset))
         });
         publish_live(&s, &id, &cancel, result);
         if cancel.load(Ordering::Acquire) {
             return;
         }
-        next = Instant::now() + Duration::from_secs(8);
     }
 }
 #[tauri::command]
@@ -753,6 +781,8 @@ async fn retry_transcription(s: CmdState<'_>, id: String) -> Result<(), String> 
         };
         // Sessions with takes retry only their unfinished takes.
         let plan = (!session.takes.is_empty()).then(|| takes::retry_plan(&session));
+        // Retry transcribes whole takes, never the stretches saved while recording.
+        stretches::forget_session(&s.store, &id)?;
         let prepared = s.store.update_session(&id, |session| {
             attach_finished_video(&s.store, session)?;
             session.status = "processing".into();
@@ -1182,7 +1212,7 @@ mod orchestration_tests {
             &state,
             "stopped-session",
             &cancel,
-            Ok((Transcript::default(), 0, 1000)),
+            Ok(Transcript::default()),
         );
         publish_live(
             &state,
@@ -1206,13 +1236,6 @@ mod orchestration_tests {
     }
     #[test]
     fn take_snapshots_are_placed_on_the_session_timeline() {
-        assert_eq!(on_session_clock(None, (5000, 8000)), (5000, 8000));
-        let take = Some(TakeRef {
-            index: 2,
-            offset_ms: 80000,
-        });
-        let (start, end) = on_session_clock(take, (5000, 8000));
-        assert_eq!((start, end), (85000, 88000));
         let update = Transcript {
             segments: vec![Segment {
                 id: "segment-0".into(),
@@ -1223,14 +1246,19 @@ mod orchestration_tests {
             }],
             ..Default::default()
         };
-        let live = transcribe::merge_live(&Transcript::default(), update, start, end);
-        assert_eq!(live.segments[0].id, "live-85000-0");
+        let mut stretches = stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        stretches.push(update.clone(), 5000);
+        // Take 2 starts at 80 s on the session timeline.
+        let live = stretches.live(update, 3000, 80_000);
+        assert_eq!(live.segments.len(), 2);
+        assert_eq!(live.segments[0].words[0].start_ms, 80_100);
+        assert_eq!(live.segments[1].id, "live-5000");
         assert_eq!(
             (
-                live.segments[0].words[0].start_ms,
-                live.segments[0].words[0].end_ms
+                live.segments[1].words[0].start_ms,
+                live.segments[1].words[0].end_ms
             ),
-            (85100, 85500)
+            (85_100, 85_500)
         );
     }
     #[test]
