@@ -277,15 +277,18 @@ fn fetch_loop(
             fetch.cancel = false;
             fetch.error = None;
         }
+        let stopped = std::cell::Cell::new(false);
         let outcome = download(model, models, &|received| {
             let mut fetch = locked(state);
             fetch.received = received;
+            stopped.set(fetch.cancel);
             !fetch.cancel
         });
         if let Err(error) = outcome {
             let mut fetch = locked(state);
-            // A download stopped for another language is no failure.
-            if !fetch.cancel && language_model(chosen()).name == model.name {
+            // A download stopped for another language is no failure, even
+            // when that language is taken back before this point.
+            if !stopped.get() && language_model(chosen()).name == model.name {
                 fetch.error = Some(error.clone());
                 fetch.running = false;
                 return Err(error);
@@ -369,7 +372,15 @@ pub fn start_language_model_download() -> Result<(), String> {
     }
     let models = models_dir();
     let wanted = language_model(chosen_language());
-    if wanted.installed_in(&models) || !claim(fetch_state(), wanted) {
+    if wanted.installed_in(&models) {
+        // A download for a language no longer chosen stops.
+        let mut fetch = locked(fetch_state());
+        if fetch.running {
+            fetch.cancel = fetch.model != wanted.name;
+        }
+        return Ok(());
+    }
+    if !claim(fetch_state(), wanted) {
         return Ok(());
     }
     sweep_partial(&models);
@@ -837,13 +848,28 @@ mod tests {
         assert_eq!(*order.borrow(), ["small.en"]);
         assert!(SMALL_EN.installed_in(dir.path()));
         assert!(locked(&state).error.is_none());
-        // Another process's download, still growing, reads as downloading.
-        fs::write(dir.path().join("ggml-small.download"), b"part").unwrap();
-        let status = status_of(dir.path(), "de", &locked(&state));
+    }
+
+    #[test]
+    fn a_download_another_process_writes_reads_as_downloading() {
+        let dir = models(&[&BASE]);
+        let idle = Fetch::default();
+        let partial = dir.path().join("ggml-small.download");
+        fs::write(&partial, b"part").unwrap();
+        let status = status_of(dir.path(), "de", &idle);
         assert_eq!(
             (status.state.as_str(), status.received_bytes),
             ("downloading", 4)
         );
+        // A partial file nobody has written to for a while is left over, not a download.
+        let old = std::time::SystemTime::now() - Duration::from_secs(120);
+        fs::File::options()
+            .write(true)
+            .open(&partial)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(status_of(dir.path(), "de", &idle).state, "missing");
     }
 
     #[test]

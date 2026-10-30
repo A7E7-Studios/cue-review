@@ -4,7 +4,7 @@ import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoS
 const sampleVideo = new URL('./sample-capture.webm', import.meta.url).href;
 // 'takes' opens the library session with two takes; 'recording-take' records its take 2.
 // 'window-closed': the window listed as Design review has closed, so Record more refuses it.
-export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'window-closed';
+export type Scenario = 'fresh' | 'recording' | 'processing' | 'unavailable' | 'setup' | 'takes' | 'recording-take' | 'window-closed' | 'camera-sources' | 'camera-blocked' | 'camera-no-frame' | 'camera-no-viewer';
 let projects: Project[] = [];
 let recordings: Session[] = [];
 let markers: Marker[] = [];
@@ -33,6 +33,7 @@ export function configureLanguageModel(language: Language | undefined, state: Mo
   settings = { ...settings, language };
   modelState = { ...state };
 }
+let cameraAttempts = 0;
 const clone = <T,>(value: T): T => structuredClone(value);
 const find = (id: string) => {
   const session = recordings.find(item => item.id === id);
@@ -54,6 +55,7 @@ export function configureScenario(next: Scenario) {
   settings = {};
   modelState = { state: 'ready', receivedBytes: 0 };
   sequence = 0;
+  cameraAttempts = 0;
   status = { state: 'idle' };
   if (next === 'recording' || next === 'processing') {
     recordings[0] = { ...recordings[0], status: next, sourceId: 'monitor:1', microphoneId: 'microphone' };
@@ -87,7 +89,12 @@ export const backend = {
   },
   markers: async () => clone(markers),
   status: async () => clone(status),
-  sources: async (): Promise<CaptureSource[]> => [
+  sources: async (): Promise<CaptureSource[]> => scenario.startsWith('camera-') ? [
+    { id: 'avfoundation:0', name: 'FaceTime HD Camera', kind: 'camera', available: true },
+    { id: 'quest', name: 'Quest 3', kind: 'quest', available: true },
+    { id: 'avfoundation:1', name: 'Capture screen 0', kind: 'display', available: true },
+    { id: 'window:design', name: 'Design review — Figma', kind: 'window', available: true },
+  ] : [
     { id: 'monitor:1', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
     { id: 'window:design', name: 'Design review — Figma', kind: 'window', available: scenario !== 'unavailable' },
     { id: 'quest', name: 'Quest 3', kind: 'quest', available: scenario !== 'unavailable', detail: scenario === 'unavailable' ? 'Reconnect this device to resume its preview.' : undefined },
@@ -95,7 +102,17 @@ export const backend = {
   ],
   microphones: async (): Promise<Microphone[]> => [{ id: 'microphone', name: 'Studio microphone' }, { id: 'headset', name: 'Headset microphone' }],
   setup: async (): Promise<SetupStatus> => ({ ready: scenario !== 'setup', modelReady: scenario !== 'setup', issues: scenario === 'setup' ? ['Local speech model is missing.'] : [], dependencies: ['ffmpeg', 'ffprobe', 'whisper-cli', 'whisper-vad-speech-segments', 'adb', 'scrcpy'].map(name => ({ name, available: true })), languageModel: languageModel() }),
-  preview: async (_source: string, id: string) => ({ id, url: previewImage }),
+  preview: async (source: string, id: string) => {
+    if (source === 'avfoundation:0' && cameraAttempts++ === 0) {
+      if (scenario === 'camera-blocked') throw new Error('Camera access is blocked. Allow camera access in macOS System Settings, then retry.');
+      if (scenario === 'camera-no-frame') {
+        // A valid image with no intrinsic dimensions exercises the real first-frame watchdog.
+        return { id, url: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"/>') };
+      }
+      if (scenario === 'camera-no-viewer') throw new Error('Preview could not connect to its viewer. Select Retry to reconnect the preview.');
+    }
+    return { id, url: previewImage };
+  },
   stopPreview: async () => {},
   start: async (_project: string | null, _name: string | null, sourceId: string, microphoneId: string | null, systemAudio: boolean) => {
     const session: Session = { id: `sample-${++sequence}`, name: 'New recording', projectId: null, createdAt: date, durationMs: 0, status: 'recording', sourceId, microphoneId: microphoneId ?? undefined, systemAudio };

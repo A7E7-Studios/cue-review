@@ -2060,6 +2060,7 @@ pub fn start_muted(
                 .spawn()
                 .map_err(|e| e.to_string())?;
             ready_process(child, input, None, capture.epoch)
+                .map_err(|error| recording_startup_error(&config.source_id, error))
         } else {
             #[cfg(not(windows))]
             {
@@ -2451,6 +2452,16 @@ fn ffmpeg(command: std::process::Command) -> Result<(), String> {
         ))
     }
 }
+/// Keep the original capture failure and add recovery for the selected macOS
+/// input without assuming that permission denial caused it.
+fn recording_startup_error(source: &str, error: String) -> String {
+    if source.starts_with("avfoundation:") {
+        format!("{error}\nCheck Camera or Screen Recording access in macOS System Settings, close other apps using the source, then retry.")
+    } else {
+        error
+    }
+}
+
 fn ready_process(
     mut child: Child,
     input: PathBuf,
@@ -3050,6 +3061,42 @@ fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn avfoundation_startup_failures_keep_the_cause_and_offer_recovery() {
+        for cause in [
+            "Capture could not start (exit status: 1); see capture.log",
+            "Capture produced no frames; see capture.log",
+        ] {
+            let message = recording_startup_error("avfoundation:0", cause.into());
+            assert!(message.starts_with(cause), "{message}");
+            assert!(
+                message.contains("Camera or Screen Recording access"),
+                "{message}"
+            );
+            assert!(message.contains("macOS System Settings"), "{message}");
+            assert!(message.contains("close other apps"), "{message}");
+            assert!(message.ends_with("then retry."), "{message}");
+            assert!(
+                !message.contains("access is blocked"),
+                "a startup failure does not establish permission denial"
+            );
+        }
+    }
+
+    #[test]
+    fn other_recording_sources_keep_their_startup_errors_unchanged() {
+        let cause = "Capture produced no frames; see capture.log";
+        for source in [
+            "v4l2:/dev/video0",
+            "dshow:Camera",
+            "x11::0",
+            "android:serial",
+            "monitor:1",
+        ] {
+            assert_eq!(recording_startup_error(source, cause.into()), cause);
+        }
+    }
+
     #[test]
     fn source_identity_names_only_windows_and_displays_that_exist() {
         for id in [
