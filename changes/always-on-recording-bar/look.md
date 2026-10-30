@@ -53,9 +53,9 @@ Workspace, review, the session's source gone:
 ### Where the build differs from the board
 
 - **The source is locked in review.** The board draws the review source picker open; the build
-  shows the session's own source, dimmed and disabled, titled "Another source for Record more comes
-  with separate take videos", because a take still records the session's source until the separate
-  take videos change lands.
+  shows the session's own source, dimmed and locked, titled "Record more records this session's own
+  source", because a take still records the session's source until the separate take videos
+  change lands.
 - **A gone source is refused under the bar.** The board's source-gone state shows a warning in the
   picker ("Choose a source") with the source list open; the build shows the refusal under the bar,
   with New recording and Dismiss, until separate take videos let a take choose another source.

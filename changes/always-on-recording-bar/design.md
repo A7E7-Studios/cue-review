@@ -17,7 +17,8 @@ the session's source.
 |---|---|---|---|
 | One component or three | `CaptureControls` takes the dock's shape and serves a draft and review (`recordLabel` Record / Record more); `RecordingDock` stays for a take recording, in the same place and shape | One new `RecordingBar` with three modes: merges two tested components (picker focus, popovers, container steps) for no visible gain | — |
 | Where it sits | Centred under the video in a draft; its own row under the playback row in review; the dock in that row's place while recording | In the playback row (direction B), pinned to the bottom (direction C): the owner picked A | `changes/always-on-recording-bar/look.md` |
-| The source for Record more | The bar's source picker shows the session's source, locked (disabled, titled "Another source for Record more comes with separate take videos"); `CaptureControls` gets a `sourceLocked` prop so unlocking it is one prop | Normalising another source into the combined video: the owner keeps each take's video apart; an unlocked picker that capture would ignore | owner's answer in the audio batch (Q5) |
+| The source for Record more | The bar's source picker shows the session's source, locked (focusable but inert, `aria-disabled`, titled and described "Record more records this session's own source"); `CaptureControls` gets a `sourceLocked` prop so unlocking it is one prop | Normalising another source into the combined video: the owner keeps each take's video apart; an unlocked picker that capture would ignore | owner's answer in the audio batch (Q5) |
+| Naming the locked source | The listed name only for ids that cannot pass to another source; a `window:` or `monitor:` id gets the window title stored in `sourceIdentity`, or "Original source" | The listed name for any listed id: after a restart it can be another window or display; comparing identities in the frontend: the listing carries no process id, window class or display device | `docs/ARCHITECTURE.md`, Source identity |
 | A gone source | The `SOURCE_GONE` refusal shows under the bar as an alert with New recording and Dismiss, as it did beside the pill | A picker that asks for another source: lands with separate take videos | — |
 | Record's colour | The recording red, the same as Stop (`--color-stop`, `#D7333A`): white text on it is 4.7:1, on `--color-record` (`#E5484D`) only 3.9:1 | Accent purple: Q14 settled red | owner, Q14 |
 | A microphone level before recording | Not drawn: the meter appears once a take records | A level check in the picker needs a microphone monitor in the backend (the capture domain) | owner, Q15 |
@@ -35,7 +36,8 @@ the session's source.
 
 | Scenario or logic | Test |
 |---|---|
-| Starting a new recording from the bar | `src/workspace/CaptureControls.test.tsx`, new |
+| Starting a new recording from the bar | `src/workspace/CaptureControls.test.tsx`, new; `src/App.test.tsx::recording and processing`, new |
+| The locked source's name | `src/App.test.tsx::record more`, new |
 | Recording more from the bar | `src/App.test.tsx::record more`, changed |
 | The original source is gone | `src/App.test.tsx::record more`, changed: the alert sits under the bar |
 | The bar while a take records | `src/App.test.tsx::record more`, existing |

@@ -6,8 +6,12 @@ export type TakeStatus = 'recording' | 'finalizing' | 'swapping' | 'transcribing
 export interface Take { index: number; offsetMs: number; durationMs: number; status: TakeStatus; folder: string; sourceId?: string; microphoneId?: string; systemAudio: boolean }
 /** Start of a take on the combined timeline, for the "Take N · m:ss" divider. */
 export interface TakeMark { index: number; startMs: number }
-/** `takes` is absent for sessions recorded before takes existed. */
-export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[] }
+/** What a `window:` or `monitor:` source id named at the session's first capture (docs/ARCHITECTURE.md, Source identity). */
+export type SourceIdentity =
+  | { kind: 'window'; title: string; process: string; class: string; pid?: number; processCreatedMs?: number }
+  | { kind: 'display'; device: string; left: number; top: number; right: number; bottom: number };
+/** `takes` is absent for sessions recorded before takes existed; `sourceIdentity` for sessions recorded before identities and for other sources. */
+export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; sourceIdentity?: SourceIdentity; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[] }
 export interface Word { text: string; startMs: number; endMs: number; seekMs?: number }
 export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
 export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string; takes?: TakeMark[] }

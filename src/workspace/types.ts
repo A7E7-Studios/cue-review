@@ -159,8 +159,8 @@ export interface CaptureControlsProps {
   /** Disables the source picker (recording or busy). */
   locked: boolean;
   /**
-   * Review: the picker shows the session's own source, disabled and titled SOURCE_LOCKED, because a
-   * take records the session's source until separate take videos let it come from another one.
+   * Review: the picker shows the session's own source, because a take records the session's source.
+   * It stays focusable but inert (aria-disabled), titled and described by SOURCE_LOCKED.
    */
   sourceLocked?: boolean;
   /** Disables the microphone picker. */

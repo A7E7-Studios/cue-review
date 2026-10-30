@@ -39,7 +39,9 @@ export function configureScenario(next: Scenario) {
     status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
   }
   // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
-  if (next === 'takes' || next === 'recording-take' || next === 'source-gone') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
+  if (next === 'takes' || next === 'recording-take') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
+  // A closed window: its id is no longer listed, so the recording bar names it the original source.
+  if (next === 'source-gone') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo, sourceId: 'window:closed' };
   if (next === 'stuck-take') {
     const session: Session = { ...clone(twoTakeSession), videoPath: sampleVideo, durationMs: takeTwoStartMs, status: 'error', error: stuckTakeError };
     session.takes![1].status = 'swapping';

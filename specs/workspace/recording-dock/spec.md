@@ -46,7 +46,7 @@ record right beside it.
 - **AND** the bar keeps to one row as the window narrows, showing the pickers as icons and then
   Record as an icon, each still named for screen readers
 - **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar is one named bar holding the pickers and Record in a draft
-- **PROOF** test: src/App.test.tsx::keyboard interaction opens device choices directly, focuses the selected option, and restores focus on Escape
+- **PROOF** test: src/App.test.tsx::recording and processing starts a new recording with the display and microphone chosen in the recording bar
 - **PROOF** desk: open
 
 ### Requirement: Record more uses the bar
@@ -60,11 +60,29 @@ records the session's own source.
 - **WHEN** the reviewer chooses another microphone in the bar under the playback controls and
   selects Record more
 - **THEN** a new take of the session starts with that microphone and the session's display
-- **AND** the bar shows Display 1 disabled, titled "Another source for Record more comes with
-  separate take videos", and the playback row holds no Record more
+- **AND** the bar shows the session's source locked, titled and described "Record more records
+  this session's own source", reachable with Tab but opening no picker, and the playback row
+  holds no Record more
 - **PROOF** test: src/App.test.tsx::record more records more from the bar under the playback controls, with its microphone and the session's locked source
 - **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar offers Record more in review, with the source locked and its reason, and the microphone still to choose
+- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar keeps the locked source focusable while Record more is busy
 - **PROOF** test: src/workspace/PlaybackBar.test.tsx::PlaybackBar leaves Record more and its refusal to the recording bar under it
+- **PROOF** desk: open
+
+### Requirement: The locked source names only the session's own source
+The app SHALL name the session's source in the review bar by its listed name only when its id
+cannot have passed to another source; a window or display (a `window:` or `monitor:` id) is
+named by the title the session stored for its window, or "Original source" for a display or a
+window with no stored title, because such an id can name another window or display after a
+restart and the listing cannot tell them apart.
+
+#### Scenario: The session's window handle now names another window
+- **GIVEN** a ready session recorded from a window, whose handle now names another listed window
+- **WHEN** the reviewer opens it
+- **THEN** the bar names its source by the window title the session stored, not by the listed
+  window
+- **AND** a session recorded from a display that is still listed shows "Original source"
+- **PROOF** test: src/App.test.tsx::record more never names the session's source after a listed window or display that may only share its id
 - **PROOF** desk: open
 
 ### Requirement: A gone display is refused under the bar

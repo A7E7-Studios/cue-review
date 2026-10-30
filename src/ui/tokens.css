@@ -95,7 +95,6 @@
   --color-sheet: #FFFFFF;
   --color-sheet-edge: #DFE2E7;
   --color-divider: #EEEFF2;
-  --color-control-divider: #E4E4E9;
   --color-panel: #EEF0F4;
   --shadow-panel: inset 0 0 0 1px rgba(255, 255, 255, .7), 0 0 0 1px rgba(24, 24, 27, .06), 0 6px 18px rgba(16, 24, 40, .06);
   --color-pill: #F4F4F7;
@@ -134,7 +133,6 @@
   /* The macOS toolbar's search field. */
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #E4E6EB;
-  --color-record-disabled: #C9A3A6;
 
   /* Window controls (Windows) */
   --color-window-control-hover: rgba(24, 24, 27, .06);
@@ -222,7 +220,6 @@
   --color-sheet: #1A1A1E;
   --color-sheet-edge: #2C2C32;
   --color-divider: #26262B;
-  --color-control-divider: #34343B;
   --color-panel: #202025;
   --shadow-panel: inset 0 0 0 1px rgba(255, 255, 255, .04), 0 0 0 1px rgba(0, 0, 0, .4), 0 6px 18px rgba(0, 0, 0, .3);
   --color-pill: #28282E;
@@ -252,7 +249,6 @@
   --color-control-ring: #34343B;
   --color-toolbar-search: var(--color-pill);
   --color-button-disabled: #232328;
-  --color-record-disabled: #6B4446;
 
   --color-window-control-hover: rgba(255, 255, 255, .08);
 

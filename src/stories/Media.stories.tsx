@@ -21,6 +21,8 @@ const sources: CaptureSource[] = [
   { id: 'quest', name: 'Quest 3', kind: 'quest', available: true },
   { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false, detail: 'Reconnect this camera and refresh, or choose another source.' },
 ];
+/** The session's window in 'source-gone': it has closed, so it is no longer listed and the bar names it the original source. */
+const closedWindow: CaptureSource = { id: 'window:closed', name: 'Original source', kind: 'window', available: false };
 const microphones = [{ id: 'microphone', name: 'Studio microphone' }, { id: 'headset', name: 'Headset microphone' }];
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const recordingTakeTwo: Transcript = { takes: [{ index: 1, startMs: 0 }], segments: [...takeOneSegments, ...takeTwoLiveTranscript.segments] };
@@ -87,7 +89,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
           onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
           onToggleFocus={() => setFocused(value => !value)}/>
-        <CaptureControls {...bar} review sourceLocked source={sources[0]} systemAudio={false} onSelectSource={() => {}} onSystemAudio={() => {}}
+        <CaptureControls {...bar} review sourceLocked source={scenario === 'source-gone' ? closedWindow : sources[0]} systemAudio={false} onSelectSource={() => {}} onSystemAudio={() => {}}
           recordLabel="Record more" recordDisabled={scenario === 'processing'}
           onRecord={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
           recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>

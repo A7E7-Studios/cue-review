@@ -846,6 +846,21 @@ describe('recording and processing', () => {
     expect(await screen.findByRole('button', { name: 'Seek to batch at 0:13' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: NAMES.stop })).toBeEnabled();
   });
+  it('starts a new recording with the display and microphone chosen in the recording bar', async () => {
+    backend.sources.mockResolvedValue([{ id: 'display1', name: 'Display 1', kind: 'display', available: true }, { id: 'display2', name: 'Display 2', kind: 'display', available: true }]);
+    const user = await ready();
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    await user.click(bar.getByRole('button', { name: 'Display 1' }));
+    await chooseSource(user, 'Display 2');
+    await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
+    await chooseMicrophone(user, 'mic2');
+    expect(bar.getByRole('button', { name: 'Display 2' })).toBeVisible();
+    expect(bar.getByRole('button', { name: 'Headset microphone' })).toBeVisible();
+    await user.click(bar.getByRole('button', { name: NAMES.record }));
+    await screen.findByRole('button', { name: NAMES.stop });
+    expect(backend.start).toHaveBeenCalledOnce();
+    expect(backend.start).toHaveBeenCalledWith(null, null, 'display2', 'mic2', false, false);
+  });
   it('passes selected USB source, selected microphone, system audio and mute independently, then loads the completed transcript', async () => {
     const user = await ready();
     await user.click(screen.getByRole('button', { name: 'Display 1' }));
@@ -1081,8 +1096,12 @@ describe('record more', () => {
     expect(within(screen.getByRole('group', { name: NAMES.playback })).queryByRole('button', { name: NAMES.recordMore })).not.toBeInTheDocument();
     const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
     const source = bar.getByRole('button', { name: 'Display 1' });
-    expect(source).toBeDisabled();
-    expect(source).toHaveAttribute('title', 'Another source for Record more comes with separate take videos');
+    expect(source).toHaveAttribute('aria-disabled', 'true');
+    expect(source).toHaveAccessibleDescription('Record more records this session\'s own source');
+    // Focusable, so the keyboard reaches it, but it opens no picker.
+    source.focus(); await user.keyboard('{Enter}');
+    expect(source).toHaveFocus();
+    expect(screen.queryByRole('group', { name: NAMES.captureSources })).not.toBeInTheDocument();
     await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
     await chooseMicrophone(user, 'mic2');
     await user.click(bar.getByRole('button', { name: NAMES.recordMore }));
@@ -1096,7 +1115,26 @@ describe('record more', () => {
     sessions = [{ ...newSession(), sourceId: 'window:42' }];
     await review();
     const source = within(screen.getByRole('group', { name: NAMES.recordingBar })).getByRole('button', { name: 'Original source' });
-    expect(source).toBeDisabled();
+    expect(source).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
+  });
+  it('never names the session\'s source after a listed window or display that may only share its id', async () => {
+    // After a restart a window handle or display number can name something else, and the listing cannot tell.
+    backend.sources.mockResolvedValue([
+      { id: 'monitor:1', name: 'Display 1 — DELL U2720Q', kind: 'display', available: true },
+      { id: 'window:42', name: 'Inbox — Mail', kind: 'window', available: true, detail: 'Mail.exe' },
+    ]);
+    const identity = { kind: 'window' as const, title: 'Design review — Figma', process: 'Figma.exe', class: 'Chrome_WidgetWin_1', pid: 4120 };
+    sessions = [{ ...newSession(), sourceId: 'window:42', sourceIdentity: identity }, { ...newSession('s3'), name: 'Review Beta', sourceId: 'monitor:1' }];
+    const user = await review();
+    const bar = () => within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    // A window is named by the title the session stored, not by the window that has its handle now.
+    expect(bar().getByRole('button', { name: 'Design review — Figma' })).toHaveAttribute('aria-disabled', 'true');
+    expect(bar().queryByRole('button', { name: 'Inbox — Mail' })).not.toBeInTheDocument();
+    // A display stores no name: it is the original source.
+    await open(user, /Review Beta/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    expect(bar().getByRole('button', { name: 'Original source' })).toHaveAttribute('aria-disabled', 'true');
+    expect(bar().queryByRole('button', { name: /DELL/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
   });
   it('shows a source that is gone under the recording bar, with New recording as the way forward', async () => {

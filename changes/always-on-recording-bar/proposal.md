@@ -32,6 +32,8 @@ with the display and microphone in it, for a new recording, for Record more and 
   (scenario: Recording more from the bar).
 - A gone source is refused under the bar, with New recording (scenario: The session's display is
   gone).
+- The locked picker never names the session's window or display by a listed source that may only
+  share its id (scenario: The session's window handle now names another window).
 - While a take records the bar becomes the dock it is today, Stop where Record was, the pickers
   locked (scenario: Recording a later take, unchanged).
 
@@ -63,7 +65,11 @@ with the display and microphone in it, for a new recording, for Record more and 
 - Record is drawn in Stop's red (`#D7333A`), not the record dot's `#E5484D`: white text on
   `#E5484D` is 3.9:1, under the 4.5:1 that 14px text needs; on Stop's red it is 4.7:1.
 - When the session's source is no longer listed (a closed window), the locked picker reads
-  "Original source".
+  "Original source". A listed `window:` or `monitor:` id may name another window or display after a
+  restart, and the listing cannot tell, so the picker names a window by the title the session
+  stored and a display "Original source": in the Windows app a session recorded from a display
+  reads "Original source" in review, even while that display is attached. Naming displays needs the
+  listing to carry the display device, a backend change.
 - In review the bar has no live preview of the source it will record: the video area keeps
   playback. The picker names the source; a preview would replace the video being reviewed.
 

@@ -35,8 +35,25 @@ import { useTheme } from './app/useTheme';
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
 const SPEEDS = [1, 1.5, 2, 0.75];
 const STARTING_TAKE: MediaEmptyState = { title: 'Starting the next take…' };
-/** The recording bar's source in review when the session's source is no longer listed. */
+/** The recording bar's source in review when the session's source is gone, or the listing cannot say it is the same one. */
 const ORIGINAL_SOURCE = 'Original source';
+/** Ids a restart can hand to another window or display (docs/ARCHITECTURE.md, Source identity). */
+const REUSABLE_SOURCE_ID = /^(window|monitor):/;
+/**
+ * The session's own source, which Record more records, as the recording bar in review names it. A listed
+ * source keeps its listed name only when its id cannot have passed to another source: a `window:` or
+ * `monitor:` id can name another window or display after a restart, and the listing lacks what tells
+ * them apart (the owning process, the display device), so such a source is named by the title the
+ * session stored for its window, or as the original source. A source that is no longer listed is the
+ * original source.
+ */
+function sessionSourceOf(session: Session, sources: CaptureSource[]): CaptureSource {
+  const id = session.sourceId ?? '';
+  const listed = sources.find(item => item.id === id);
+  if (listed && !REUSABLE_SOURCE_ID.test(id)) return listed;
+  const stored = session.sourceIdentity?.kind === 'window' ? session.sourceIdentity.title.trim() : '';
+  return { id, name: listed && stored ? stored : ORIGINAL_SOURCE, kind: id.startsWith('window:') ? 'window' : 'display', available: !!listed };
+}
 /** Runtime status polling: every 700 ms, backing off up to 10 s while the backend keeps failing. */
 const POLL_MS = 700;
 const POLL_MAX_MS = 10000;
@@ -135,14 +152,12 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
   /**
-   * Record more itself unloads the video while its take starts. That is a busy moment for the pill
+   * Record more itself unloads the video while its take starts. That is a busy moment for Record more
    * (aria-disabled), not a reason to disable it, so focus stays on it through a refusal.
    */
   const startingTake = busy && !!session && heldMedia === session.id && !takeInFlight(session);
   const canRecordMore = !!session && !draft && settled(session) && (!!videoSrc || startingTake) && devicesReady;
-  /** The session's own source, which Record more records: named as listed, or as the original source once it is gone. */
-  const sessionSource: CaptureSource | undefined = session ? sources.find(item => item.id === session.sourceId)
-    ?? { id: session.sourceId ?? '', name: ORIGINAL_SOURCE, kind: 'display', available: false } : undefined;
+  const sessionSource = session ? sessionSourceOf(session, sources) : undefined;
   useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || !!discarding || settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
@@ -621,7 +636,7 @@ export default function App({ platform: requested }: AppProps = {}) {
         <PlaybackBar platform={os} timeMs={time} durationMs={duration} segments={shownTranscript.segments} takes={marks} onSeek={seek}
           playing={playing} canPlay={!!videoSrc} onTogglePlay={() => void togglePlay()} speed={speed} onCycleSpeed={cycleSpeed}
           focused={focusVideo} onToggleFocus={() => setFocusVideo(value => !value)}/>
-        {/* A take records the session's own source, so its picker is locked until separate take videos let a take choose another. */}
+        {/* A take records the session's own source, so its picker is locked. */}
         <CaptureControls {...bar} review sourceLocked sources={sourceOptions} source={sessionSource} systemAudio={session?.systemAudio ?? false}
           onSelectSource={() => {}} onSystemAudio={() => {}}
           recordLabel={NAMES.recordMore} recordDisabled={!canRecordMore || loading || processing || captureBlocked} recordBusy={busy} onRecord={() => void recordMore()}
