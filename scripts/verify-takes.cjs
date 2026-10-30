@@ -6,7 +6,8 @@
 // position is (cursor.jsonl). Nothing leaves the machine.
 //
 // It then checks: one session with two takes and their offsets; video.mp4 lasting about the
-// sum of the takes (ffprobe); the "Take 2" dock while recording and the "Take 2 · m:ss"
+// sum of the takes (ffprobe); the take 2 dock (its timer named "Take 2 elapsed time", no take label
+// or caption) and the live divider while recording, the "Take 2 · m:ss"
 // divider afterwards; the take divider in `cue transcript ID --segments`; and cursor.jsonl in
 // both take folders. Recordings are stopped on failure. Prints a JSON summary, writes it to
 // test-results/takes-verification.json and exits 1 on failure.
@@ -94,7 +95,8 @@ async function recordTake(take, button) {
   const observed = { takeIndex: status.takeIndex ?? null, takeOffsetMs: status.takeOffsetMs ?? null, dockText };
   if (take >= 2) {
     assert(status.takeIndex === take, `Recording status reports take ${status.takeIndex}, not ${take}`);
-    assert(dockText.includes(`Take ${take}`), `The dock does not show "Take ${take}": ${dockText}`);
+    assert(!/Take \d|Adding to this session/.test(dockText), `The dock repeats the take: ${dockText}`);
+    assert(await page.getByText(/Adding to this session/).count() === 0, 'A caption under the dock repeats the take');
     observed.liveDivider = await transcriptPane().getByText(`Take ${take} · recording`, { exact: true }).count() > 0;
     observed.copyForAgentDisabled = await page.getByRole('button', { name: 'Copy for agent', exact: true }).evaluateAll(buttons => buttons.every(button => button.disabled));
   }
