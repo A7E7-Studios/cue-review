@@ -117,7 +117,7 @@ The packages include `cue.exe` on Windows and `cue` on macOS/Linux next to the a
 | `cue moments ID [--frames [--max-width N] [--mark-cursor]]` | Spoken pointing moments ("here", "there", "this", "these", "that", "those", "see", "look at", …) with the cursor and the clicks within 1 s: `[{segmentId, term, phrase, seekMs, startMs, endMs, text, cursor, clicks}]`, plus `frame` with `--frames`. |
 | `cue rename ID NAME` | Rename a session. Works while the app is open. |
 | `cue transcribe ID` | Transcribe a finished session again, locally. |
-| `cue setup [--install]` | Show the transcription setup; `--install` downloads the runtime and model. |
+| `cue setup [--install]` | Show the transcription setup, with the chosen language's model as `languageModel`; `--install` downloads the runtime, the base model and that language's model (about 488 MB). |
 | `cue sources`, `cue microphones` | List capture sources and microphones. |
 | `cue record --source ID --seconds N [--project ID] [--mic ID] [--system-audio] [--name TEXT]` | Record and transcribe a new session. |
 

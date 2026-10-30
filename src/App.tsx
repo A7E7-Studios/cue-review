@@ -139,6 +139,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   const pollError = useRef('');
   /** Whether a dialog is open, for errors that arrive from outside it. */
   const dialogOpen = useRef(false);
+  /** Whether Settings is open: a language model reply that arrives after it closed is dropped. */
+  const settingsShown = useRef(false);
+  /** Setup reads sent, and the latest one whose reply is shown, so an older reply never replaces a newer one. */
+  const setupReads = useRef({ sent: 0, shown: 0 });
 
   const recording = status.state === 'recording';
   /** The runtime transcribes one job at a time and refuses a new capture meanwhile, whichever recording it is. */
@@ -160,7 +164,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
   const canRecordMore = !!session && !draft && settled(session) && !!videoSrc && devicesReady;
-  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; });
+  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; settingsShown.current = settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
 
@@ -622,12 +626,23 @@ export default function App({ platform: requested }: AppProps = {}) {
   const reportFromSettings = (problem: unknown) => (dialogOpen.current ? reportInDialog : report)(problem);
   const install = async () => {
     setInstalling(true); setDialogError('');
-    try { await backend.installTranscription(); setSetup(await backend.setup()); setNotice('Transcription tools installed'); }
+    try { await backend.installTranscription(); await readSetup(backend.setup, setSetup); setNotice('Transcription tools installed'); }
     catch (problem) { reportFromSettings(problem); }
     finally { setInstalling(false); }
   };
-  /** Settings reads it on opening, on Check again, after a language change and each second while the language model downloads. */
-  const refreshSetup = () => void backend.setup().then(setSetup).catch(reportFromSettings);
+  /** Shows a setup reply unless a reply to a later read, full or the language model alone, is already shown. */
+  const readSetup = async <T,>(read: () => Promise<T>, show: (value: T) => void, wanted = () => true) => {
+    const ticket = ++setupReads.current.sent;
+    const value = await read();
+    if (ticket < setupReads.current.shown || !wanted()) return;
+    setupReads.current.shown = ticket;
+    show(value);
+  };
+  /** Settings reads it on opening and on Check again. */
+  const refreshSetup = () => void readSetup(backend.setup, setSetup).catch(reportFromSettings);
+  /** The light read Settings polls while the language model downloads: only the model changes, and only while Settings is open. */
+  const pollLanguageModel = () => readSetup(backend.languageModel,
+    model => setSetup(current => current && { ...current, languageModel: model ?? undefined }), () => settingsShown.current);
   const openSettings = () => {
     setDialogError(''); setSettingsOpen(true);
     backend.settings().then(setSettings).catch(reportFromSettings);
@@ -804,7 +819,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={refreshSetup}
-      onRefreshSetup={refreshSetup} onDownloadLanguageModel={backend.downloadLanguageModel}
+      onPollLanguageModel={pollLanguageModel} onDownloadLanguageModel={backend.downloadLanguageModel}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
     <NameDialog state={dialog} busy={busy} error={dialog ? dialogError : ''} fallbackFocusRef={sheet}
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>

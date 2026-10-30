@@ -207,93 +207,192 @@ fn choose_model(models: &Path, language: &str) -> &'static SpeechModel {
 /// The background download of the chosen language's model.
 #[derive(Clone, Debug, Default)]
 struct Fetch {
+    /// The model being or last downloaded, by name.
     model: &'static str,
     received: u64,
     running: bool,
+    /// Set when the chosen language changed during a download: the running
+    /// download stops and the loop moves on to the new language's model.
+    cancel: bool,
     error: Option<String>,
 }
 fn fetch_state() -> &'static Mutex<Fetch> {
     static STATE: OnceLock<Mutex<Fetch>> = OnceLock::new();
     STATE.get_or_init(Default::default)
 }
+fn locked(state: &Mutex<Fetch>) -> std::sync::MutexGuard<'_, Fetch> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
 fn chosen_language() -> &'static str {
     settings::language(&settings::load(&data_root()))
+}
+fn models_dir() -> PathBuf {
+    data_root().join("models")
+}
+/// Downloads a model into a models folder, reporting the bytes received to a
+/// progress callback that returns false to stop it.
+type Downloader<'a> = &'a dyn Fn(&SpeechModel, &Path, &dyn Fn(u64) -> bool) -> Result<(), String>;
+/// Takes the fetch for this caller, or returns false when one is running. A
+/// running fetch whose model is no longer `wanted` is told to move on.
+fn claim(state: &Mutex<Fetch>, wanted: &SpeechModel) -> bool {
+    let mut fetch = locked(state);
+    if fetch.running {
+        if fetch.model != wanted.name {
+            fetch.cancel = true;
+        }
+        return false;
+    }
+    *fetch = Fetch {
+        model: wanted.name,
+        running: true,
+        ..Default::default()
+    };
+    true
+}
+/// Downloads the chosen language's model until it is installed, asking
+/// `chosen` again after each download, so a language chosen meanwhile gets
+/// its model too. Stops at the first failure of the model still chosen, and
+/// releases the fetch.
+fn fetch_loop(
+    models: &Path,
+    chosen: &dyn Fn() -> &'static str,
+    download: Downloader<'_>,
+    state: &Mutex<Fetch>,
+) -> Result<(), String> {
+    let result = loop {
+        let model = language_model(chosen());
+        if model.installed_in(models) {
+            break Ok(());
+        }
+        {
+            let mut fetch = locked(state);
+            fetch.model = model.name;
+            fetch.received = 0;
+            fetch.cancel = false;
+            fetch.error = None;
+        }
+        let outcome = download(model, models, &|received| {
+            let mut fetch = locked(state);
+            fetch.received = received;
+            !fetch.cancel
+        });
+        if let Err(error) = outcome {
+            if language_model(chosen()).name == model.name {
+                locked(state).error = Some(error.clone());
+                break Err(error);
+            }
+        }
+    };
+    locked(state).running = false;
+    result
+}
+/// The model's download, with failures said plainly.
+fn download_model(
+    model: &SpeechModel,
+    models: &Path,
+    progress: &dyn Fn(u64) -> bool,
+) -> Result<(), String> {
+    fs::create_dir_all(models).map_err(|e| e.to_string())?;
+    download_checked(
+        &model.url(),
+        &model.path_in(models),
+        model.size,
+        model.sha256,
+        progress,
+    )
+    .map_err(|error| {
+        eprintln!("The {} model's download failed: {error}", model.name);
+        plain_download_error(&error)
+    })
+}
+fn plain_download_error(error: &str) -> String {
+    if error.contains("SHA-256") {
+        "The downloaded file was damaged, so it was removed.".into()
+    } else if error.contains("error sending request") {
+        "Hugging Face could not be reached.".into()
+    } else if error.starts_with("Download failed") || error.starts_with("The download stopped") {
+        "The download was cut off.".into()
+    } else {
+        format!("The model could not be saved: {error}")
+    }
+}
+/// Removes partial downloads that a closed app left behind.
+fn sweep_partial(models: &Path) {
+    for entry in fs::read_dir(models).into_iter().flatten().flatten() {
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "download")
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 /// Downloads the chosen language's model unless it is installed, blocking,
 /// with its progress in [`setup_status`]. Used by `cue setup --install`.
 pub fn fetch_language_model() -> Result<(), String> {
-    let model = language_model(chosen_language());
-    let models = data_root().join("models");
-    if std::env::var_os("CUEREVIEW_MODEL").is_some() || model.installed_in(&models) {
+    if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return Ok(());
     }
-    {
-        let mut state = fetch_state().lock().unwrap_or_else(|e| e.into_inner());
-        if state.running {
-            return Err("The language model is already being downloaded.".into());
-        }
-        *state = Fetch {
-            model: model.name,
-            running: true,
-            ..Default::default()
-        };
+    let models = models_dir();
+    if !claim(fetch_state(), language_model(chosen_language())) {
+        return Err("The language model is already being downloaded.".into());
     }
-    fs::create_dir_all(&models).map_err(|e| e.to_string())?;
-    let result = download_checked(
-        &model.url(),
-        &model.path_in(&models),
-        model.size,
-        model.sha256,
-        &|received| {
-            fetch_state()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .received = received
-        },
-    );
-    let mut state = fetch_state().lock().unwrap_or_else(|e| e.into_inner());
-    state.running = false;
-    state.error = result.as_ref().err().cloned();
-    result
+    sweep_partial(&models);
+    fetch_loop(&models, &chosen_language, &download_model, fetch_state())
 }
-/// Starts [`fetch_language_model`] on its own thread, when transcription is
-/// set up (base installed) and the chosen language's model is not.
-pub fn start_language_model_download() {
-    if speech_model_ready() {
-        std::thread::spawn(|| {
-            let _ = fetch_language_model();
-        });
+/// Starts downloading the chosen language's model on its own thread, unless
+/// it is installed. A download already running moves on to it. Refused until
+/// Install transcription has put base and the speech tools in place.
+pub fn start_language_model_download() -> Result<(), String> {
+    if std::env::var_os("CUEREVIEW_MODEL").is_some() {
+        return Ok(());
     }
+    if !speech_model_ready() {
+        return Err(
+            "Install transcription first, then the language model downloads by itself.".into(),
+        );
+    }
+    let models = models_dir();
+    let wanted = language_model(chosen_language());
+    if wanted.installed_in(&models) || !claim(fetch_state(), wanted) {
+        return Ok(());
+    }
+    sweep_partial(&models);
+    std::thread::spawn(move || {
+        let _ = fetch_loop(&models, &chosen_language, &download_model, fetch_state());
+    });
+    Ok(())
 }
-fn language_model_status() -> Option<LanguageModel> {
+/// The chosen language's model and its download, for Settings and `cue setup`.
+pub fn language_model_status() -> Option<LanguageModel> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return None;
     }
-    let language = chosen_language();
+    let fetch = locked(fetch_state()).clone();
+    Some(status_of(&models_dir(), chosen_language(), &fetch))
+}
+fn status_of(models: &Path, language: &str, fetch: &Fetch) -> LanguageModel {
     let model = language_model(language);
-    let models = data_root().join("models");
-    let fetch = fetch_state()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
     let ours = fetch.model == model.name;
-    let (state, received, error) = if model.installed_in(&models) {
+    let (state, received, error) = if model.installed_in(models) {
         ("ready", model.size, None)
-    } else if ours && fetch.running {
-        ("downloading", fetch.received, None)
+    } else if fetch.running {
+        // A download of the other language's model moves on to this one next.
+        ("downloading", if ours { fetch.received } else { 0 }, None)
     } else if ours && fetch.error.is_some() {
-        ("failed", 0, fetch.error)
+        ("failed", 0, fetch.error.clone())
     } else {
         ("missing", 0, None)
     };
-    Some(LanguageModel {
+    LanguageModel {
         language: language.into(),
         model: model.name.into(),
         state: state.into(),
         received_bytes: received,
         total_bytes: model.size,
         error,
-    })
+    }
 }
 pub fn model_path() -> PathBuf {
     std::env::var_os("CUEREVIEW_MODEL")
@@ -374,7 +473,7 @@ pub fn setup_status() -> SetupStatus {
     }
 }
 fn download(url: &str, target: &Path, expected: Option<&str>) -> Result<(), String> {
-    download_to(url, target, None, expected, &|_| ())
+    download_to(url, target, None, expected, &|_| true)
 }
 /// Downloads a model of known size and SHA-256, reporting the bytes received.
 fn download_checked(
@@ -382,7 +481,7 @@ fn download_checked(
     target: &Path,
     size: u64,
     sha256: &str,
-    progress: &dyn Fn(u64),
+    progress: &dyn Fn(u64) -> bool,
 ) -> Result<(), String> {
     download_to(url, target, Some(size), Some(sha256), progress)
 }
@@ -393,7 +492,7 @@ fn download_to(
     target: &Path,
     size: Option<u64>,
     sha256: Option<&str>,
-    progress: &dyn Fn(u64),
+    progress: &dyn Fn(u64) -> bool,
 ) -> Result<(), String> {
     let temp = target.with_extension("download");
     let result = (|| {
@@ -421,7 +520,9 @@ fn download_to(
             hash.update(&buf[..n]);
             out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             received += n as u64;
-            progress(received);
+            if !progress(received) {
+                return Err("The download was stopped.".into());
+            }
         }
         out.sync_all().map_err(|e| e.to_string())?;
         drop(out);
@@ -517,7 +618,9 @@ pub fn install_transcription() -> Result<SetupStatus, String> {
         if std::env::var_os("CUEREVIEW_MODEL").is_some() {
             return Err("The custom CUEREVIEW_MODEL file is missing or invalid. Correct that path or unset it to install the standard model.".into());
         }
-        download_checked(&BASE.url(), &model_path(), BASE.size, BASE.sha256, &|_| ())?;
+        download_checked(&BASE.url(), &model_path(), BASE.size, BASE.sha256, &|_| {
+            true
+        })?;
     }
     if !vad_model_ready() {
         if std::env::var_os("CUEREVIEW_VAD_MODEL").is_some() {
@@ -632,20 +735,133 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ggml-small.en.bin");
         let good = format!("{:x}", Sha256::digest(b"model bytes"));
-        let error =
-            download_checked(&serve_once(b"wrong bytes"), &target, 11, &good, &|_| ()).unwrap_err();
+        let error = download_checked(&serve_once(b"wrong bytes"), &target, 11, &good, &|_| true)
+            .unwrap_err();
         assert!(error.contains("SHA-256"), "{error}");
         let error =
-            download_checked(&serve_once(b"model"), &target, 11, &good, &|_| ()).unwrap_err();
+            download_checked(&serve_once(b"model"), &target, 11, &good, &|_| true).unwrap_err();
         assert!(error.contains("stopped after 5 of 11 bytes"), "{error}");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
         let received = std::sync::atomic::AtomicU64::new(0);
         download_checked(&serve_once(b"model bytes"), &target, 11, &good, &|n| {
-            received.store(n, std::sync::atomic::Ordering::Relaxed)
+            received.store(n, std::sync::atomic::Ordering::Relaxed);
+            true
         })
         .unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"model bytes");
         assert_eq!(received.into_inner(), 11);
+    }
+
+    /// A downloader that installs each model it is asked for, after calling
+    /// `during` once, and records the order.
+    fn installs<'a>(
+        order: &'a std::cell::RefCell<Vec<&'static str>>,
+        during: &'a dyn Fn(&'static str),
+    ) -> impl Fn(&SpeechModel, &Path, &dyn Fn(u64) -> bool) -> Result<(), String> + 'a {
+        move |model, models, progress| {
+            order.borrow_mut().push(model.name);
+            during(model.name);
+            if !progress(1000) {
+                return Err("The download was stopped.".into());
+            }
+            fs::File::create(model.path_in(models))
+                .unwrap()
+                .set_len(model.size)
+                .unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_language_chosen_during_a_download_gets_its_model() {
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let language = std::cell::Cell::new("en");
+        let order = std::cell::RefCell::new(Vec::new());
+        // German is chosen while small.en downloads: the start is refused but
+        // tells the running download to move on.
+        let during = |name: &'static str| {
+            if name == "small.en" {
+                language.set("de");
+                assert!(!claim(&state, language_model("de")));
+                let status = status_of(dir.path(), "de", &locked(&state));
+                assert_eq!(status.state, "downloading");
+            }
+        };
+        assert!(claim(&state, language_model("en")));
+        let chosen = || language.get();
+        fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small.en", "small"]);
+        assert!(SMALL.installed_in(dir.path()));
+        assert!(
+            !SMALL_EN.installed_in(dir.path()),
+            "the stopped download is not kept"
+        );
+        let fetch = locked(&state).clone();
+        assert!(!fetch.running);
+        assert_eq!(status_of(dir.path(), "de", &fetch).state, "ready");
+        assert_eq!(status_of(dir.path(), "en", &fetch).state, "missing");
+    }
+
+    #[test]
+    fn the_download_state_follows_the_fetch() {
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        assert_eq!(
+            status_of(dir.path(), "en", &locked(&state)).state,
+            "missing"
+        );
+        assert!(claim(&state, &SMALL_EN));
+        assert!(!claim(&state, &SMALL_EN), "one download at a time");
+        locked(&state).received = 5;
+        let downloading = status_of(dir.path(), "en", &locked(&state));
+        assert_eq!(
+            (downloading.state.as_str(), downloading.received_bytes),
+            ("downloading", 5)
+        );
+        let fail = |_: &SpeechModel, _: &Path, _: &dyn Fn(u64) -> bool| -> Result<(), String> {
+            Err("The download was cut off.".into())
+        };
+        let error = fetch_loop(dir.path(), &|| "en", &fail, &state).unwrap_err();
+        assert_eq!(error, "The download was cut off.");
+        let failed = status_of(dir.path(), "en", &locked(&state));
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error.as_deref(), Some("The download was cut off."));
+        assert_eq!(
+            status_of(dir.path(), "de", &locked(&state)).state,
+            "missing",
+            "another language's failure is not this one's"
+        );
+        // Try again claims it anew.
+        assert!(claim(&state, &SMALL_EN));
+        let order = std::cell::RefCell::new(Vec::new());
+        fetch_loop(dir.path(), &|| "en", &installs(&order, &|_| ()), &state).unwrap();
+        let ready = status_of(dir.path(), "en", &locked(&state));
+        assert_eq!(
+            (ready.state.as_str(), ready.received_bytes),
+            ("ready", SMALL_EN.size)
+        );
+    }
+
+    #[test]
+    fn download_failures_are_said_plainly_and_partial_files_swept() {
+        assert_eq!(
+            plain_download_error("Downloaded file failed its SHA-256 integrity check."),
+            "The downloaded file was damaged, so it was removed."
+        );
+        assert_eq!(
+            plain_download_error("Download failed: error sending request for url (https://x)"),
+            "Hugging Face could not be reached."
+        );
+        assert_eq!(
+            plain_download_error("The download stopped after 5 of 11 bytes."),
+            "The download was cut off."
+        );
+        let dir = models(&[&BASE]);
+        fs::write(dir.path().join("ggml-small.en.download"), b"part").unwrap();
+        sweep_partial(dir.path());
+        assert!(!dir.path().join("ggml-small.en.download").exists());
+        assert!(BASE.installed_in(dir.path()));
     }
 
     #[test]

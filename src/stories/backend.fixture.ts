@@ -12,8 +12,9 @@ let settings: Settings = {};
 let status: RecordingStatus = { state: 'idle' };
 let scenario: Scenario = 'fresh';
 let sequence = 0;
-// The chosen language's model, as `get_setup_status` reports it. A download the workshop starts
-// moves on with each status read; a configured one stays where it is, for a steady look.
+// The chosen language's model, as `get_setup_status` and `get_language_model` report it. A download
+// the workshop starts moves on with each read; a configured one stays where it is, for a steady look.
+// Before transcription is installed ('setup'), the model waits and its download is refused.
 const MODELS: Record<Language, { model: string; totalBytes: number }> = { en: { model: 'small.en', totalBytes: 487_614_201 }, de: { model: 'small', totalBytes: 487_601_967 } };
 type ModelState = Pick<LanguageModel, 'state' | 'receivedBytes' | 'error'> & { advancing?: boolean };
 let modelState: ModelState = { state: 'ready', receivedBytes: 0 };
@@ -130,12 +131,17 @@ export const backend = {
   handoff: async () => 'Storybook sample only. No recording files are created or accessible.',
   openFolder: async () => { throw new Error('Sample recordings have no local folder.'); },
   retry: async () => {},
-  installTranscription: async () => { scenario = 'fresh'; },
-  downloadLanguageModel: async () => { modelState = { state: 'downloading', receivedBytes: 0, advancing: true }; },
+  // As the app does, installing transcription goes on to fetch a missing language model.
+  installTranscription: async () => { scenario = 'fresh'; if (modelState.state !== 'ready') modelState = { state: 'downloading', receivedBytes: 0, advancing: true }; },
+  languageModel: async (): Promise<LanguageModel | null> => languageModel(),
+  downloadLanguageModel: async () => {
+    if (scenario === 'setup') throw new Error('Install transcription first, then the language model downloads by itself.');
+    modelState = { state: 'downloading', receivedBytes: 0, advancing: true };
+  },
   settings: async () => clone(settings),
   // As the app does, a new language starts fetching its model.
   saveSettings: async (next: Settings) => {
-    if ((next.language ?? 'en') !== (settings.language ?? 'en')) modelState = { state: 'downloading', receivedBytes: 0, advancing: true };
+    if ((next.language ?? 'en') !== (settings.language ?? 'en')) modelState = scenario === 'setup' ? { state: 'missing', receivedBytes: 0 } : { state: 'downloading', receivedBytes: 0, advancing: true };
     settings = clone(next); return clone(settings);
   },
 } satisfies typeof RealBackend;

@@ -59,7 +59,8 @@ function SettingsExample({ scenario = 'fresh', desktop = true, installing: start
     <SettingsDialog open={open} onClose={() => setOpen(false)} fallbackFocusRef={launcher}
       theme={theme} onTheme={next => { setTheme(next); document.documentElement.dataset.theme = next; }}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup)}
-      onRefreshSetup={() => { if (desktop) void backend.setup().then(setSetup); }} onDownloadLanguageModel={backend.downloadLanguageModel}
+      onPollLanguageModel={async () => { if (!desktop) return; const model = await backend.languageModel(); setSetup(current => current && { ...current, languageModel: model ?? undefined }); }}
+      onDownloadLanguageModel={backend.downloadLanguageModel}
       settings={settings} onSaveSettings={async next => setSettings(await backend.saveSettings(next))} error={problem}/>
   </div>;
 }
@@ -104,6 +105,8 @@ export const SettingsModelReady: Story = settingsStory({ language: 'en', model: 
 export const SettingsModelDownloading: Story = settingsStory({ language: 'de', model: { state: 'downloading', receivedBytes: 212_000_000 } });
 export const SettingsModelFailed: Story = settingsStory({ language: 'en', model: { state: 'failed', receivedBytes: 0, error: 'The download was cut off.' } });
 export const SettingsModelMissing: Story = settingsStory({ language: 'en', model: { state: 'missing', receivedBytes: 0 } });
+/** Before transcription is installed: no download to start, and installing fetches the model. */
+export const SettingsModelBeforeInstall: Story = settingsStory({ scenario: 'setup', language: 'de', model: { state: 'missing', receivedBytes: 0 } });
 export const SettingsVocabularyValidation: Story = {
   ...settingsStory(),
   play: async ({ canvasElement }) => {

@@ -364,15 +364,20 @@ async fn install_transcription(s: CmdState<'_>) -> Result<SetupStatus, String> {
     blocking(move || {
         let _guard = s.installer.lock().map_err(|e| e.to_string())?;
         let status = deps::install_transcription()?;
-        deps::start_language_model_download();
+        deps::start_language_model_download()?;
         Ok(status)
     })
     .await
 }
 /// Starts the chosen language's model download again, for example after it failed.
 #[tauri::command]
-fn download_language_model() {
-    deps::start_language_model_download();
+fn download_language_model() -> Result<(), String> {
+    deps::start_language_model_download()
+}
+/// The chosen language's model and its download, without probing the tools.
+#[tauri::command]
+fn get_language_model() -> Option<LanguageModel> {
+    deps::language_model_status()
 }
 #[tauri::command]
 fn get_agent_handoff(s: CmdState<'_>, app: tauri::AppHandle, id: String) -> Result<String, String> {
@@ -886,10 +891,21 @@ fn get_settings(s: CmdState<'_>) -> Settings {
 }
 #[tauri::command]
 fn save_settings(s: CmdState<'_>, settings: Settings) -> Result<Settings, String> {
-    let before = settings::language(&settings::load(&s.store.root));
-    let saved = settings::save(&s.store.root, &settings)?;
+    save_settings_in(&s.store.root, &settings, || {
+        // Before Install transcription the model comes with it instead.
+        let _ = deps::start_language_model_download();
+    })
+}
+/// Saves the settings and calls `language_changed` when the language did.
+fn save_settings_in(
+    root: &std::path::Path,
+    settings: &Settings,
+    language_changed: impl FnOnce(),
+) -> Result<Settings, String> {
+    let before = settings::language(&settings::load(root));
+    let saved = settings::save(root, settings)?;
     if settings::language(&saved) != before {
-        deps::start_language_model_download();
+        language_changed();
     }
     Ok(saved)
 }
@@ -961,7 +977,7 @@ pub fn run() {
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
             // An installation with only base fetches its language's model now.
-            deps::start_language_model_download();
+            let _ = deps::start_language_model_download();
             app.manage(Arc::new(AppState {
                 store,
                 _ownership: ownership,
@@ -1009,6 +1025,7 @@ pub fn run() {
             get_setup_status,
             install_transcription,
             download_language_model,
+            get_language_model,
             get_agent_handoff,
             open_session_folder,
             start_recording,
@@ -1027,6 +1044,29 @@ pub fn run() {
 #[cfg(test)]
 mod orchestration_tests {
     use super::*;
+    #[test]
+    fn changing_the_language_starts_its_model_download() {
+        let root = tempfile::tempdir().unwrap();
+        let started = std::cell::Cell::new(0);
+        let german = Settings {
+            language: Some("de".into()),
+            ..Default::default()
+        };
+        save_settings_in(root.path(), &german, || started.set(started.get() + 1)).unwrap();
+        assert_eq!(started.get(), 1);
+        // Saving the vocabulary keeps the language: no new download.
+        let vocabulary = Settings {
+            vocabulary: Some("CueReview".into()),
+            ..german.clone()
+        };
+        save_settings_in(root.path(), &vocabulary, || started.set(started.get() + 1)).unwrap();
+        assert_eq!(started.get(), 1);
+        save_settings_in(root.path(), &Settings::default(), || {
+            started.set(started.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(started.get(), 2);
+    }
     #[test]
     fn shell_folder_resolves_the_physical_path_and_preserves_spaces() {
         let temp = tempfile::tempdir().unwrap();

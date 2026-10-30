@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import App from './App';
 import type { AppProps } from './App';
-import type { Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
+import type { LanguageModel, Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
 import { WINDOW_CLOSED } from './stories/fixtures';
 import { NAMES, RETIRED_NAMES } from './workspace/types';
 
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     projects: vi.fn(), sessions: vi.fn(), session: vi.fn(), transcript: vi.fn(), markers: vi.fn(), addMarker: vi.fn(), setup: vi.fn(), status: vi.fn(),
     sources: vi.fn(), microphones: vi.fn(), preview: vi.fn(), stopPreview: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), renameSession: vi.fn(),
     moveSession: vi.fn(), reorderProjects: vi.fn(), deleteProject: vi.fn(), deleteSession: vi.fn(), start: vi.fn(), stop: vi.fn(), recordMore: vi.fn(),
-    handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), downloadLanguageModel: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
+    handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), languageModel: vi.fn(), downloadLanguageModel: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
   },
   windowApi: {
     minimize: vi.fn(), toggleMaximize: vi.fn(), isMaximized: vi.fn(), onResized: vi.fn(), close: vi.fn(), startDragging: vi.fn(),
@@ -45,6 +45,7 @@ beforeEach(() => {
   backend.session.mockImplementation(async (id: string) => structuredClone(sessions.find(item => item.id === id)!));
   backend.status.mockImplementation(async () => ({ ...status }));
   backend.setup.mockImplementation(async () => ({ ...setup }));
+  backend.languageModel.mockImplementation(async () => setup.languageModel ?? null);
   backend.sources.mockResolvedValue([{ id: 'display1', name: 'Display 1', kind: 'display', available: true }, { id: 'quest1', name: 'Quest USB', kind: 'quest', available: true }]);
   backend.microphones.mockResolvedValue([{ id: 'mic1', name: 'Studio microphone' }, { id: 'mic2', name: 'Headset microphone' }]);
   backend.preview.mockImplementation(async (_source: string, id: string) => ({ id, url: 'http://127.0.0.1:9999/live' }));
@@ -1775,6 +1776,42 @@ describe('local setup recovery and request races', () => {
     await user.selectOptions(language, 'de');
     expect(backend.saveSettings).toHaveBeenCalledWith({ vocabulary: 'Quest', language: 'de' });
     expect(await screen.findByRole('progressbar', { name: NAMES.modelDownload('German model') })).toBeVisible();
+  });
+  it('polls the downloading language model one read at a time and keeps the newest reply', async () => {
+    const model: LanguageModel = { language: 'en', model: 'small.en', state: 'downloading', receivedBytes: 100_000_000, totalBytes: 487_614_201 };
+    setup = { ...readySetup, languageModel: model };
+    const user = await ready();
+    const replies: ((value: LanguageModel | null) => void)[] = [];
+    backend.languageModel.mockImplementation(() => new Promise<LanguageModel | null>(resolve => { replies.push(resolve); }));
+    backend.saveSettings.mockImplementation(async (next: object) => ({ ...next }));
+    await user.click(screen.getByRole('button', { name: NAMES.settings }));
+    await waitFor(() => expect(screen.getByText('English model').parentElement).toHaveTextContent('Downloading · 100 of 488 MB'));
+    // The light read follows about a second later; the full status is not read again.
+    await waitFor(() => expect(backend.languageModel).toHaveBeenCalledOnce(), { timeout: 3000 });
+    const fullReads = backend.setup.mock.calls.length;
+
+    // Choosing German reads the model at once while the older read is still out; its late reply is dropped.
+    await user.selectOptions(screen.getByRole('combobox', { name: NAMES.language }), 'de');
+    await waitFor(() => expect(backend.languageModel).toHaveBeenCalledTimes(2));
+    await act(async () => replies[1]({ ...model, language: 'de', model: 'small', receivedBytes: 300_000_000, totalBytes: 487_601_967 }));
+    expect(screen.getByText('German model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB');
+    await act(async () => replies[0]({ ...model, receivedBytes: 200_000_000 }));
+    expect(screen.getByText('German model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB');
+    expect(screen.queryByText('English model')).not.toBeInTheDocument();
+    expect(backend.setup).toHaveBeenCalledTimes(fullReads);
+
+    // Closing Settings stops the reads, and a reply that arrives after it closed is dropped.
+    await waitFor(() => expect(backend.languageModel).toHaveBeenCalledTimes(3), { timeout: 3000 });
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await act(async () => replies[2]({ ...model, language: 'de', model: 'small', state: 'failed', receivedBytes: 0, totalBytes: 487_601_967, error: 'The download was cut off.' }));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1200)); });
+    expect(backend.languageModel).toHaveBeenCalledTimes(3);
+    // Reopened while its full read is still out, Settings shows the state from before it closed.
+    backend.setup.mockImplementation(() => new Promise<SetupStatus>(() => {}));
+    await user.click(screen.getByRole('button', { name: NAMES.settings }));
+    expect(await screen.findByText('German model')).toBeVisible();
+    expect(screen.getByText('German model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB');
   });
   it('ignores an old source preview that arrives after the user selects another source', async () => {
     let resolveOld!: (value: { id: string; url: string }) => void;

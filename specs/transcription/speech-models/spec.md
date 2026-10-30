@@ -6,6 +6,7 @@ code:
   - src-tauri/src/models.rs
   - src-tauri/src/lib.rs
   - src-tauri/src/transcribe.rs
+  - src-tauri/src/bin/cue.rs
   - src/backend.ts
   - src/dialogs/SettingsDialog.tsx
 ---
@@ -57,14 +58,18 @@ recording.
 - **GIVEN** the German model is not installed
 - **WHEN** the person chooses German in Settings
 - **THEN** the German model downloads in the background, and Settings shows its progress
+- **AND** a download of the English model still running stops and the German one follows
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::shows the language model's download progress
+- **PROOF** test: src-tauri/src/deps.rs::tests::a_language_chosen_during_a_download_gets_its_model
 - **PROOF** desk: open
 
 #### Scenario: A damaged download is never used
 - **WHEN** a model download ends with the wrong size or SHA-256, or is cut off
-- **THEN** the partial file is removed, transcription stays on base, and Settings says the download
-  failed and offers to try again
+- **THEN** the partial file is removed, transcription stays on base, and Settings says in a plain
+  sentence that the download failed and offers to try again
 - **PROOF** test: src-tauri/src/deps.rs::tests::a_damaged_model_download_is_discarded
+- **PROOF** test: src-tauri/src/deps.rs::tests::the_download_state_follows_the_fetch
+- **PROOF** test: src-tauri/src/deps.rs::tests::download_failures_are_said_plainly_and_partial_files_swept
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::offers to retry a failed model download
 
 ### Requirement: Settings shows the language and its model
@@ -77,4 +82,17 @@ it and the person otherwise cannot tell why a transcript came out worse.
 - **WHEN** the person opens Settings
 - **THEN** Settings shows the language and that its model is ready
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::shows the chosen language and its ready model
+- **PROOF** desk: open
+
+### Requirement: The CLI installs and reports the language model
+`cue setup --install` SHALL also download the chosen language's model, and `cue setup` SHALL report
+it as `languageModel`, because an agent setting up a computer without the app needs the same
+transcripts the app makes.
+
+#### Scenario: An agent installs transcription from the CLI
+- **GIVEN** a computer without the speech tools and models, and the app closed
+- **WHEN** an agent runs `cue setup --install`
+- **THEN** the tools, base and the chosen language's model are installed, and `cue setup` reports
+  `languageModel` with `state` `ready`
+- **PROOF** test: src-tauri/src/models.rs::tests::the_language_model_is_reported_in_camel_case
 - **PROOF** desk: open

@@ -301,6 +301,21 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use serde_json::json;
+    #[test]
+    fn the_language_model_is_reported_in_camel_case() {
+        let status = LanguageModel {
+            language: "de".into(),
+            model: "small".into(),
+            state: "downloading".into(),
+            received_bytes: 5,
+            total_bytes: 487_601_967,
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            json!({"language":"de","model":"small","state":"downloading","receivedBytes":5,"totalBytes":487_601_967u64})
+        );
+    }
 
     // Byte-for-byte what v0.1.0 writes through `store::write_json`
     // (`serde_json::to_vec_pretty`, no trailing newline).
