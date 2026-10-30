@@ -45,11 +45,12 @@ ahead had samples dropped. With the owner's webcam microphone that cut a hole of
 
 ## Calls for the owner
 
-- The stretch ratio comes from the packets' own timestamps (the span they cover against the
-  samples written), and only the last few milliseconds between the last packet and Stop are padded
-  or trimmed to the exact length. The alternative, stretching the written samples straight to the
-  take's length, would also stretch a device that died near the end over the whole track.
-  Reversing it is a one-line change in `AudioWriter::finish`.
+- The stretch ratio is measured from the packets' own timestamps over the runs of audio between
+  gaps, and each run is placed at its own start by the wall clock, with silence between runs and
+  after the last one up to the take's length. The alternative, stretching all written samples to
+  the take's length, would also stretch a device that died near the end over the whole track, and
+  a gap sized by the drift measured so far would shift everything after it. Reversing it means
+  rewriting `AudioWriter::finish`.
 - A ratio more than 5% from 1 is treated as broken timestamps: the track is then padded or trimmed
   to the take's length without resampling. No real audio clock is that far off.
 - The resampler is a windowed-sinc filter written in `capture.rs` (32 taps, a precomputed table),
