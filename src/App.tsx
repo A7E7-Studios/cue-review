@@ -453,7 +453,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     return () => { alive = false; };
   }, [searchOpen]);
   /** A search result: the recording, standing paused at the line's time, or at its start. */
-  const openResult = (id: string, atMs?: number) => {
+  const openResult = async (id: string, atMs?: number) => {
     if (!draft && !loading && session?.id === id) {
       // Already open: the video does not load again, so seek it here.
       dismissOverlay();
@@ -461,8 +461,17 @@ export default function App({ platform: requested }: AppProps = {}) {
       seek(atMs ?? 0);
       return;
     }
-    void openSession(id);
-    if (atMs !== undefined) restorePlayback.current = { id, time: atMs / 1000, playing: false };
+    const opening = openSession(id);
+    restorePlayback.current = { id, time: (atMs ?? 0) / 1000, playing: false };
+    await opening;
+    // A new source applies the time when it loads. The same source (the recording was still
+    // shown while another load ran) does not load again: apply it to the video already there.
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const media = video.current, restore = restorePlayback.current;
+    if (!media || !restore || restore.id !== id || shownId.current !== id || media.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    restorePlayback.current = null;
+    media.pause();
+    media.currentTime = restore.time; setTime(restore.time * 1000);
   };
   /** Ctrl/⌘+F: Find in the transcript; in focus, the transcript comes back first. */
   const openFind = () => {
@@ -805,7 +814,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
     <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} sessions={sessions} sections={projects} transcripts={searchTranscripts}
-      onOpen={openResult} fallbackFocusRef={sheet}/>
+      onOpen={(id, atMs) => void openResult(id, atMs)} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>

@@ -373,6 +373,25 @@ describe('keyboard interaction', () => {
     await waitFor(() => expect(document.querySelector('.app')).not.toHaveAttribute('data-sidebar', 'overlay'));
     expect(document.querySelector('video')!.currentTime).toBe(1);
   });
+  it('opens a line of the shown recording at its time while another load runs', async () => {
+    const user = await review();
+    const media = document.querySelector('video')!;
+    // The video has its metadata already; it does not load again for the same source.
+    Object.defineProperty(media, 'readyState', { configurable: true, get: () => HTMLMediaElement.HAVE_METADATA });
+    media.currentTime = 7;
+    // The recording's row is clicked again: its load is in flight when the line is chosen.
+    let finish!: () => void;
+    backend.session.mockImplementationOnce((id: string) => new Promise(resolve => { finish = () => resolve(sessions.find(item => item.id === id)!); }));
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    await within(dialog).findByRole('option', { name: /Look here/ });
+    await user.keyboard('{Enter}');
+    await act(async () => { finish(); });
+    await waitFor(() => expect(media.currentTime).toBe(1));
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:01');
+  });
   it('searches each transcript as it is when search opens', async () => {
     const user = await ready();
     await user.keyboard('{Control>}k{/Control}');

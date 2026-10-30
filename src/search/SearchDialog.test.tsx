@@ -87,6 +87,19 @@ describe('SearchDialog', () => {
     await user.keyboard('{Enter}');
     expect(props.onOpen).toHaveBeenCalledWith('quest', 5000);
   });
+  it('pins the first result again when the pinned one leaves', async () => {
+    const user = userEvent.setup();
+    const { props, rerender } = renderSearch();
+    await user.type(screen.getByRole('combobox'), 'menu');
+    // The pinned line's transcript is read again and the line moves to 6s: it is pinned again.
+    const moved = new Map(transcripts).set('quest', { segments: [{ startMs: 6000, endMs: 9000, text: 'The menu follows the controller.', words: [] }] });
+    rerender(<SearchDialog {...props} transcripts={moved}/>);
+    // A newer recording's line then arrives ahead of it; Enter still opens the moved line.
+    rerender(<SearchDialog {...props} transcripts={new Map(moved).set('library', { segments: [{ startMs: 2000, endMs: 3000, text: 'The menu is hidden.', words: [] }] })}/>);
+    expect(screen.getAllByRole('option')[0]).toHaveTextContent('The menu is hidden.');
+    await user.keyboard('{Enter}');
+    expect(props.onOpen).toHaveBeenCalledWith('quest', 6000);
+  });
   it('starts empty each time it opens', async () => {
     const user = userEvent.setup();
     const { props, rerender } = renderSearch();

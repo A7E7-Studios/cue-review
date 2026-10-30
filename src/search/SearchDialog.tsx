@@ -75,7 +75,10 @@ export function SearchDialog({ open, onClose, sessions, sections, transcripts, o
       ...matchingLines(sessions, transcripts, words).map((line): Result => ({ key: `l:${line.session.id}:${line.startMs}`, id: line.session.id, atMs: line.startMs, group: 'lines', title: line.session.name, detail: marked(line.text, words), time: formatTime(line.startMs) })),
     ];
   }, [query, sessions, sectionName, transcripts]);
-  useEffect(() => { if (activeKey === null && results.length) setActiveKey(results[0].key); }, [activeKey, results]);
+  // Pin the first result, again when the pinned one leaves the results (a transcript read again).
+  useEffect(() => {
+    if (results.length && !results.some(result => result.key === activeKey)) setActiveKey(results[0].key);
+  }, [activeKey, results]);
   const found = results.findIndex(result => result.key === activeKey);
   const current = found >= 0 ? found : 0;
   const optionId = (index: number) => `${id}-option-${index}`;
