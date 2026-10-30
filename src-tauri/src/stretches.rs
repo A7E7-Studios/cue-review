@@ -24,6 +24,12 @@ pub const MIN_PAUSE_MS: u64 = 600;
 const PAUSE_LEAD_MS: u64 = 300;
 /// A stretch is never longer than one Whisper window.
 pub const MAX_STRETCH_MS: u64 = 30_000;
+/// Nor shorter than this when it has speech: Whisper needs the context, and
+/// stretches of a few seconds made about 4 % more word errors.
+pub const MIN_STRETCH_MS: u64 = 10_000;
+/// A stretch is cut once this much audio waits, so Stop has at most about
+/// 30 s left.
+const SETTLE_MS: u64 = 20_000;
 /// Without a pause, a stretch ends in the longest gap at least this long.
 const SHORT_GAP_MS: u64 = 200;
 /// Pending audio without any speech is skipped once it is this long.
@@ -39,10 +45,11 @@ pub struct Cut {
 }
 
 /// The end of the next finished stretch of `pending_ms` of audio whose speech
-/// regions (start, end in ms, ordered) are `regions`, or `None` while the
-/// speech goes on. A stretch ends 300 ms into the last pause of at least
-/// 600 ms within its first 30 s; past 30 s without one, in the middle of the
-/// longest gap of at least 200 ms, else at 30 s.
+/// regions (start, end in ms, ordered) are `regions`, or `None` while it
+/// waits. Once 20 s wait, a stretch ends 300 ms into the last pause of at
+/// least 600 ms between 10 and 30 s; past 30 s without one, in the middle of
+/// the longest gap of at least 200 ms, else at 30 s. Audio without speech is
+/// skipped once it is 2 s long.
 pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
     if regions.is_empty() {
         return (pending_ms >= SILENCE_MS).then_some(Cut {
@@ -50,10 +57,15 @@ pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
             speech: false,
         });
     }
+    if pending_ms < SETTLE_MS {
+        return None;
+    }
     let paused = regions.iter().enumerate().rev().find_map(|(i, &(_, end))| {
         let next = regions.get(i + 1).map_or(pending_ms, |region| region.0);
         let at_ms = end + PAUSE_LEAD_MS;
-        (next.saturating_sub(end) >= MIN_PAUSE_MS && at_ms <= MAX_STRETCH_MS).then_some(at_ms)
+        (next.saturating_sub(end) >= MIN_PAUSE_MS
+            && (MIN_STRETCH_MS..=MAX_STRETCH_MS).contains(&at_ms))
+        .then_some(at_ms)
     });
     if let Some(at_ms) = paused {
         return Some(Cut {
@@ -327,16 +339,20 @@ mod tests {
                 speech: true,
             })
         };
-        // Still talking: no pause of 600 ms yet.
-        assert_eq!(cut(&[(200, 4000)], 4400), None);
-        assert_eq!(cut(&[(200, 4000), (4300, 6000)], 6300), None);
-        // The last pause of 600 ms ends the stretch 300 ms into it.
-        assert_eq!(cut(&[(200, 4000)], 4700), speech(4300));
+        // Under 20 s nothing is cut, pause or not.
+        assert_eq!(cut(&[(200, 4000)], 4700), None);
+        assert_eq!(cut(&[(200, 12_000)], 19_000), None);
+        // From 20 s on, the last pause of 600 ms between 10 and 30 s ends it.
         assert_eq!(
-            cut(&[(200, 4000), (5000, 9000), (9800, 12000)], 12200),
-            speech(9300)
+            cut(&[(200, 4000), (5000, 12_000), (12_800, 19_500)], 20_000),
+            speech(12_300)
         );
-        // A pause that would make the stretch longer than 30 s is not taken.
+        assert_eq!(
+            cut(&[(200, 15_000), (15_700, 21_000)], 21_100),
+            speech(15_300)
+        );
+        // A pause before 10 s is too early, and one past 30 s too late.
+        assert_eq!(cut(&[(0, 4000), (4800, 25_000)], 25_100), None);
         assert_eq!(cut(&[(0, 29_900)], 31_000), speech(30_000));
         // Past 30 s without a pause: the middle of the longest short gap.
         assert_eq!(
@@ -512,16 +528,17 @@ mod tests {
             let mut stretches = Stretches::new("mic.wav", &model_file, "en");
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let snapshot = live.join("snapshot.wav");
-            let first_seen: std::cell::RefCell<Vec<(String, f64)>> = Default::default();
-            // When each word first shows, against when it ended in the audio.
+            // When the shown words first reached each point of the audio.
+            let covered: std::cell::RefCell<Vec<(u64, f64)>> = Default::default();
             let seen = |shown: &Transcript, at: f64| {
-                let mut first_seen = first_seen.borrow_mut();
-                for word in shown.segments.iter().flat_map(|s| &s.words) {
-                    let key = format!("{}@{}", word.text, word.start_ms / 1000);
-                    if !first_seen.iter().any(|(seen, _)| *seen == key) {
-                        first_seen.push((key, at - word.end_ms as f64 / 1000.));
-                    }
-                }
+                let end = shown
+                    .segments
+                    .iter()
+                    .flat_map(|s| &s.words)
+                    .map(|w| w.end_ms)
+                    .max()
+                    .unwrap_or(0);
+                covered.borrow_mut().push((end, at));
             };
             let started = Instant::now();
             loop {
@@ -570,8 +587,20 @@ mod tests {
             forget(&take);
             let whole =
                 crate::transcribe::transcribe_media(root.path(), &take, length_ms, true).unwrap();
-            let mut delays: Vec<f64> =
-                first_seen.into_inner().into_iter().map(|(_, delay)| delay).collect();
+            // For each word of the transcript, from its end to the first update
+            // whose words reached it.
+            let covered = covered.into_inner();
+            let mut delays: Vec<f64> = one_pass
+                .segments
+                .iter()
+                .flat_map(|s| &s.words)
+                .filter_map(|word| {
+                    covered
+                        .iter()
+                        .find(|(end, _)| *end >= word.end_ms)
+                        .map(|(_, at)| at - word.end_ms as f64 / 1000.)
+                })
+                .collect();
             delays.sort_by(f64::total_cmp);
             let reference = fs::read_to_string(fixtures.join("reference.txt"))
                 .expect("test-results/replay/reference.txt")

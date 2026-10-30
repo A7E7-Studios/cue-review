@@ -351,6 +351,43 @@ fn run_whisper(
 ) -> Result<Transcript, String> {
     let mut whisper = deps::command("whisper-cli")?;
     alignment_options(&mut whisper, model)?;
+    run_whisper_with(whisper, root, speech, folder, model, threads, cancel, raw)
+}
+/// A quick guess of the words of `speech` with base: one beam and no
+/// alignment points, which a guess shown while recording never needs.
+fn guess_words(
+    root: &Path,
+    speech: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+) -> Result<Transcript, String> {
+    let mut whisper = deps::command("whisper-cli")?;
+    whisper.args(["-bs", "1", "-bo", "1"]);
+    let model = deps::live_model();
+    let threads = live_threads(logical_threads());
+    let raw = folder.join("whisper.json");
+    run_whisper_with(
+        whisper,
+        root,
+        speech,
+        folder,
+        &model,
+        threads,
+        Some(cancel),
+        &raw,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn run_whisper_with(
+    mut whisper: std::process::Command,
+    root: &Path,
+    speech: &Path,
+    folder: &Path,
+    model: &deps::ModelChoice,
+    threads: usize,
+    cancel: Option<&AtomicBool>,
+    raw: &Path,
+) -> Result<Transcript, String> {
     let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
     whisper
         .arg("-m")
@@ -414,10 +451,7 @@ pub fn live_guess(
     let guess = if regions.is_empty() {
         Transcript::default()
     } else {
-        let threads = live_threads(logical_threads());
-        let raw = folder.join("whisper.json");
-        let model = deps::live_model();
-        run_whisper(root, &speech, folder, &model, threads, Some(cancel), &raw)?
+        guess_words(root, &speech, folder, cancel)?
     };
     let audio = LiveAudio {
         speech,
