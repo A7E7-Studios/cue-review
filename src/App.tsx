@@ -28,7 +28,7 @@ import { useCompactWindow } from './app/useCompactWindow';
 import { canTakeFocus, useFocusRescue } from './app/useFocusRescue';
 import { usePreviewStream } from './app/usePreviewStream';
 import { useShortcuts } from './app/useShortcuts';
-import { useSidebarLayout } from './app/useSidebarLayout';
+import { useSidebarLayout, useSidebarSlide } from './app/useSidebarLayout';
 import { useTheme } from './app/useTheme';
 
 const EMPTY_TRANSCRIPT: Transcript = { segments: [] };
@@ -614,7 +614,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     const toggle = lost.classList.contains('chrome-sidebar-toggle');
     if (toggle || lost.closest('.sidebar')) {
       // A row disabled for a moment keeps its place; a hidden sidebar or toggle hands focus to its counterpart.
-      if (lost.isConnected) return null;
+      if (lost.isConnected && !lost.closest('[inert]')) return null;
       return sidebarVisible ? find('.sidebar .side-collapse') ?? find('.chrome-sidebar-toggle') : find('.chrome-sidebar-toggle');
     }
     // Compact and Expand swap with the layout: focus follows to the other one.
@@ -664,18 +664,22 @@ export default function App({ platform: requested }: AppProps = {}) {
     </div>}
   </main>;
 
-  const sidebarElement = sidebarVisible && <Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
+  // The sidebar slides out and in, except beside a live preview or a recording, so live video is never resized by an animation.
+  const liveVideo = mode !== 'review';
+  const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, liveVideo);
+  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
     onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
     onRenameSection={item => openDialog({ kind: 'renameSection', id: item.id, value: item.name })}
     onCreateSection={sessionId => openDialog({ kind: 'section', sessionId, value: '' })}
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
-    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/>;
+    onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
   const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
     search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
 
-  return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : sidebarOverlay ? 'overlay' : sidebarVisible ? 'docked' : 'hidden'} data-compact={compact || undefined}>
+  return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}
+    data-sidebar-motion={liveVideo ? 'instant' : 'slide'} data-compact={compact || undefined}>
     {compact ? <>
       <CompactDragStrip platform={os}/>
       <main ref={sheet} className="app-compact" tabIndex={-1} data-dialog-focus-fallback>{errorBanner}{dock}</main>

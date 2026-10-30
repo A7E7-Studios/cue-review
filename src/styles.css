@@ -48,7 +48,18 @@ input[type='checkbox'] { margin: 0; }
 }
 .app[data-platform='macos'], .app[data-compact] { background: var(--color-sheet); }
 .app-body { position: relative; flex: 1; min-height: 0; display: flex; }
-.app-body > .sidebar { flex: none; width: var(--size-sidebar); }
+/* The sidebar slides out and in (window-chrome spec): its slot's width eases to 0 while the sidebar,
+   held at the slot's right edge, moves out with it, so the sheet widens in step. The clip margin
+   keeps the macOS panel's shadow. Beside a live preview or a recording, and under reduced motion, it changes at once. */
+.app { --size-sidebar-slot: var(--size-sidebar); }
+.app[data-platform='macos'] { --size-sidebar-slot: calc(var(--size-sidebar) + 8px); }
+.app-sidebar-slot {
+  flex: none; display: flex; justify-content: flex-end; width: var(--size-sidebar-slot);
+  overflow: clip; overflow-clip-margin: 16px; transition: width var(--motion-sidebar) var(--ease-out);
+}
+.app-sidebar-slot:is([data-state='entering'], [data-state='exiting']) { width: 0; }
+.app-sidebar-slot > .sidebar { flex: none; width: var(--size-sidebar); }
+.app[data-sidebar-motion='instant'] .app-sidebar-slot { transition: none; }
 .app-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .app-sheet { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; background: var(--color-sheet); outline: none; }
 .app:not([data-platform='macos']) .app-sheet {
@@ -61,12 +72,17 @@ input[type='checkbox'] { margin: 0; }
 .app[data-platform='macos'] .cr-transcript-column { --size-pane-header: 44px; }
 
 /* Below about 1000px the sidebar hides; its toggle shows it over the sheet. */
-.app[data-sidebar='overlay'] .app-body > .sidebar {
-  position: absolute; z-index: 30; top: 0; bottom: 0; left: 0;
+/* There it slides in over the sheet, which does not move. */
+.app[data-sidebar='overlay'] .app-sidebar-slot {
+  position: absolute; z-index: 30; top: 0; bottom: 0; left: 0; overflow: visible;
+  transition: transform var(--motion-sidebar) var(--ease-out);
+}
+.app[data-sidebar='overlay'] .app-sidebar-slot:is([data-state='entering'], [data-state='exiting']) { width: var(--size-sidebar-slot); transform: translateX(-100%); }
+.app[data-sidebar='overlay'] .app-sidebar-slot > .sidebar {
   box-shadow: 1px 0 0 var(--color-sheet-edge), 12px 0 32px rgba(16, 24, 40, .16);
 }
-.app[data-platform='macos'][data-sidebar='overlay'] .app-body > .sidebar { box-shadow: var(--shadow-panel), 0 12px 32px rgba(16, 24, 40, .18); }
-:root[data-theme='dark'] .app[data-sidebar='overlay'] .app-body > .sidebar { box-shadow: 1px 0 0 var(--color-sheet-edge), 12px 0 32px rgba(0, 0, 0, .5); }
+.app[data-platform='macos'][data-sidebar='overlay'] .app-sidebar-slot > .sidebar { box-shadow: var(--shadow-panel), 0 12px 32px rgba(16, 24, 40, .18); }
+:root[data-theme='dark'] .app[data-sidebar='overlay'] .app-sidebar-slot > .sidebar { box-shadow: 1px 0 0 var(--color-sheet-edge), 12px 0 32px rgba(0, 0, 0, .5); }
 .app-scrim { position: absolute; z-index: 25; inset: var(--size-titlebar) 0 0 0; background: rgba(16, 24, 40, .12); }
 .app[data-platform='macos'] .app-scrim { top: 0; }
 :root[data-theme='dark'] .app-scrim { background: rgba(0, 0, 0, .35); }
