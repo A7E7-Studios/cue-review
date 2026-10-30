@@ -72,12 +72,23 @@ export function Sidebar(props: SidebarProps) {
   const movable = (item: Session) => !locked && !inProgress(item);
   const expand = (id: string) => setClosed(current => { const next = new Set(current); next.delete(id); return next; });
   const closeMenu = () => { window.clearTimeout(submenuTimer.current); setSubmenu(false); setMenu(null); returnFocus.current?.focus(); };
-  const openSubmenu = (focus: boolean) => { window.clearTimeout(submenuTimer.current); focusSubmenu.current = focus; setSubmenu(true); };
+  const firstSubmenuItem = () => submenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)');
+  const openSubmenu = (focus: boolean) => {
+    window.clearTimeout(submenuTimer.current);
+    // Already open (the pointer rested on Move to section): the layout effect will not run again.
+    if (submenu) { if (focus) firstSubmenuItem()?.focus(); return; }
+    focusSubmenu.current = focus; setSubmenu(true);
+  };
   const closeSubmenu = () => { window.clearTimeout(submenuTimer.current); setSubmenu(false); moveItem.current?.focus(); };
   /** Opens or closes the submenu after a pause, so a pointer crossing an item on its way does not flicker it. */
   const scheduleSubmenu = (open: boolean) => {
     window.clearTimeout(submenuTimer.current);
-    submenuTimer.current = window.setTimeout(() => { focusSubmenu.current = false; setSubmenu(open); }, open ? SUBMENU_OPEN_MS : SUBMENU_CLOSE_MS);
+    submenuTimer.current = window.setTimeout(() => {
+      focusSubmenu.current = false;
+      // Closing under keyboard focus hands it back to Move to section, so the menu keeps taking keys.
+      if (!open && submenuRef.current?.contains(document.activeElement)) moveItem.current?.focus();
+      setSubmenu(open);
+    }, open ? SUBMENU_OPEN_MS : SUBMENU_CLOSE_MS);
   };
   /** Pointing at another item of the recording's menu closes the submenu after a pause. */
   const leaveMoveItem = () => { if (submenu) scheduleSubmenu(false); else window.clearTimeout(submenuTimer.current); };
@@ -110,7 +121,7 @@ export function Sidebar(props: SidebarProps) {
       panel.style.left = `${placed.left}px`; panel.style.top = `${placed.top}px`; panel.dataset.side = placed.side;
     };
     position();
-    if (focusSubmenu.current) submenuRef.current.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    if (focusSubmenu.current) firstSubmenuItem()?.focus();
     focusSubmenu.current = false;
     window.addEventListener('resize', position);
     return () => window.removeEventListener('resize', position);
@@ -285,7 +296,8 @@ export function Sidebar(props: SidebarProps) {
     </div>
     {props.utilities && <div className="side-bottom">{props.utilities}</div>}
     {menuPresence.present && shownMenu && (menuSession || menuSection) && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'section' ? NAMES.sectionActions : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }}
-      onFocus={event => rovingFocus(menuRef.current, event.target)} onKeyDown={event => menuKeys(menuRef.current, event, closeMenu, false)}>
+      onFocus={event => rovingFocus(menuRef.current, event.target)} onKeyDown={event => menuKeys(menuRef.current, event, closeMenu, false)}
+      onPointerLeave={() => { if (!submenu) window.clearTimeout(submenuTimer.current); }}>
       {menuSection ? <>
         <button role="menuitem" onClick={() => { closeMenu(); props.onRenameSection(menuSection); }}>{NAMES.rename}</button>
         <button role="menuitem" disabled={sections[0]?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index - 1]?.id ?? null, false); }}>{NAMES.moveUp}</button>

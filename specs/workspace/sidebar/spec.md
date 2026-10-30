@@ -18,7 +18,7 @@ the menus that move, rename and delete them and start new sessions.
 ### Requirement: Move to section is a submenu
 The app SHALL open Move to section as a submenu beside the recording's menu when the pointer rests
 on it, it is clicked, or ArrowRight or Enter is pressed on it, keeping the recording's menu open,
-because a menu that replaced its own items lost the person's place, and the Claude app's submenu is
+because a submenu keeps the person's place in the recording's menu, and the Claude app's submenu is
 the behaviour the person expects.
 
 #### Scenario: A person points at Move to section
@@ -39,6 +39,7 @@ the behaviour the person expects.
 - **AND** Enter on a section moves the recording there, closes both menus and keeps focus on the
   moved recording
 - **PROOF** test: src/Sidebar.test.tsx::moves a recording through the submenu with the keyboard
+- **PROOF** test: src/Sidebar.test.tsx::moves focus into a submenu the pointer already opened
 - **PROOF** desk: open
 
 #### Scenario: A person moves a recording into a new section
@@ -59,7 +60,8 @@ the behaviour the person expects.
 
 ### Requirement: Sections are made from the menus
 The app SHALL offer New section… in each section's menu, as it does at the end of the Move to
-section submenu, because the sidebar has no New section button of its own.
+section submenu, because a person makes a section from where they are already working in the
+sidebar.
 
 #### Scenario: A person adds a section from a section's menu
 - **GIVEN** a section's … menu is open
@@ -70,13 +72,14 @@ section submenu, because the sidebar has no New section button of its own.
 
 ### Requirement: A section heading starts a session in that section
 The app SHALL show a + at the right of a section heading while the pointer is over the heading or
-keyboard focus is in it, starting a new session that is filed in that section when it records,
-because a person often records straight into the section they are looking at.
+keyboard focus is in it, and not while a recording is in progress or a search filters the sidebar,
+starting a new session that is filed in that section when it records, because a person often records
+straight into the section they are looking at.
 
 #### Scenario: A person starts a session in a section
 - **GIVEN** nothing is recording
 - **WHEN** the person presses the + on the heading of a section
-- **THEN** a new session opens, ready to record
+- **THEN** a new session opens, ready to record, and the section opens if it was collapsed
 - **AND** once it records, the recording appears in that section
 - **PROOF** test: src/Sidebar.test.tsx::shows a new-session button on a section heading
 - **PROOF** test: src/App.test.tsx::files a session started from a section heading in that section
@@ -87,3 +90,9 @@ because a person often records straight into the section they are looking at.
 - **WHEN** the person points at a section heading
 - **THEN** no + appears
 - **PROOF** test: src/Sidebar.test.tsx::hides the new-session button while recording
+
+#### Scenario: The + is hidden while searching
+- **GIVEN** a search filters the sidebar
+- **WHEN** the person points at a section heading
+- **THEN** no + appears
+- **PROOF** test: src/Sidebar.test.tsx::hides the new-session button while a search filters the sidebar

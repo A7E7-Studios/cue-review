@@ -214,6 +214,22 @@ describe('Move to section submenu', () => {
     await user.keyboard('{Enter}');
     expect(onMove).toHaveBeenCalledWith('review', 'home');
     await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Library review' })).toHaveFocus());
+  });
+  test('moves focus into a submenu the pointer already opened', async () => {
+    const user = userEvent.setup();
+    renderSidebar({ sections: twoSections });
+    await user.click(screen.getByRole('button', { name: 'Recording options' }));
+    const trigger = screen.getByRole('menuitem', { name: 'Move to section' });
+    await user.hover(trigger);
+    await screen.findByRole('menu', { name: 'Move to section' });
+    trigger.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('menuitem', { name: 'Recents' })).toHaveFocus();
+    // Pointing at Rename closes it after a pause and gives focus back to Move to section.
+    await user.hover(screen.getByRole('menuitem', { name: 'Rename' }));
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'Move to section' })).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
   });
   test('offers New section at the end of the submenu', async () => {
     const user = userEvent.setup();
@@ -246,6 +262,12 @@ describe('making sections and sessions from the sidebar', () => {
     await user.click(add);
     expect(onNewInSection).toHaveBeenCalledWith('work');
     expect(screen.getByRole('button', { name: 'Workspace' })).toHaveAttribute('aria-expanded', 'true');
+  });
+  test('hides the new-session button while a search filters the sidebar', () => {
+    const { rerender } = renderSidebar({ onNewInSection: vi.fn() });
+    rerender({ filter: 'library' });
+    expect(screen.getByRole('button', { name: 'Library review' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'New session in Workspace' })).not.toBeInTheDocument();
   });
   test('hides the new-session button while recording', () => {
     const { rerender } = renderSidebar({ onNewInSection: vi.fn() });

@@ -31,7 +31,9 @@ into it, as the Claude app's section headings do.
 - Each section's … menu offers New section…: scenario "A person adds a section from a section's
   menu".
 - A + appears at the right of a section heading on hover or keyboard focus and starts a new session
-  that is filed in that section once it records: scenario "A person starts a session in a section".
+  that is filed in that section once it records, opening the section if it was collapsed: scenario
+  "A person starts a session in a section". It is hidden while recording and while searching:
+  scenarios "The + is hidden while recording" and "The + is hidden while searching".
 
 ## Settled questions
 
