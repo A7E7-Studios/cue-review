@@ -79,7 +79,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
     onRefreshSources: () => setNotice('Refresh selected.'), onRefreshMicrophones: () => setNotice('Refresh selected.'), locked: false, busy: false,
   };
   const controls = recording
-    ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={muted ? 0 : 0.56} sourceName="Display 1" hasMicrophone muted={muted} onMuted={setMuted}
+    ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={0.0126} sourceName="Display 1" hasMicrophone microphoneName="Microphone (HD Pro Webcam C920)" muted={muted} onMuted={setMuted}
         compact={compactMode} onToggleCompact={() => setCompactMode(value => !value)} stopDisabled={false} onStop={() => setNotice('Stop selected.')}/>
     : draft
       ? <CaptureControls {...bar} source={source} systemAudio={systemAudio} onSelectSource={setSourceId} onSystemAudio={setSystemAudio}
@@ -173,8 +173,14 @@ export const MuteWhileRecording: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const mute = canvas.getByRole('button', { name: 'Mute microphone' });
+    const dock = canvasElement.querySelector<HTMLElement>('.cr-dock')!;
+    await document.fonts.ready;
+    const width = dock.getBoundingClientRect().width;
     await userEvent.click(mute);
     await expect(mute).toHaveAttribute('aria-pressed', 'true');
-    await expect(canvas.queryByRole('meter', { name: 'Microphone level' })).not.toBeInTheDocument();
+    await expect(mute).toHaveAccessibleDescription('Muted');
+    // The meter stays, flat, and the dock keeps its width.
+    await expect(canvas.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute('aria-valuetext', 'Muted');
+    await expect(dock.getBoundingClientRect().width).toBe(width);
   },
 };

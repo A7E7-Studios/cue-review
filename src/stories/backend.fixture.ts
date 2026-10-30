@@ -36,7 +36,7 @@ export function configureScenario(next: Scenario) {
   status = { state: 'idle' };
   if (next === 'recording' || next === 'processing') {
     recordings[0] = { ...recordings[0], status: next, sourceId: 'monitor:1', microphoneId: 'microphone' };
-    status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
+    status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.0126, liveTranscript: clone(transcript) };
   }
   // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
   if (next === 'takes' || next === 'recording-take') recordings[0] = { ...clone(twoTakeSession), videoPath: sampleVideo };
@@ -52,7 +52,7 @@ export function configureScenario(next: Scenario) {
     session.durationMs = takeTwoStartMs;
     session.takes = session.takes!.slice(0, 1);
     recordTake(session, 'microphone', false);
-    status = { ...status, elapsedMs: 8000, audioLevel: 0.46, liveTranscript: clone(takeTwoLiveTranscript) };
+    status = { ...status, elapsedMs: 8000, audioLevel: 0.0126, liveTranscript: clone(takeTwoLiveTranscript) };
   }
 }
 configureScenario('fresh');

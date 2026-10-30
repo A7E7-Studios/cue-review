@@ -235,6 +235,26 @@ describe('keyboard interaction', () => {
     await transcriptPane().findByText('Processing');
     expect(backend.stop).toHaveBeenCalledOnce(); expect(backend.start).not.toHaveBeenCalled();
   });
+  it('a mute from the dock ends with its take', async () => {
+    backend.recordMore.mockImplementation(async (id: string) => { sessions = sessions.map(item => item.id === id ? takeTwo(item) : item); status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 }; return takeTwo(newSession(id)); });
+    backend.stop.mockImplementation(async () => { const next = takeTwo(newSession(), 'ready'); sessions = [next]; status = { state: 'idle' }; return next; });
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+    const user = await review();
+    await user.keyboard('{Control>}r{/Control}');
+    await screen.findByRole('timer', { name: NAMES.takeTimer(2) });
+    const mute = screen.getByRole('button', { name: NAMES.muteMicrophone });
+    // The dock names the microphone it records.
+    expect(mute).toHaveAccessibleDescription('Studio microphone');
+    await user.click(mute);
+    await waitFor(() => expect(screen.getByRole('button', { name: NAMES.muteMicrophone })).toHaveAttribute('aria-pressed', 'true'));
+    expect(backend.mute).toHaveBeenLastCalledWith(true);
+    await user.keyboard('{Control>}r{/Control}');
+    await waitFor(() => expect(backend.stop).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled());
+    await user.keyboard('{Control>}r{/Control}');
+    await waitFor(() => expect(backend.recordMore).toHaveBeenCalledTimes(2));
+    expect(backend.recordMore).toHaveBeenLastCalledWith('s1', 'mic1', false, false);
+  });
   it('starts a new recording with Ctrl+N, except while recording', async () => {
     const user = await review();
     await user.keyboard('{Control>}n{/Control}');
