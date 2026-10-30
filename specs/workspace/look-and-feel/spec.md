@@ -3,6 +3,9 @@ title: Look and feel
 code:
   - src/app/useContextMenuGuard.ts
   - src/App.tsx
+  - src/ui/fonts.css
+  - src/assets/fonts/
+  - scripts/hint-figtree.py
 ---
 # Look and feel
 
@@ -35,3 +38,22 @@ a desktop app, while Cut, Copy and Paste matter where text is typed.
 - **THEN** the system's editing menu appears, with Cut, Copy and Paste
 - **PROOF** test: src/app/useContextMenuGuard.test.ts::keeps the system menu in text fields
 - **PROOF** desk: open
+
+### Requirement: Text is sharp at 100% display scaling
+The app SHALL set its text in a hinted build of its typeface, in every weight its styles use,
+because the unhinted Figtree blurs at the app's 12–14 px sizes on a display at 100% scaling, and a
+weight without its own face would render in the nearest declared weight instead of its own.
+
+#### Scenario: Text renders sharply at 100% display scaling
+- **GIVEN** Windows at 100% display scaling
+- **WHEN** the person reads the sidebar, the transcript and Settings
+- **THEN** letter stems are crisp, with no grey fringe beside each stroke
+- **AND** the text keeps the Float v2 typeface, sizes and line breaks
+- **PROOF** test: src/ui/fonts.test.ts::ships hinted static Figtree faces
+- **PROOF** test: src/ui/fonts.test.ts::is the family the app and Storybook set text in
+- **PROOF** desk: open
+
+#### Scenario: Every weight the styles use has its own face
+- **WHEN** a style sets a font weight
+- **THEN** the bundled typeface has a face of that weight for Latin and extended Latin text
+- **PROOF** test: src/ui/fonts.test.ts::declares a face for every weight the styles use

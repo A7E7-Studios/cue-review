@@ -36,7 +36,7 @@ Window control names are "Minimize window", "Maximize window" or "Restore window
 
 ## Typography
 
-- **Family:** Figtree, bundled as a variable font through `@fontsource-variable/figtree` and imported in `src/main.tsx` and `.storybook/preview.tsx`. Fallbacks are `system-ui`, `Segoe UI` and sans-serif. Inter is the documented alternative. No Google Fonts: the CSP allows only `'self'`.
+- **Family:** Figtree, bundled as auto-hinted static weights (400, 500, 600, 700) in `src/assets/fonts/`, declared in `src/ui/fonts.css` and imported in `src/main.tsx` and `.storybook/preview.tsx`. `scripts/hint-figtree.py` builds them from `@fontsource-variable/figtree`; the variable font itself is unhinted and blurs at 12–14 px at 100% display scaling. A new weight needs a face there first. Fallbacks are `system-ui`, `Segoe UI` and sans-serif. Inter is the documented alternative. No Google Fonts: the CSP allows only `'self'`.
 - **Scale:** title 18/700; body 13.5; transcript 14 with 1.55 line height; meta 12; controls 12.5; shortcut hints 11; the dock timer 19 with tabular numbers.
 - **Attribution:** Figtree is Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree), licensed under the SIL Open Font License 1.1. The license text ships with the app: `public/licenses/Figtree-OFL.txt` (copied from `node_modules/@fontsource-variable/figtree/LICENSE`) is built into `dist/licenses/`, and Settings ends with the font's notice.
 

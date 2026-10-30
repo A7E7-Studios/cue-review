@@ -178,4 +178,4 @@ Workspace stories replace the backend through Storybook-only Vite aliases. Their
 
 The accessibility panel is an inspection aid; its findings are not currently a CI acceptance gate or a claim that every story passes an accessibility audit. Existing application tests remain the behavioral gate. Native capture, playback and window-management checks still require the desktop application.
 
-Figtree is bundled under the SIL Open Font License 1.1 through `@fontsource-variable/figtree`; no font is loaded from the network.
+Figtree is bundled under the SIL Open Font License 1.1 as auto-hinted static weights in `src/assets/fonts/`, which `scripts/hint-figtree.py` builds from the `@fontsource-variable/figtree` dev dependency (rebuilding needs Python with `fonttools`, `brotli` and `ttfautohint-py`); no font is loaded from the network.
