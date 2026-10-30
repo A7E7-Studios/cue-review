@@ -70,7 +70,7 @@ const meta = {
   title: 'Workspace/Transcript',
   component: Column,
   args: { scenario: 'review', playing: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'stuck-take', 'empty', 'long'] } },
+  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'stuck-take', 'empty', 'long'] } },
   render: args => <Column key={args.scenario} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Column>;

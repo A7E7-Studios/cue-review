@@ -25,7 +25,8 @@ nothing, or that names playback while recording, misleads the reader.
 - **THEN** "Return to playback" appears
 - **AND** pressing it scrolls the sentence the playhead last reached into view, also while the
   playhead sits in a pause between words, and the transcript follows playback again
-- **PROOF** test: src/workspace/TranscriptPane.test.tsx::Following playback
+- **PROOF** test: src/workspace/TranscriptPane.test.tsx::Following playback scrolls the playing row into view, stops when the reader scrolls away and returns on request
+- **PROOF** test: src/workspace/TranscriptPane.test.tsx::Following playback returns to the sentence the playhead last passed while it sits in a pause
 - **PROOF** desk: open
 
 #### Scenario: Nothing has played yet
@@ -53,4 +54,5 @@ button would then have nothing left to do.
 - **WHEN** they scroll the playing sentence, or the newest words while recording, back into view
 - **THEN** the button disappears and the transcript follows again
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::Following playback resumes following when the reader scrolls the playing row back into view
+- **PROOF** test: src/workspace/TranscriptPane.test.tsx::Following playback resumes following when the reader scrolls back to the newest words while recording
 - **PROOF** desk: open
