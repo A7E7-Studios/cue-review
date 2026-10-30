@@ -47,6 +47,10 @@ system-audio track. Diagnostic evidence is local in the main checkout's ignored
   recording, and useful errors and retry when blocked. The existing picker design and stored
   recordings stay unchanged.
 
+- **Q4 Technical design**: The owner approved frontend source sorting, bounded decoder diagnostics,
+  first-frame and connection timeout recovery through the existing Retry UI, and retaining
+  AVFoundation and MJPEG. Change camera access coordination only if testing demonstrates contention.
+
 ## Calls for the owner
 
 - Within a source category, retain the platform's discovery order. An alternative alphabetical
