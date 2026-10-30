@@ -86,6 +86,13 @@ The owner was away for these; each was taken on the measurements above.
 - **Silence.** Audio without speech is skipped only once 28 s of it wait, keeping its last second:
   skipping 2 s of supposed silence cut off words the detector had not yet found at the very end of
   a copy.
+- **The transcript at Stop looks final.** It is not marked as about to be replaced, though Q11 had
+  provisional words look different while recording: after Stop its words are already the
+  language's model's, and marking them would suggest they are guesses. Marking them is a small
+  change to the transcript column if the owner wants it.
+- **A refinement cut short is not resumed.** Closing the app or starting another recording stops it
+  and keeps the transcript from Stop; Retry transcribes the recording whole. Record more on the same
+  recording refines its earlier takes after the next Stop, as their stretches are still saved.
 - The stretches and their raw Whisper output are kept in the take folder (`stretches/`), as the
   whole-take output was. Refining forgets the stretches and keeps their raw output.
 - The vocabulary prompt applies to stretches, guesses and refinement as it did to both passes.

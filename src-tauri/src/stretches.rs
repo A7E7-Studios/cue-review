@@ -79,9 +79,9 @@ pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
     if pending_ms < MAX_STRETCH_MS {
         return None;
     }
-    let gap = regions
-        .windows(2)
-        .map(|pair| (pair[0].1, pair[1].0))
+    // The silence before the first region counts too.
+    let gap = std::iter::once((0, regions[0].0))
+        .chain(regions.windows(2).map(|pair| (pair[0].1, pair[1].0)))
         .filter(|&(end, start)| start <= MAX_STRETCH_MS && start >= end + SHORT_GAP_MS)
         .max_by_key(|&(end, start)| start - end);
     Some(Cut {
@@ -362,6 +362,8 @@ mod tests {
             cut(&[(0, 10_000), (10_300, 20_000), (20_500, 32_000)], 32_100),
             speech(20_250)
         );
+        // Silence before continuous speech: cut in that silence, not mid-word.
+        assert_eq!(cut(&[(20_000, 33_000)], 33_100), speech(10_000));
         // Gaps after 30 s do not count.
         assert_eq!(
             cut(&[(0, 30_100), (30_400, 33_000)], 33_100),
@@ -511,7 +513,7 @@ mod tests {
     }
 
     /// Feeds `test-results/replay/mic.wav` (a recorded take) through
-    /// [`crate::transcribe::live_cycle`] at real speed, as the live worker
+    /// [`crate::transcribe::live_guess`] and [`crate::transcribe::live_commit`] at real speed, as the live worker
     /// does, then transcribes the take as Stop does, and once more whole.
     fn replay() -> &'static Replay {
         static REPLAY: std::sync::OnceLock<Replay> = std::sync::OnceLock::new();

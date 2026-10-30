@@ -23,7 +23,7 @@ stop and take flow (`run_take`, `finish_takes`) belongs to the take-videos work 
 | Using them at Stop | `transcribe_media` reuses them when `source` is the file it would read (`mic.wav`, or `system.wav` when the take has no microphone, which it then reads instead of `audio.wav`), and `model` and `language` match; it transcribes only from `untilMs` (FFmpeg `-ss`), shifts those words, and joins | trusting them always: a changed model or language would mix two models in one transcript | — |
 | Retry, `cue transcribe` | delete the take's `stretches.json` first, so the whole take is transcribed | a flag through `transcribe_take`: touches the take flow's signatures | — |
 | Refining after Stop | after the Stop job, a background thread transcribes each take made from stretches whole (cancellable), replaces its words and forgets the stretches; `transcriptRevision` in the recording status tells the app to read the transcript again; a recording, Retry or a delete stops it | keeping the transcript from stretches: about 4 points more word errors (replays of take 3); a whole-take pass at Stop: 23 s of waiting for 5 minutes | proposal.md measurements |
-| The old live merge | `transcribe::merge_live` and the 30 s snapshot go; `transcribe_snapshot` stays for guesses | keeping both paths: two ways to the same screen | — |
+| The old live path | the live worker no longer uses `transcribe::merge_live`, `transcribe_snapshot` or the 30 s `snapshot_audio`; they stay for the ignored Whisper tests, which check the speech gate and alignment on base through them; guesses go through `guess_words` | deleting them: those tests check the gate and alignment that `transcribe_media` still relies on | — |
 
 ## What it touches
 

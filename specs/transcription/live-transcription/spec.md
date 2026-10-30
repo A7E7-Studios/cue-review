@@ -21,10 +21,12 @@ accurate as transcribing the whole take.
 ## Requirements
 
 ### Requirement: Speech is transcribed while recording, so Stop leaves little to do
-The app SHALL cut a take's speech into stretches of 10 to 30 s that end at a pause of at least
-0.6 s, transcribe each finished stretch once with the language's model while the recording goes
-on, and make the take's transcript from them at Stop, because the person should not wait after
-Stop for the whole take to be transcribed.
+The app SHALL cut a take's speech into stretches while the recording goes on, transcribe each
+finished stretch once with the language's model, and make the take's transcript from them at Stop,
+because the person should not wait after Stop for the whole take to be transcribed. A stretch is
+cut once 28 s of audio wait: at the last pause of at least 0.6 s between 10 and 30 s in; without
+one, past 30 s, in the middle of the longest gap of at least 0.2 s, the silence before the first
+word included; else at 30 s. Audio without speech is skipped, all but its last second.
 
 #### Scenario: The transcript is ready seconds after Stop
 - **GIVEN** a take recorded with a PC microphone or system audio, of any length
@@ -46,6 +48,8 @@ Stop for the whole take to be transcribed.
 - **WHEN** the person chooses Retry, or `cue transcribe` runs
 - **THEN** the whole take is transcribed again from its audio, ignoring the stretches
 - **PROOF** test: src-tauri/src/stretches.rs::tests::saved_stretches_are_used_only_when_they_match
+- **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::retry_forgets_stretches_and_refinements_stop_only_for_their_recording
+- **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_a_session_with_takes_again_settles_every_take
 
 #### Scenario: A take without live audio is transcribed after Stop
 - **GIVEN** a take with only device audio, or whose saved stretches are missing, damaged or made
@@ -53,11 +57,12 @@ Stop for the whole take to be transcribed.
 - **WHEN** the take stops
 - **THEN** the whole take is transcribed after Stop
 - **PROOF** test: src-tauri/src/stretches.rs::tests::saved_stretches_are_used_only_when_they_match
+- **PROOF** test: src-tauri/src/transcribe.rs::tests::the_audio_a_take_is_transcribed_from
 
 ### Requirement: A transcript made from stretches is refined after Stop
 The app SHALL transcribe each take whose transcript came from stretches once more as a whole, in
-the background after Stop, and replace its words, and SHALL give that up when a recording starts,
-Retry runs or the recording is deleted, because stretches made about 4 points more word errors than
+the background after Stop, and replace its words, and SHALL give that up when any recording starts,
+or Retry runs or a delete starts for that recording, because stretches made about 4 points more word errors than
 a whole-take pass on a five-minute review.
 
 #### Scenario: The words improve shortly after Stop
@@ -67,6 +72,7 @@ a whole-take pass on a five-minute review.
   by its words
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::stop_s_stretches_are_refined_by_a_whole_take_pass
 - **PROOF** test: src/App.test.tsx::reads the open transcript again once it is refined after Stop
+- **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::retry_forgets_stretches_and_refinements_stop_only_for_their_recording
 - **PROOF** desk: open
 
 ### Requirement: The words being spoken appear within a few seconds

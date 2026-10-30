@@ -406,10 +406,27 @@ fn run_whisper_with(
     }
     accept_whisper_output(&prefix, raw)
 }
-/// The model file a final transcription under `root` would use, for example
-/// `ggml-small.en.bin`; saved stretches are reused only with the same one.
-pub fn final_model_file(root: &Path) -> String {
-    file_name(&final_model(root).path)
+/// The audio a take folder is transcribed from, and the saved stretches to
+/// reuse with it (`usable` gives them for a file name): `mic.wav`; else
+/// `system.wav` when it has usable stretches, for a take without a
+/// microphone was cut into stretches from its system audio; else the mix
+/// `audio.wav`; else `video.mp4`.
+fn media_source(
+    folder: &Path,
+    usable: impl Fn(&str) -> Option<Stretches>,
+) -> (std::path::PathBuf, Option<Stretches>) {
+    if folder.join("mic.wav").exists() {
+        return (folder.join("mic.wav"), usable("mic.wav"));
+    }
+    if folder.join("system.wav").exists() {
+        if let Some(saved) = usable("system.wav") {
+            return (folder.join("system.wav"), Some(saved));
+        }
+    }
+    if folder.join("audio.wav").exists() {
+        return (folder.join("audio.wav"), None);
+    }
+    (folder.join("video.mp4"), None)
 }
 fn file_name(path: &Path) -> String {
     path.file_name()
@@ -774,23 +791,17 @@ fn transcribe_media_with(
         );
     }
     let language = settings::language(&settings::load(root));
-    let model_file = file_name(&model.path);
-    // A take without a microphone was cut into stretches from its system
-    // audio, which then replaces the mix it would otherwise read.
-    let saved_from = |name: &str| {
-        (reuse && folder.join(name).is_file())
-            .then(|| stretches::usable(folder, name, &model_file, language))
-            .flatten()
-    };
-    let (source, saved) = if folder.join("mic.wav").exists() {
-        (folder.join("mic.wav"), saved_from("mic.wav"))
-    } else if let Some(saved) = saved_from("system.wav") {
-        (folder.join("system.wav"), Some(saved))
-    } else if folder.join("audio.wav").exists() {
-        (folder.join("audio.wav"), None)
+    let (source, saved) = if reuse {
+        media_source(folder, |name| {
+            stretches::usable(folder, name, &file_name(&model.path), language)
+        })
     } else {
-        (folder.join("video.mp4"), None)
+        media_source(folder, |_| None)
     };
+    if reuse && saved.is_none() {
+        // Stretches this pass cannot use are no transcript to refine later.
+        stretches::forget(folder);
+    }
     let from_ms = saved
         .as_ref()
         .map_or(0, |saved| saved.until_ms.min(duration_ms));
@@ -1170,7 +1181,31 @@ Speech segment 0: start = 1.0, end = 2.0
         store.save_session(&session).unwrap();
         (temp, store, session.id)
     }
-    /// What a take's own transcript looks like: one segment 100 ms in.
+    #[test]
+    fn the_audio_a_take_is_transcribed_from() {
+        let folder = tempfile::tempdir().unwrap();
+        let has = |name: &str| fs::write(folder.path().join(name), b"").unwrap();
+        let saved = |name: &str| Some(Stretches::new(name, "ggml-small.en.bin", "en"));
+        let source = |usable: &dyn Fn(&str) -> Option<Stretches>| {
+            let (path, stretches) = media_source(folder.path(), usable);
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                stretches.map(|s| s.source),
+            )
+        };
+        assert_eq!(source(&|_| None), ("video.mp4".into(), None));
+        has("audio.wav");
+        has("system.wav");
+        // System audio replaces the mix only with stretches cut from it.
+        assert_eq!(source(&|_| None), ("audio.wav".into(), None));
+        assert_eq!(
+            source(&saved),
+            ("system.wav".into(), Some("system.wav".into()))
+        );
+        has("mic.wav");
+        assert_eq!(source(&saved), ("mic.wav".into(), Some("mic.wav".into())));
+        assert_eq!(source(&|_| None), ("mic.wav".into(), None));
+    }
     #[test]
     fn stop_s_stretches_are_refined_by_a_whole_take_pass() {
         let (_temp, store, id) = take_session(vec![
@@ -1212,6 +1247,7 @@ Speech segment 0: start = 1.0, end = 2.0
         assert!(!refine_with(&store, &id, &whole).unwrap());
         assert_eq!(folders.borrow().len(), 1);
     }
+    /// What a take's own transcript looks like: one segment 100 ms in.
     fn spoken(text: &str) -> Transcript {
         let mut transcript = sample_transcript(&[(text, 100, 900)]);
         transcript.segments[0].id = "segment-0".into();
