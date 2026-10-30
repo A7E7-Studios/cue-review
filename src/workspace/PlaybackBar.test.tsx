@@ -7,28 +7,71 @@ import type { PlaybackBarProps } from './types';
 
 const props = (overrides: Partial<PlaybackBarProps> = {}): PlaybackBarProps => ({
   timeMs: 33400, durationMs: 134000, segments: [{ startMs: 31000, endMs: 36500 }], takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }],
-  onSeek: vi.fn(), playing: false, canPlay: true, onTogglePlay: vi.fn(), speed: 1, onCycleSpeed: vi.fn(),
+  onSeek: vi.fn(), playing: false, canPlay: true, onTogglePlay: vi.fn(), speed: 1, onSpeed: vi.fn(),
   focused: false, onToggleFocus: vi.fn(), ...overrides,
 });
 
 describe('PlaybackBar', () => {
+  it('chooses a speed from the speed list', async () => {
+    const user = userEvent.setup();
+    const handlers = props();
+    render(<PlaybackBar {...handlers} platform="windows"/>);
+    const button = screen.getByRole('button', { name: 'Playback speed 1×' });
+    expect(button).toHaveAttribute('aria-haspopup', 'menu');
+    await user.click(button);
+    const list = screen.getByRole('menu', { name: 'Playback speed' });
+    const items = within(list).getAllByRole('menuitemradio');
+    expect(items.map(item => item.textContent)).toEqual(['0.5×', '0.75×', '1×Normal', '1.25×', '1.5×', '1.75×', '2×']);
+    expect(within(list).getByRole('menuitemradio', { name: '1× Normal' })).toHaveAttribute('aria-checked', 'true');
+    await user.click(within(list).getByRole('menuitemradio', { name: '1.5×' }));
+    expect(handlers.onSpeed).toHaveBeenCalledWith(1.5);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(button).toHaveFocus();
+  });
+  it('chooses a speed with the keyboard', async () => {
+    const user = userEvent.setup();
+    const handlers = props({ speed: 1.25 });
+    render(<PlaybackBar {...handlers} platform="windows"/>);
+    screen.getByRole('button', { name: 'Playback speed 1.25×' }).focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('menuitemradio', { name: '1.25×' })).toHaveFocus();
+    expect(screen.getByRole('menuitemradio', { name: '1.25×' })).toHaveAttribute('aria-checked', 'true');
+    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowUp}');
+    expect(screen.getByRole('menuitemradio', { name: '1.5×' })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(handlers.onSpeed).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Playback speed 1.25×' })).toHaveFocus();
+    await user.keyboard('{Enter}{End}{Enter}');
+    expect(handlers.onSpeed).toHaveBeenCalledWith(2);
+    expect(screen.getByRole('button', { name: 'Playback speed 1.25×' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}{Home} ');
+    expect(handlers.onSpeed).toHaveBeenLastCalledWith(0.5);
+  });
+  it('shows Focus video pressed with the same icon', () => {
+    const { rerender, container } = render(<PlaybackBar {...props()} platform="windows"/>);
+    const icon = () => container.querySelector('.cr-focus svg path')?.getAttribute('d');
+    const before = icon();
+    expect(screen.getByRole('button', { name: 'Focus video' })).toHaveAttribute('aria-pressed', 'false');
+    rerender(<PlaybackBar {...props({ focused: true })} platform="windows"/>);
+    expect(screen.getByRole('button', { name: 'Focus video' })).toHaveAttribute('aria-pressed', 'true');
+    expect(icon()).toBe(before);
+  });
   it('names its controls and reports them through callbacks', async () => {
     const user = userEvent.setup();
     const handlers = props();
     render(<PlaybackBar {...handlers} platform="windows"/>);
     const group = screen.getByRole('group', { name: 'Playback' });
     await user.click(within(group).getByRole('button', { name: 'Play' }));
-    await user.click(within(group).getByRole('button', { name: 'Playback speed 1×' }));
     await user.click(within(group).getByRole('button', { name: 'Focus video' }));
     expect(handlers.onTogglePlay).toHaveBeenCalledTimes(1);
-    expect(handlers.onCycleSpeed).toHaveBeenCalledTimes(1);
     expect(handlers.onToggleFocus).toHaveBeenCalledTimes(1);
     expect(group).toHaveTextContent('0:33 / 2:14');
   });
   it('switches names for playing, focus mode and speed', () => {
     render(<PlaybackBar {...props({ playing: true, focused: true, speed: 1.5, canPlay: false })} platform="macos"/>);
     expect(screen.getByRole('button', { name: 'Pause' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Restore transcript' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Focus video' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Playback speed 1.5×' })).toHaveTextContent('1.5×');
   });
   it('leaves Record more and its refusal to the recording bar under it', () => {

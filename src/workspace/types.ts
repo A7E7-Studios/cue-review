@@ -116,11 +116,11 @@ export interface PlaybackBarProps {
   /** False when the session has no playable video. */
   canPlay: boolean;
   onTogglePlay: () => void;
-  /** 0.75, 1, 1.5 or 2; labelled NAMES.playbackSpeed(speed). */
+  /** One of PLAYBACK_SPEEDS; the button is labelled NAMES.playbackSpeed(speed) and opens NAMES.playbackSpeedList. */
   speed: number;
-  onCycleSpeed: () => void;
+  onSpeed: (speed: number) => void;
+  /** Whether Focus video hides both sidebars; the NAMES.focusVideo toggle shows it as pressed. */
   focused: boolean;
-  /** Labelled NAMES.focusVideo or NAMES.restoreTranscript. */
   onToggleFocus: () => void;
 }
 
@@ -312,8 +312,11 @@ export const NAMES = {
   pause: 'Pause',
   playbackPosition: 'Playback position',
   playbackSpeed: (speed: number) => `Playback speed ${speed}×`,
+  playbackSpeedList: 'Playback speed',
+  normalSpeed: 'Normal',
   focusVideo: 'Focus video',
-  restoreTranscript: 'Restore transcript',
+  /** Focus video's tooltip while it is pressed. */
+  leaveFocus: 'Show the sidebars again (Esc)',
   recordMore: 'Record more',
 
   // Recording bar (capture controls)
