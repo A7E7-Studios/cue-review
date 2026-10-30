@@ -144,6 +144,8 @@
   --color-scrim: rgba(16, 20, 26, .33);
   --color-dialog: var(--color-sheet);
   --color-dialog-edge: var(--color-sheet-edge);
+  /* A list that opens over a dialog, such as the Appearance dropdown's. */
+  --color-dialog-menu: var(--color-sheet);
 
   /* Media */
   --shadow-video: 0 0 0 1px rgba(24, 24, 27, .08), 0 10px 30px rgba(16, 24, 40, .10);
@@ -269,6 +271,7 @@
   --color-scrim: rgba(0, 0, 0, .50);
   --color-dialog: #222227;
   --color-dialog-edge: rgba(255, 255, 255, .09);
+  --color-dialog-menu: #2B2B31;
 
   --shadow-video: 0 0 0 1px rgba(255, 255, 255, .08), 0 10px 30px rgba(0, 0, 0, .35);
   --shadow-video-live: 0 0 0 2px var(--color-record), 0 10px 30px rgba(0, 0, 0, .35);

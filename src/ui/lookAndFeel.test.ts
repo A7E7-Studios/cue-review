@@ -46,12 +46,20 @@ describe('dialogs', () => {
     // Tertiary text stays legible on the lifted surface (WCAG 2.2: 4.5:1).
     const [text, surface] = [luminance(token('color-text-tertiary', 'dark')!), luminance(dialog)];
     expect((text + 0.05) / (surface + 0.05)).toBeGreaterThanOrEqual(4.5);
+    // Every dialog takes the dialog surface: no .ui-dialog rule paints itself with the sheet.
+    for (const path of stylesheets) {
+      for (const [, body] of read(path).matchAll(/\.ui-dialog[^{]*{([^}]*)}/g)) expect(body, path).not.toMatch(/(background|border-color):[^;]*--color-sheet/);
+    }
     expect(read('src/dialogs/SettingsDialog.css')).toMatch(/background:\s*var\(--color-dialog\)/);
+    expect(read('src/styles.css')).toMatch(/\.ui-dialog\.app-dialog\s*{[^}]*background:\s*var\(--color-dialog\)/);
+    // A list that opens over the dialog sits lighter still.
+    expect(luminance(token('color-dialog-menu', 'dark')!)).toBeGreaterThan(luminance(dialog));
   });
 
   it('keeps the light theme backdrop', () => {
     expect(token('color-scrim')).toBe('rgba(16, 20, 26, .33)');
     expect(token('color-dialog')).toBe('var(--color-sheet)');
+    expect(token('color-dialog-edge')).toBe('var(--color-sheet-edge)');
   });
 });
 
@@ -60,7 +68,7 @@ describe('form controls', () => {
     const settings = read('src/dialogs/SettingsDialog.css');
     expect(settings).toMatch(/@supports \(appearance: base-select\)/);
     expect(settings).toMatch(/\.settings-dialog select::picker\(select\)\s*{\s*appearance:\s*base-select/);
-    expect(settings).toMatch(/\.settings-dialog select::picker\(select\)\s*{[^}]*background:\s*var\(--color-sheet\)/);
+    expect(settings).toMatch(/\.settings-dialog select::picker\(select\)\s*{[^}]*background:\s*var\(--color-dialog-menu\)/);
     expect(settings).toMatch(/\.settings-dialog option::checkmark/);
   });
 });

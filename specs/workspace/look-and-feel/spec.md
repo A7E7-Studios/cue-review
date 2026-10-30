@@ -95,7 +95,7 @@ weight without its own face would render in the nearest declared weight instead 
 
 ### Requirement: Scrollbars look like the app's
 The app SHALL draw every scrollbar as a slim rounded thumb on a clear track, without arrow buttons,
-darker under the pointer, in both themes, and SHALL keep a dialog's scrollbar clear of its rounded
+more visible under the pointer, in both themes, and SHALL keep a dialog's scrollbar clear of its rounded
 corners, because the default Windows scrollbar looks foreign beside the app's controls and its
 square ends cut into a rounded dialog.
 
@@ -103,7 +103,7 @@ square ends cut into a rounded dialog.
 - **GIVEN** the sidebar, the transcript, a picker or a dialog with more content than fits
 - **WHEN** the person looks at its scrollbar
 - **THEN** it is a slim rounded thumb on a clear track with no arrow buttons
-- **AND** the thumb darkens while the pointer is over it
+- **AND** the thumb gets more visible while the pointer is over it
 - **PROOF** test: src/ui/lookAndFeel.test.ts::every scroll area uses the app scrollbar
 - **PROOF** desk: open
 
@@ -153,5 +153,6 @@ does not read as in front.
 #### Scenario: The light theme keeps its backdrop
 - **GIVEN** the light theme
 - **WHEN** a dialog opens
-- **THEN** the backdrop and the dialog's surface look as they did before this change
+- **THEN** the backdrop is a grey scrim at a third opacity and the dialog's surface is the sheet's
+  white
 - **PROOF** test: src/ui/lookAndFeel.test.ts::keeps the light theme backdrop

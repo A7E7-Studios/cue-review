@@ -125,8 +125,8 @@ input[type='checkbox'] { margin: 0; }
 
 /* Name and delete dialogs, in the Settings dialog's language. */
 .ui-dialog.app-dialog {
-  width: 380px; padding: 20px 22px 22px; border-color: var(--color-sheet-edge); border-radius: 12px;
-  background: var(--color-sheet); color: var(--color-text); font-size: var(--font-size-body); line-height: var(--line-height-body);
+  width: 380px; padding: 20px 22px 22px; border-color: var(--color-dialog-edge); border-radius: 12px;
+  background: var(--color-dialog); color: var(--color-text); font-size: var(--font-size-body); line-height: var(--line-height-body);
 }
 .app-dialog .dialog-title h2 { margin-bottom: 14px; color: var(--color-text); font-size: 16px; font-weight: 700; }
 .app-dialog .dialog-description { margin-bottom: 0; color: var(--color-text-secondary); font-size: var(--font-size-body); line-height: 1.55; overflow-wrap: anywhere; }
