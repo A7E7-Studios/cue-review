@@ -50,7 +50,7 @@ input[type='checkbox'] { margin: 0; }
 .app-body { position: relative; flex: 1; min-height: 0; display: flex; }
 /* The sidebar slides out and in (window-chrome spec): its slot's width eases to 0 while the sidebar,
    held at the slot's right edge, moves out with it, so the sheet widens in step. The clip margin
-   keeps the macOS panel's shadow. While recording and under reduced motion it changes at once. */
+   keeps the macOS panel's shadow. Beside a live preview or a recording, and under reduced motion, it changes at once. */
 .app { --size-sidebar-slot: var(--size-sidebar); }
 .app[data-platform='macos'] { --size-sidebar-slot: calc(var(--size-sidebar) + 8px); }
 .app-sidebar-slot {
