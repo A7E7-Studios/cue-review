@@ -30,7 +30,7 @@ export function litBars(level: number) {
  */
 export function shortMicrophoneName(name: string) {
   const device = name.replace(/^Default\s+[—-]\s+/, '');
-  return device.match(/^\p{L}+ \((.+)\)$/u)?.[1] ?? device;
+  return device.match(/^[\p{L}\p{M}]+ \((.+)\)$/u)?.[1] ?? device;
 }
 
 export interface RecordingDockViewProps extends RecordingDockProps {
@@ -61,13 +61,14 @@ export function RecordingDock({ elapsedMs, take, audioLevel, sourceName, hasMicr
       <span className="cr-dock-divider" aria-hidden="true"/>
       <button type="button" className="cr-btn cr-dock-source" disabled title={`${sourceName}. The source is locked while recording.`}><Icon name="monitor" strokeWidth={1.7}/><span className="cr-dock-label">{sourceName}</span></button>
       {/* The chip is the toggle. Its name and meter lie over it as siblings: a button cannot hold a meter, and the
-          button's accessible name stays "Mute microphone", with the name (or Muted) as its description. */}
+          button's accessible name stays "Mute microphone", with the name (or Muted) as its description; hidden from the
+          tree on its own, so a screen reader does not read it twice. */}
       {hasMicrophone && <span className="cr-mic-chip" data-muted={muted || undefined}>
         <button type="button" className="cr-btn cr-mic-toggle" aria-label={NAMES.muteMicrophone} aria-pressed={muted} aria-describedby={nameId}
           title={`${muted ? 'Unmute' : 'Mute'} ${device}`} onClick={() => onMuted(!muted)}>
           <Icon name={muted ? 'micOff' : 'mic'} strokeWidth={1.7}/>
         </button>
-        <span id={nameId} className="cr-mic-name">{muted ? NAMES.muted : shortMicrophoneName(device)}</span>
+        <span id={nameId} className="cr-mic-name" aria-hidden="true">{muted ? NAMES.muted : shortMicrophoneName(device)}</span>
         <span className="cr-meter" role="meter" aria-label={NAMES.microphoneLevel} aria-valuemin={METER_FLOOR_DB} aria-valuemax={0} aria-valuenow={db}
           aria-valuetext={muted ? NAMES.muted : `${db} dB`}>
           {METER.map((height, index) => <span key={index} aria-hidden="true" data-level={index >= lit ? 'off' : index >= METER_HIGH ? 'high' : 'low'} style={muted ? undefined : { height }}/>)}

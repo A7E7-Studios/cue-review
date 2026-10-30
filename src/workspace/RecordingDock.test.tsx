@@ -83,6 +83,7 @@ describe('RecordingDock', () => {
     expect(mute.title).toBe('Mute Default — Microphone (HD Pro Webcam C920)');
     expect(shortMicrophoneName('Headset Microphone (Oculus Virtual Audio Device)')).toBe('Headset Microphone (Oculus Virtual Audio Device)');
     expect(shortMicrophoneName('Mikrofon (HD Pro Webcam C920)')).toBe('HD Pro Webcam C920');
+    expect(shortMicrophoneName('माइक्रोफ़ोन (HD Pro Webcam C920)')).toBe('HD Pro Webcam C920');
   });
   it('keeps the chip and a flat meter while muted, and says Muted', () => {
     render(<RecordingDock {...props({ microphoneName: 'Microphone (HD Pro Webcam C920)', muted: true })}/>);
