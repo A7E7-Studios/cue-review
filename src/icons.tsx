@@ -10,6 +10,8 @@ const paths = {
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   agent: 'M4 5h16v14H4zM8 10l3 2-3 2M13 14h3',
   monitor: 'M3 5h18v11H3zM8 20h8M12 16v4',
+  // A transcript line, in search results.
+  text: 'M4 6h16M4 11h16M4 16h10',
   mic: 'M12 3.5a3 3 0 0 0-3 3V12a3 3 0 0 0 6 0V6.5a3 3 0 0 0-3-3zM5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3',
   compact: 'M3 5h18v14H3zM12.5 12h6v4.5h-6z',
   // Drawn filled in the mocks: pass `filled`.

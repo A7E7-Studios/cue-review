@@ -14,11 +14,6 @@ export interface TitleBarProps {
   sidebarVisible: boolean;
   /** Labelled NAMES.hideSidebar or NAMES.showSidebar. */
   onToggleSidebar: () => void;
-  /** Session-name filter for the sidebar (decision 11). */
-  search: string;
-  onSearch: (value: string) => void;
-  /** Ctrl/⌘+K focuses this field. */
-  searchRef?: RefObject<HTMLInputElement | null>;
   onOpenSettings: () => void;
   /** Compact recording mode: only a drag strip, leaving room for the macOS traffic lights. */
   compact?: boolean;
@@ -255,6 +250,13 @@ export const NAMES = {
   restoreWindow: 'Restore window',
   closeWindow: 'Close window',
   searchRecordings: 'Search recordings',
+  /** The search window and the sidebar row that opens it. */
+  search: 'Search',
+  searchPlaceholder: 'Search recordings and transcripts',
+  searchResults: 'Search results',
+  searchRecent: 'Recent',
+  searchRecordingsGroup: 'Recordings',
+  searchLinesGroup: 'In transcripts',
   settings: 'Settings',
   showSidebar: 'Show sidebar',
   hideSidebar: 'Hide sidebar',

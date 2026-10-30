@@ -10,6 +10,7 @@ import type { Platform } from './chrome/windowApi';
 import { SettingsDialog } from './dialogs/SettingsDialog';
 import { Icon } from './icons';
 import { errorMessage, seekTime } from './review';
+import { SearchDialog } from './search/SearchDialog';
 import { Sidebar } from './Sidebar';
 import { CaptureControls } from './workspace/CaptureControls';
 import { captureEmptyState, MediaStage, reviewEmptyState } from './workspace/MediaStage';
@@ -87,7 +88,12 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [discarding, setDiscarding] = useState<{ id: string; index: number } | null>(null);
   /** Why Record more failed, shown beside its pill rather than in the workspace banner. */
   const [recordMoreError, setRecordMoreError] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** Transcripts the search window searches, by session id, with the status and length they were read at. */
+  const [searchTranscripts, setSearchTranscripts] = useState<ReadonlyMap<string, Transcript>>(() => new Map());
+  const searchRead = useRef(new Map<string, string>());
+  /** Each Ctrl/⌘+F asks the transcript to open its find bar. */
+  const [findRequest, setFindRequest] = useState(0);
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
   const [mediaRevision, setMediaRevision] = useState(0);
   /** The session whose video stays unloaded while a take records and is appended to video.mp4. */
@@ -100,7 +106,6 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [draftSection, setDraftSection] = useState<string | null>(null);
 
   const video = useRef<HTMLVideoElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
   const appRoot = useRef<HTMLDivElement>(null);
   const sheet = useRef<HTMLElement>(null);
   const deletionFocus = useRef<HTMLElement | null>(null);
@@ -369,19 +374,41 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
   const recordCommand = () => { if (recording) void stop(); else if (draft) void start(); else void recordMore(); };
 
-  const changeSearch = (value: string) => {
-    setSearch(value);
-    if (value.trim() && !sidebarVisible) showSidebar();
+  /** Search waits while recording, like the sidebar's rows. */
+  const openSearch = () => { if (!locked) setSearchOpen(true); };
+  // Reads the transcripts of settled recordings when search opens, a few at a time, and again only
+  // for a recording whose status or length changed.
+  useEffect(() => {
+    if (!searchOpen) return;
+    let alive = true;
+    const stale = sessions.filter(item => settled(item) && searchRead.current.get(item.id) !== `${item.status}:${item.durationMs}`);
+    const next = async () => {
+      for (let item = stale.shift(); item && alive; item = stale.shift()) {
+        const key = `${item.status}:${item.durationMs}`;
+        const read = await backend.transcript(item.id).catch(() => null);
+        if (!alive || !read) continue;
+        searchRead.current.set(item.id, key);
+        const id = item.id;
+        setSearchTranscripts(current => new Map(current).set(id, read));
+      }
+    };
+    void Promise.all([next(), next(), next(), next()]);
+    return () => { alive = false; };
+  }, [searchOpen, sessions]);
+  /** A search result: the recording, standing at the line's time when there is one. */
+  const openResult = (id: string, atMs?: number) => {
+    void openSession(id);
+    if (atMs !== undefined) restorePlayback.current = { id, time: atMs / 1000, playing: false };
   };
   useShortcuts({
     platform: os,
-    enabled: !dialog && !deletion && !discarding && !settingsOpen && !captureMenu,
+    enabled: !dialog && !deletion && !discarding && !settingsOpen && !searchOpen && !captureMenu,
     onRecord: recordCommand,
     onNew: prepare,
     onTogglePlay: mode === 'review' && videoSrc ? () => void togglePlay() : undefined,
     onSeekBy: mode === 'review' ? delta => seek(time + delta) : undefined,
-    search: searchRef,
-    onClearSearch: () => setSearch(''),
+    onSearch: locked ? undefined : openSearch,
+    onFind: mode === 'review' ? () => setFindRequest(value => value + 1) : undefined,
     onEscape: sidebarOverlay ? dismissOverlay : undefined,
   });
 
@@ -666,14 +693,14 @@ export default function App({ platform: requested }: AppProps = {}) {
         status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
         error={transcriptError} onRetry={() => void retry()} retryDisabled={captureBlocked} retryBusy={busy}
-        discardTake={stuckTake?.index} onDiscardTake={stuckTake && session ? () => { setDialogError(''); setDiscarding({ id: session.id, index: stuckTake.index }); } : undefined}/>
+        findRequest={findRequest} discardTake={stuckTake?.index} onDiscardTake={stuckTake && session ? () => { setDialogError(''); setDiscarding({ id: session.id, index: stuckTake.index }); } : undefined}/>
     </div>}
   </main>;
 
   // The sidebar slides out and in, except beside a live preview or a recording, so live video is never resized by an animation.
   const liveVideo = mode !== 'review';
   const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, liveVideo);
-  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
+  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} utilities={null} onSearch={openSearch}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
     onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
@@ -682,7 +709,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
     onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
   const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={sidebar.toggle}
-    search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
+    onOpenSettings={openSettings}/>;
 
   return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}
     data-sidebar-motion={liveVideo ? 'instant' : 'slide'} data-compact={compact || undefined}>
@@ -698,6 +725,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     </>}
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
+    <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} sessions={sessions} sections={projects} transcripts={searchTranscripts}
+      onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
