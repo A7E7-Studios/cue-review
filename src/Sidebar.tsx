@@ -58,6 +58,8 @@ export function Sidebar(props: SidebarProps) {
   const [insertion, setInsertion] = useState<{ id: string; after: boolean } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
+  /** The control that opened the menu: a press on it toggles the menu rather than counting as outside. */
+  const menuAnchor = useRef<HTMLElement | null>(null);
   const typeahead = useRef({ text: '', at: 0 });
   const movable = (item: Session) => !locked && !inProgress(item);
   const expand = (id: string) => setClosed(current => { const next = new Set(current); next.delete(id); return next; });
@@ -86,7 +88,7 @@ export function Sidebar(props: SidebarProps) {
     typeahead.current = { text: '', at: 0 };
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !returnFocus.current?.contains(event.target)) setMenu(null);
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !menuAnchor.current?.contains(event.target)) setMenu(null);
     };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
@@ -96,17 +98,18 @@ export function Sidebar(props: SidebarProps) {
   const openMenu = (item: Session, anchor: HTMLElement, x?: number, y?: number) => {
     if (!movable(item)) return;
     const rect = anchor.getBoundingClientRect();
-    returnFocus.current = anchor;
+    returnFocus.current = anchor; menuAnchor.current = anchor;
     setMenu({ kind: 'session', id: item.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
   };
-  const openListMenu = (x: number, y: number) => {
+  const openListMenu = (x: number, y: number, anchor: HTMLElement | null = null) => {
     if (locked) return;
     returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menuAnchor.current = anchor;
     setMenu({ kind: 'list', id: '', x, y, moving: false });
   };
   const openSectionMenu = (section: Project, anchor: HTMLElement, x?: number, y?: number) => {
     if (locked) return;
-    const rect = anchor.getBoundingClientRect(); returnFocus.current = anchor;
+    const rect = anchor.getBoundingClientRect(); returnFocus.current = anchor; menuAnchor.current = anchor;
     setMenu({ kind: 'section', id: section.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
   };
   const reorder = async (id: string, targetId: string | null, after: boolean) => {
@@ -182,7 +185,7 @@ export function Sidebar(props: SidebarProps) {
         {/* Drawn from data-meta by CSS, so the row's name and text stay the session name alone. */}
         {meta && <span className="session-meta" aria-hidden="true" data-meta={meta}/>}
       </button>
-      <button className="session-options" aria-label={NAMES.recordingOptions} title={`Options for ${item.name}`} aria-haspopup="menu" aria-expanded={menu?.kind === 'session' && menu.id === item.id} disabled={!movable(item)} onClick={event => menu?.kind === 'session' && menu.id === item.id ? closeMenu() : openMenu(item, event.currentTarget)}><Icon name="more"/></button>
+      <button className="session-options" onContextMenu={event => { event.preventDefault(); openMenu(item, event.currentTarget, event.clientX, event.clientY); }} aria-label={NAMES.recordingOptions} title={`Options for ${item.name}`} aria-haspopup="menu" aria-expanded={menu?.kind === 'session' && menu.id === item.id} disabled={!movable(item)} onClick={event => menu?.kind === 'session' && menu.id === item.id ? closeMenu() : openMenu(item, event.currentTarget)}><Icon name="more"/></button>
     </div>;
   };
   const matches = filtering ? sessions.filter(item => item.name.toLocaleLowerCase().includes(query)) : sessions;
@@ -200,7 +203,7 @@ export function Sidebar(props: SidebarProps) {
     <div className="side-tools">
       {/* Its context menu (right-click, Shift+F10 or the Menu key) is the sidebar's: New session and New section. */}
       <button className="new-session has-kbd" disabled={locked} onClick={props.onNew} aria-keyshortcuts={newKey.aria}
-        onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openListMenu(event.clientX || rect.left, event.clientY || rect.bottom); }}>
+        onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openListMenu(event.clientX || rect.left, event.clientY || rect.bottom, event.currentTarget); }}>
         <Icon name="plus" size={16} strokeWidth={2}/>
         <span className="new-session-label">{NAMES.newSession}</span>
         <kbd className="kbd-hint" aria-hidden="true">{newKey.label}</kbd>
@@ -217,7 +220,7 @@ export function Sidebar(props: SidebarProps) {
               onDragEnd={finishDrag}
               onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }}
               aria-expanded={!sectionClosed} onClick={() => toggleSection(section.id)}><span>{section.name}</span><Icon name="chevron" className="section-chevron"/></button>
-            <button className="section-options" disabled={locked} aria-label={NAMES.sectionOptions(section.name)} aria-haspopup="menu" aria-expanded={menu?.kind === 'section' && menu.id === section.id} onClick={event => menu?.kind === 'section' && menu.id === section.id ? closeMenu() : openSectionMenu(section, event.currentTarget)}><Icon name="more"/></button>
+            <button className="section-options" onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }} disabled={locked} aria-label={NAMES.sectionOptions(section.name)} aria-haspopup="menu" aria-expanded={menu?.kind === 'section' && menu.id === section.id} onClick={event => menu?.kind === 'section' && menu.id === section.id ? closeMenu() : openSectionMenu(section, event.currentTarget)}><Icon name="more"/></button>
           </div>
           <div className="section-reveal" data-open={!sectionClosed} aria-hidden={sectionClosed} inert={sectionClosed}><div className="section-sessions">{matches.filter(item => item.projectId === section.id).map(renderSession)}{!sessions.some(item => item.projectId === section.id) && <p className="side-empty">{dragging ? 'Drop here' : NAMES.noRecordings}</p>}</div></div>
         </section>;

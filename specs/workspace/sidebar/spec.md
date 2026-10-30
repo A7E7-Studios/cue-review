@@ -39,9 +39,12 @@ keyboard.
 #### Scenario: Right-clicking empty space in the sidebar
 - **GIVEN** the app in review
 - **WHEN** the reviewer right-clicks empty space in the sidebar's list
-- **THEN** a menu offers "New session" and "New section"
-- **AND** a right-click on a session row or a section heading still opens that row's own menu
+- **THEN** a menu offers "New session" and "New section", and a click outside it closes it
+- **AND** a right-click on a session row or a section heading, or on its options button, still opens
+  that row's own menu
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu right-clicking empty space in the list offers New session and New section
+- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu closes the sidebar menu on a click outside it
+- **PROOF** test: src/Sidebar.test.tsx::the sidebar menu a right-click on a row or section options button opens its own menu
 - **PROOF** desk: open
 
 #### Scenario: Reaching the sidebar menu from the keyboard

@@ -25,7 +25,7 @@
 
 .side-header { display: flex; align-items: center; flex: none; height: 28px; margin-bottom: -10px; }
 /* macOS: the panel's top row is centred on y = 32 (8px inset, 14px padding, 20px row), on the traffic
-   lights that trafficLightPosition (24, 26) puts 26px down; New recording follows at y = 60. */
+   lights that trafficLightPosition (24, 26) puts 26px down; New session follows at y = 60. */
 .sidebar[data-platform='macos'] .side-header { height: 20px; margin-bottom: 0; }
 /* The lights end about 78px from the window edge; the panel starts 18px in (8px inset, 10px padding). */
 .side-traffic-lights { flex: none; width: calc(var(--size-traffic-lights-width) - 18px); height: var(--size-traffic-lights-height); }

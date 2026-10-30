@@ -192,6 +192,24 @@ describe('the sidebar menu', () => {
     expect(onNew).toHaveBeenCalledTimes(1);
   });
 
+  test('closes the sidebar menu on a click outside it', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    fireEvent.contextMenu(document.querySelector('.recording-list')!, {clientX: 40, clientY: 400});
+    expect(screen.getByRole('menu', {name:'Sidebar actions'})).toBeVisible();
+    await user.click(screen.getByRole('button', {name:'Settings'}));
+    expect(screen.queryByRole('menu', {name:'Sidebar actions'})).not.toBeInTheDocument();
+  });
+
+  test('a right-click on a row or section options button opens its own menu', () => {
+    renderSidebar();
+    fireEvent.contextMenu(screen.getByRole('button', {name:'Recording options'}));
+    expect(screen.getByRole('menu', {name:'Recording actions'})).toBeVisible();
+    fireEvent.contextMenu(screen.getByRole('button', {name:'Section options for Workspace'}));
+    expect(screen.getByRole('menu', {name:'Section actions'})).toBeVisible();
+    expect(screen.queryByRole('menu', {name:'Sidebar actions'})).not.toBeInTheDocument();
+  });
+
   test('a row keeps its own menu, and the New session button opens the sidebar menu from the keyboard', async () => {
     const user = userEvent.setup();
     renderSidebar();
