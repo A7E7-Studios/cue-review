@@ -44,7 +44,7 @@
 
 /* Rows */
 .cr-transcript-scroll {
-  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scroll-padding-block: 12px;
+  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scroll-padding-block: 12px;
   display: flex; flex-direction: column; gap: 1px; padding: 0 10px 14px;
 }
 .cr-row {
