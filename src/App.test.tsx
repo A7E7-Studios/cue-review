@@ -93,6 +93,13 @@ const newSection = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(screen.getByRole('menuitem', { name: NAMES.newSection }));
 };
 const transcriptPane = () => within(screen.getByRole('region', { name: NAMES.transcript }));
+/** A text field beside the app, for the shortcuts and menus that leave text fields alone. */
+function textField() {
+  const field = document.body.appendChild(document.createElement('input'));
+  field.type = 'search';
+  onTestFinished(() => field.remove());
+  return field;
+}
 async function open(user: TestUser, name: string | RegExp = /Review Alpha/) {
   await user.click(sidebar().getByRole('button', { name }));
 }
@@ -276,7 +283,7 @@ describe('keyboard interaction', () => {
   });
   it('ignores shortcuts in editable fields and open pickers, and never turns a modifier combination into a bare key', async () => {
     const user = await ready();
-    screen.getByRole('searchbox', { name: NAMES.searchRecordings }).focus();
+    textField().focus();
     await user.keyboard('{Control>}r{/Control}{Control>}n{/Control}');
     await user.click(screen.getByRole('button', { name: 'Display 1' }));
     expect(screen.getByRole('group', { name: NAMES.captureSources })).toBeVisible();
@@ -302,21 +309,56 @@ describe('keyboard interaction', () => {
     fireEvent.keyDown(document.body, { key: 'ArrowLeft' });
     expect(media.currentTime).toBe(0);
   });
-  it('focuses search with Ctrl+K, filters the sidebar by name and clears it with Escape', async () => {
-    sessions = [newSession(), { ...newSession('s2'), projectId: null, name: 'Quest navigation' }];
+  it('opens search from the sidebar and with Ctrl+K', async () => {
+    sessions = [newSession(), { ...newSession('s2'), projectId: null, name: 'Quest navigation', createdAt: '2026-10-28T10:00:00Z' }];
     const user = await ready();
-    const field = screen.getByRole('searchbox', { name: NAMES.searchRecordings });
-    await user.keyboard('{Control>}k{/Control}');
+    await user.click(sidebar().getByRole('button', { name: NAMES.search }));
+    let dialog = screen.getByRole('dialog', { name: NAMES.search });
+    const field = within(dialog).getByRole('combobox', { name: NAMES.searchRecordings });
     expect(field).toHaveFocus();
-    await user.type(field, 'quest');
-    expect(sidebar().queryByRole('button', { name: 'Review Alpha' })).not.toBeInTheDocument();
-    expect(sidebar().getByRole('button', { name: 'Quest navigation' })).toBeVisible();
-    await user.type(field, 'zebra');
-    expect(sidebar().getByText(NAMES.noMatches)).toBeVisible();
+    // Before typing: the most recent recordings, newest first.
+    expect(within(dialog).getAllByRole('option').map(option => option.textContent)).toEqual([expect.stringContaining('Quest navigation'), expect.stringContaining('Review Alpha')]);
     await user.keyboard('{Escape}');
-    expect(field).toHaveValue('');
-    expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(sidebar().getByRole('button', { name: NAMES.search })).toHaveFocus();
+    // Ctrl+K from a text field too.
+    textField().focus();
+    await user.keyboard('{Control>}k{/Control}');
+    dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'here');
+    await waitFor(() => expect(within(dialog).getByRole('option', { name: /Review Alpha.*Look here.*0:01/ })).toBeVisible());
     expect(backend.start).not.toHaveBeenCalled();
+  });
+  it('opens a transcript line at its time', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}k{/Control}');
+    const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+    await user.type(within(dialog).getByRole('combobox'), 'look');
+    const line = await within(dialog).findByRole('option', { name: /Look here/ });
+    await waitFor(() => expect(line).toHaveAttribute('aria-selected', 'true'));
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    const media = document.querySelector('video')!;
+    fireEvent.loadedMetadata(media);
+    expect(media.currentTime).toBe(1);
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+  it('does not open search while recording', async () => {
+    const user = await ready();
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    await user.keyboard('{Control>}k{/Control}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(sidebar().getByRole('button', { name: NAMES.search })).toBeDisabled();
+  });
+  it('finds in the transcript with Ctrl+F', async () => {
+    const user = await review();
+    (document.activeElement as HTMLElement).blur();
+    await user.keyboard('{Control>}f{/Control}');
+    const field = transcriptPane().getByRole('searchbox', { name: NAMES.findInTranscript });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, 'look');
+    expect(transcriptPane().getByRole('status')).toHaveTextContent('1 of 1');
   });
 });
 
@@ -410,7 +452,7 @@ describe('project and session workflows', () => {
     expect(fireEvent.contextMenu(screen.getByRole('region', { name: NAMES.recordingVideo }))).toBe(false);
     expect(fireEvent.contextMenu(screen.getByRole('button', { name: NAMES.settings }))).toBe(false);
     expect(fireEvent.contextMenu(document.body)).toBe(false);
-    expect(fireEvent.contextMenu(screen.getByRole('searchbox', { name: NAMES.searchRecordings }))).toBe(true);
+    expect(fireEvent.contextMenu(textField())).toBe(true);
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
   it('creates a section directly from a recording menu and moves only that recording', async () => {
@@ -559,16 +601,6 @@ describe('playback controls', () => {
     expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
     expect(document.querySelector('.cr-transcript-column')).toBeInTheDocument();
   });
-  it('keeps focus when a search shows the sidebar, and hides it again with its toggle', async () => {
-    const user = await review();
-    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
-    await user.type(screen.getByRole('searchbox', { name: NAMES.searchRecordings }), 'alpha');
-    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
-    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
-    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
-    expect(document.querySelector('.cr-transcript-column')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: NAMES.focusVideo })).toHaveAttribute('aria-pressed', 'true');
-  });
   it('keeps both sidebars hidden in focus when a narrow window widens', async () => {
     window.innerWidth = 900;
     const user = await ready();
@@ -710,12 +742,6 @@ describe('layout', () => {
       await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
       expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
     } finally { delete document.documentElement.dataset.motion; }
-  });
-  it('shows the sidebar when a search starts while it is hidden', async () => {
-    window.innerWidth = 900;
-    const user = await ready();
-    await user.type(screen.getByRole('searchbox', { name: NAMES.searchRecordings }), 'alpha');
-    expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
   });
   it('puts the collapse control in the sidebar panel only on macOS, beside the toolbar', async () => {
     const user = await ready({ platform: 'macos' });
@@ -1563,7 +1589,7 @@ describe('local setup recovery and request races', () => {
 describe('reload keys, device readiness and request races', () => {
   it('never lets Ctrl+R or F5 reach the webview, in a field, a picker or a dialog, and records with the physical R key', async () => {
     const user = await ready();
-    const search = screen.getByRole('searchbox', { name: NAMES.searchRecordings });
+    const search = textField();
     expect(press(search, { key: 'r', code: 'KeyR', ctrlKey: true })).toBe(true);
     expect(press(search, { key: 'F5', code: 'F5' })).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Display 1' }));

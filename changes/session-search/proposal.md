@@ -2,6 +2,9 @@
 title: Search recordings and transcripts from the sidebar, and slide in Find
 capabilities:
   - workspace/search
+  - workspace/sidebar
+  - workspace/window-chrome
+  - workspace/playback-controls
 review: unreviewed
 ---
 # Search recordings and transcripts from the sidebar, and slide in Find
@@ -29,6 +32,9 @@ recordings by name and by what was said, while keeping a find inside one transcr
 - Search waits while recording: scenario "Search waits while recording".
 - Ctrl+F (⌘F) or the transcript's Find button slides the find bar in over 180ms: scenario "A person
   finds a word in the open transcript".
+- The sidebar no longer filters by name, so its spec drops the scenario "The + is hidden while
+  searching", the window chrome's purpose no longer names search, and the playback controls' spec
+  drops the case of a search showing the sidebar during focus.
 
 ## Settled questions
 

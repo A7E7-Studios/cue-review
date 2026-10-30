@@ -88,7 +88,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [theme, setTheme] = useTheme(report, os);
   useContextMenuGuard();
   const sidebar = useSidebarLayout();
-  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
+  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay } = sidebar;
   const { compact, toggleCompact, exitCompact } = useCompactWindow(report);
   const {
     sources, sourceOptions, microphones, source, microphoneUnavailable, refreshDevices,

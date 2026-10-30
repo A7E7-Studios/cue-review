@@ -1,7 +1,7 @@
 /* The search window (search spec): the app's dialog without a visible title, near the top of the
    window like the Claude app's, a field and the results. */
 .ui-dialog-backdrop:has(.search-dialog) { align-items: flex-start; padding-top: 72px; }
-.ui-dialog.search-dialog { width: 600px; max-height: min(560px, calc(100dvh - 96px)); display: flex; flex-direction: column; padding: 0; overflow: hidden; background: var(--color-sheet); border-color: var(--color-sheet-edge); border-radius: 12px; font-family: var(--font-family); }
+.ui-dialog.search-dialog { width: 600px; max-height: min(560px, calc(100dvh - 96px)); display: flex; flex-direction: column; padding: 0; overflow: hidden; background: var(--color-dialog); border-radius: 12px; font-family: var(--font-family); }
 .search-dialog .dialog-title { display: none; }
 
 .search-field { display: flex; align-items: center; gap: 10px; flex: none; height: 52px; padding: 0 16px; border-bottom: 1px solid var(--color-divider); color: var(--color-text-tertiary); }

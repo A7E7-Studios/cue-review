@@ -2,6 +2,7 @@
 title: Search
 code:
   - src/search/
+  - src/app/useShortcuts.ts
   - src/Sidebar.tsx
   - src/Sidebar.css
   - src/chrome/TitleBar.tsx

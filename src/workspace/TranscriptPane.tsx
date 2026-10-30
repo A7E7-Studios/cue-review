@@ -3,7 +3,7 @@ import type { FocusEvent, KeyboardEvent, ReactNode } from 'react';
 import type { Segment } from '../backend';
 import { Icon } from '../icons';
 import { activeSegment, activeWord, findMatches, formatTime, playheadSegment, segmentSeekMs, transcriptItems, wordSeekMs } from '../review';
-import { prefersReducedMotion } from '../ui/usePresence';
+import { prefersReducedMotion, usePresence } from '../ui/usePresence';
 import { NAMES } from './types';
 import type { TranscriptPaneProps } from './types';
 import './workspace.css';
