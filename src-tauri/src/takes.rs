@@ -18,7 +18,8 @@
 //! Sessions saved before takes kept their own videos (format 1) joined every
 //! take into the root `video.mp4`, which then plays the whole timeline; see
 //! [`videos`]. A take of such a session still `swapping` (waiting to be
-//! joined) is upgraded by [`recover`].
+//! joined) is upgraded by [`recover`] at startup, or by [`upgrade`] inside
+//! a Retry or `cue transcribe` job.
 //!
 //! Folders are always derived from the take index, never from `Take.folder`
 //! or other metadata, so a damaged `session.json` cannot redirect cleanup.

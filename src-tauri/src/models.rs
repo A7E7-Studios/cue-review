@@ -120,7 +120,9 @@ pub enum TakeStatus {
     /// Capture stopped; the take's own media is being finalized.
     Finalizing,
     /// Waiting to be joined into `video.mp4`: only in sessions saved before
-    /// takes kept their own videos, until [`crate::takes::recover`] upgrades it.
+    /// takes kept their own videos, until [`crate::takes::recover`] (at
+    /// startup) or [`crate::takes::upgrade`] (in Retry or `cue transcribe`)
+    /// upgrades it.
     Swapping,
     /// The take's audio is being transcribed.
     Transcribing,
