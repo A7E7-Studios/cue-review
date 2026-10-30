@@ -76,7 +76,7 @@ because one toggle that keeps its icon reads as one control in two states.
 #### Scenario: A person leaves focus
 - **GIVEN** the video is focused
 - **WHEN** the person presses Focus video again, or presses Escape
-- **THEN** the transcript returns, and the sidebar returns beside the sheet if it showed there
+- **THEN** the transcript returns, and the sidebar returns beside the sheet if it was docked there
   before focus
 - **AND** Focus video shows not pressed
 - **PROOF** test: src/App.test.tsx::restores both sidebars when focus ends
@@ -90,5 +90,6 @@ because one toggle that keeps its icon reads as one control in two states.
 - **AND** Show sidebar shows the sidebar; a new recording brings it back as leaving focus does
 - **AND** a search that shows the sidebar leaves focus on, and Hide sidebar hides it again
 - **PROOF** test: src/App.test.tsx::ends focus when the sidebar is shown or the workspace leaves review
+- **PROOF** test: src/App.test.tsx::docks the sidebar when Show sidebar ends focus in a narrow window that widens
 - **PROOF** test: src/App.test.tsx::keeps focus when a search shows the sidebar, and hides it again with its toggle
 - **PROOF** desk: open

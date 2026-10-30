@@ -306,7 +306,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
   /** Showing the sidebar while focused ends focus, so the transcript returns with it. */
   const toggleSidebar = () => {
-    if (focusVideo && !sidebarVisible) { focusRestoresSidebar.current = false; setFocusVideo(false); sidebar.show(); } else sidebar.toggle();
+    // It shows the sidebar now; leaving focus still docks it again if it was docked before focus.
+    if (focusVideo && !sidebarVisible) { setFocusVideo(false); sidebar.show(); } else sidebar.toggle();
   };
   const wasFocused = useRef(false);
   useEffect(() => {

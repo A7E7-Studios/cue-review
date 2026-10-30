@@ -559,6 +559,16 @@ describe('playback controls', () => {
     expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
     expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
   });
+  it('docks the sidebar when Show sidebar ends focus in a narrow window that widens', async () => {
+    const user = await review();
+    await act(async () => { window.innerWidth = 900; window.dispatchEvent(new Event('resize')); });
+    await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
+    expect(await screen.findByRole('complementary', { name: NAMES.recordings })).toBeVisible();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
+  });
   it('docks the sidebar again after focus even if the window narrowed meanwhile', async () => {
     const user = await review();
     await user.click(screen.getByRole('button', { name: NAMES.focusVideo }));
