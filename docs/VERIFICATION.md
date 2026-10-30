@@ -99,7 +99,7 @@ Notes on these tests:
 
 ### Scripts
 
-Every script uses an isolated data folder and never attaches to, changes or closes the normal app or its data. Scripts that launch their own app refuse to start when their CDP port is already taken, and stop their own recordings and close only their own processes on failure. Each prints a JSON summary, writes it under `test-results/`, and exits nonzero on failure. `scripts/test-env.cjs` puts the speech runtime on PATH: `CUEREVIEW_WHISPER_DIR`, else `%LOCALAPPDATA%\CueReview\tools\whisper-b5454`, else the installed `%LOCALAPPDATA%\Programs\CueReview\tools\whisper-b5454`. Controls are found by the accessible names in `src/workspace/types.ts` (`NAMES`) and the class hooks in its `HOOKS`.
+App and CLI verification scripts use an isolated data folder and never attach to, change or close the normal app or its data. Scripts that launch their own app refuse to start when their CDP port is already taken, and stop their own recordings and close only their own processes on failure. These checks print a JSON summary, write it under `test-results/`, and exit nonzero on failure. The browser-only picker check uses Storybook fixtures without app data or capture, prints PASS/FAIL results and exits nonzero on failure. `scripts/test-env.cjs` puts the speech runtime on PATH: `CUEREVIEW_WHISPER_DIR`, else `%LOCALAPPDATA%\CueReview\tools\whisper-b5454`, else the installed `%LOCALAPPDATA%\Programs\CueReview\tools\whisper-b5454`. Controls are found by the accessible names in `src/workspace/types.ts` (`NAMES`) and the class hooks in its `HOOKS`.
 
 | Script | Needs | Records | Checks |
 | --- | --- | --- | --- |

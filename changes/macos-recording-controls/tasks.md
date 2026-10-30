@@ -14,6 +14,6 @@
 
 ## 3. Verification and handoff
 
-- [ ] 3.1 Run the frontend, Rust and relevant integration suites and strict gate; test: docs/VERIFICATION.md
+- [x] 3.1 Run the frontend, Rust and relevant integration suites and strict gate; test: docs/VERIFICATION.md
 - [ ] 3.2 Complete independent review, resolve findings and run final checks; test: node tools/gate/gate.mjs --local --pr <n>
 - [x] 3.3 Leave real recording and picker checks open for the owner; check: Starting a recording of static content, Starting a recording of moving content, Dismissing a picker in a new recording, Dismissing a picker in review
