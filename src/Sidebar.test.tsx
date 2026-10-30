@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import { Sidebar } from './Sidebar';
@@ -9,9 +9,11 @@ const session: Session = { id: 'review', projectId: 'work', name: 'Library revie
 type Props = ComponentProps<typeof Sidebar>;
 function renderSidebar(overrides: Partial<Props> = {}) {
   const onRename = vi.fn();
-  const props = (next: Partial<Props> = {}): Props => ({ sections: [{id:'work',name:'Workspace',createdAt:'2026-01-01'}], sessions: [session], activeId: session.id, locked: false, loading: false, utilities: <button>Settings</button>, onCollapse: vi.fn(), onNew: vi.fn(), onOpen: vi.fn(), onRename, onRenameSection: vi.fn(), onCreateSection: vi.fn(), onDeleteSection: vi.fn(), onDeleteSession: vi.fn(), onReorder: vi.fn().mockResolvedValue(true), onMove: vi.fn().mockResolvedValue(true), ...overrides, ...next });
+  const onNew = vi.fn();
+  const onCreateSection = vi.fn();
+  const props = (next: Partial<Props> = {}): Props => ({ sections: [{id:'work',name:'Workspace',createdAt:'2026-01-01'}], sessions: [session], activeId: session.id, locked: false, loading: false, utilities: <button>Settings</button>, onCollapse: vi.fn(), onNew, onOpen: vi.fn(), onRename, onRenameSection: vi.fn(), onCreateSection, onDeleteSection: vi.fn(), onDeleteSession: vi.fn(), onReorder: vi.fn().mockResolvedValue(true), onMove: vi.fn().mockResolvedValue(true), ...overrides, ...next });
   const view = render(<Sidebar {...props()}/>);
-  return {onRename, rerender: (next: Partial<Props>) => view.rerender(<Sidebar {...props(next)}/>)};
+  return {onRename, onNew, onCreateSection, rerender: (next: Partial<Props>) => view.rerender(<Sidebar {...props(next)}/>)};
 }
 beforeEach(() => { document.documentElement.dataset.motion = 'reduced'; });
 afterEach(() => { delete document.documentElement.dataset.motion; });
@@ -49,8 +51,7 @@ test('Tab dismisses a context menu and continues into the workspace', async () =
   await user.click(screen.getByRole('button', {name:'Recording options'}));
   await user.tab();
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
-  // Focus moves on from the trigger. New section now sits beside New recording (decision 2),
-  // so the next stop after the last row is the utility button below the list.
+  // Focus moves on from the trigger: the next stop after the last row is the utility button below the list.
   expect(screen.getByRole('button', {name:'Settings'})).toHaveFocus();
 });
 
@@ -65,11 +66,14 @@ test('Space activates the focused menu action', async () => {
 });
 
 describe('Float v2 sidebar', () => {
-  test('puts New recording first with New section beside it, and hides the shortcut hint from the name', () => {
+  test('puts New session alone at the top with a plus, and hides the shortcut hint from the name', () => {
     renderSidebar({platform: 'windows'});
     const tools = document.querySelector<HTMLElement>('.side-tools')!;
-    const create = within(tools).getByRole('button', {name:'New recording'});
-    expect(within(tools).getAllByRole('button')).toEqual([create, within(tools).getByRole('button', {name:'New section'})]);
+    const create = within(tools).getByRole('button', {name:'New session'});
+    expect(within(tools).getAllByRole('button')).toEqual([create]);
+    expect(create.querySelector('svg')).not.toBeNull();
+    expect(create.querySelector('.new-recording-dot')).toBeNull();
+    expect(screen.queryByRole('button', {name:'New section'})).not.toBeInTheDocument();
     expect(create).toHaveAttribute('aria-keyshortcuts', 'Control+N');
     const hint = create.querySelector('kbd')!;
     expect(hint).toHaveTextContent('Ctrl+N');
@@ -78,7 +82,7 @@ describe('Float v2 sidebar', () => {
 
   test('labels shortcuts with ⌘ on macOS and Ctrl on Linux', () => {
     const {rerender} = renderSidebar({platform: 'macos'});
-    const create = screen.getByRole('button', {name:'New recording'});
+    const create = screen.getByRole('button', {name:'New session'});
     expect(create).toHaveAttribute('aria-keyshortcuts', 'Meta+N');
     expect(create.querySelector('kbd')).toHaveTextContent('⌘N');
     rerender({platform: 'linux'});
@@ -144,7 +148,7 @@ describe('Float v2 sidebar', () => {
     rerender({filter: 'quest'});
     expect(status).toHaveTextContent('No matches');
     expect(screen.queryByRole('region')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', {name:'New recording'})).toBeEnabled();
+    expect(screen.getByRole('button', {name:'New session'})).toBeEnabled();
   });
 
   test('renders the Hide sidebar button unless showCollapse is false', async () => {
@@ -171,5 +175,41 @@ describe('Float v2 sidebar', () => {
   test('omits the utility row when Float v2 passes no utilities', () => {
     renderSidebar({utilities: null});
     expect(document.querySelector('.side-bottom')).toBeNull();
+  });
+});
+
+describe('the sidebar menu', () => {
+  test('right-clicking empty space in the list offers New session and New section', async () => {
+    const user = userEvent.setup();
+    const {onNew, onCreateSection} = renderSidebar();
+    fireEvent.contextMenu(document.querySelector('.recording-list')!, {clientX: 40, clientY: 400});
+    const menu = screen.getByRole('menu', {name:'Sidebar actions'});
+    expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['New session', 'New section']);
+    await user.click(within(menu).getByRole('menuitem', {name:'New section'}));
+    expect(onCreateSection).toHaveBeenCalledWith();
+    fireEvent.contextMenu(document.querySelector('.recording-list')!, {clientX: 40, clientY: 400});
+    await user.click(screen.getByRole('menuitem', {name:'New session'}));
+    expect(onNew).toHaveBeenCalledTimes(1);
+  });
+
+  test('a row keeps its own menu, and the New session button opens the sidebar menu from the keyboard', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    fireEvent.contextMenu(screen.getByRole('button', {name:'Library review'}));
+    expect(screen.getByRole('menu', {name:'Recording actions'})).toBeVisible();
+    await user.keyboard('{Escape}');
+    const create = screen.getByRole('button', {name:'New session'});
+    create.focus();
+    fireEvent.contextMenu(create);
+    expect(screen.getByRole('menuitem', {name:'New session'})).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(create).toHaveFocus();
+  });
+
+  test('offers no sidebar menu while recording', () => {
+    renderSidebar({locked: true});
+    fireEvent.contextMenu(document.querySelector('.recording-list')!);
+    fireEvent.contextMenu(screen.getByRole('button', {name:'New session'}));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 });

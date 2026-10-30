@@ -8,7 +8,8 @@ import { usePresence } from './ui/usePresence';
 import { NAMES } from './workspace/types';
 import type { SidebarProps } from './workspace/types';
 
-type Menu = { kind: 'session' | 'section'; id: string; x: number; y: number; moving: boolean };
+/** `list`: the menu of the sidebar itself (New session, New section), from empty space or the New session button. */
+type Menu = { kind: 'session' | 'section' | 'list'; id: string; x: number; y: number; moving: boolean };
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
 
 function shortDate(value: string) {
@@ -97,6 +98,11 @@ export function Sidebar(props: SidebarProps) {
     const rect = anchor.getBoundingClientRect();
     returnFocus.current = anchor;
     setMenu({ kind: 'session', id: item.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
+  };
+  const openListMenu = (x: number, y: number) => {
+    if (locked) return;
+    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setMenu({ kind: 'list', id: '', x, y, moving: false });
   };
   const openSectionMenu = (section: Project, anchor: HTMLElement, x?: number, y?: number) => {
     if (locked) return;
@@ -192,14 +198,16 @@ export function Sidebar(props: SidebarProps) {
       {showCollapse && <button className="side-collapse" aria-label={NAMES.hideSidebar} onClick={props.onCollapse}><Icon name="panel" size={16} strokeWidth={1.7}/></button>}
     </div>}
     <div className="side-tools">
-      <button className="new-recording has-kbd" disabled={locked} onClick={props.onNew} aria-keyshortcuts={newKey.aria}>
-        <span className="new-recording-dot" aria-hidden="true"/>
-        <span className="new-recording-label">{NAMES.newRecording}</span>
+      {/* Its context menu (right-click, Shift+F10 or the Menu key) is the sidebar's: New session and New section. */}
+      <button className="new-session has-kbd" disabled={locked} onClick={props.onNew} aria-keyshortcuts={newKey.aria}
+        onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openListMenu(event.clientX || rect.left, event.clientY || rect.bottom); }}>
+        <Icon name="plus" size={16} strokeWidth={2}/>
+        <span className="new-session-label">{NAMES.newSession}</span>
         <kbd className="kbd-hint" aria-hidden="true">{newKey.label}</kbd>
       </button>
-      <button className="new-section" disabled={locked} aria-label={NAMES.newSection} title={NAMES.newSection} onClick={() => props.onCreateSection()}><Icon name="folderPlus" size={17} strokeWidth={1.7}/></button>
     </div>
-    <div className="recording-list">
+    {/* Rows and section headings open their own menus; anywhere else in the list opens the sidebar's. */}
+    <div className="recording-list" onContextMenu={event => { if (event.defaultPrevented) return; event.preventDefault(); openListMenu(event.clientX, event.clientY); }}>
       {shownSections.map(section => {
         const sectionClosed = isClosed(section.id);
         return <section key={section.id} data-section-id={section.id} aria-label={NAMES.section(section.name)} className={`recording-section ${dropTarget === section.id ? 'drop-target' : ''} ${draggingSection === section.id ? 'dragging-section' : ''} ${insertion?.id === section.id ? insertion.after ? 'insert-after' : 'insert-before' : ''}`} {...dropHandlers(section.id)}>
@@ -222,7 +230,7 @@ export function Sidebar(props: SidebarProps) {
       <div className="side-filter-status" role="status">{noMatches && <p className="side-empty">{NAMES.noMatches}</p>}</div>
     </div>
     {props.utilities && <div className="side-bottom">{props.utilities}</div>}
-    {menuPresence.present && shownMenu && (menuSession || menuSection) && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'section' ? NAMES.sectionActions : shownMenu.moving ? NAMES.moveToSection : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }} onFocus={event => {
+    {menuPresence.present && shownMenu && (menuSession || menuSection || shownMenu.kind === 'list') && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'list' ? NAMES.sidebarActions : shownMenu.kind === 'section' ? NAMES.sectionActions : shownMenu.moving ? NAMES.moveToSection : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }} onFocus={event => {
       menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]').forEach(button => { button.tabIndex = button === (event.target as HTMLElement) ? 0 : -1; });
     }} onKeyDown={event => {
       event.stopPropagation();
@@ -243,7 +251,10 @@ export function Sidebar(props: SidebarProps) {
         [...buttons.slice(index + 1), ...buttons.slice(0, index + 1)].find(button => button.textContent?.trim().toLocaleLowerCase().startsWith(query))?.focus();
       }
     }}>
-      {menuSection ? <>
+      {shownMenu.kind === 'list' ? <>
+        <button role="menuitem" onClick={() => { closeMenu(); props.onNew(); }}>{NAMES.newSession}</button>
+        <button role="menuitem" onClick={() => { closeMenu(); props.onCreateSection(); }}>{NAMES.newSection}</button>
+      </> : menuSection ? <>
         <button role="menuitem" onClick={() => { closeMenu(); props.onRenameSection(menuSection); }}>{NAMES.rename}</button>
         <button role="menuitem" disabled={sections[0]?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index - 1]?.id ?? null, false); }}>{NAMES.moveUp}</button>
         <button role="menuitem" disabled={sections.at(-1)?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index + 1]?.id ?? null, true); }}>{NAMES.moveDown}</button>

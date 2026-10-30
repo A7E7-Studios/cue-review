@@ -260,6 +260,7 @@ export const NAMES = {
   // Sidebar
   recordings: 'Recordings',
   newRecording: 'New recording',
+  newSession: 'New session',
   newSection: 'New section',
   recents: 'Recents',
   section: (name: string) => `Section: ${name}`,
@@ -267,6 +268,7 @@ export const NAMES = {
   recordingOptions: 'Recording options',
   recordingActions: 'Recording actions',
   sectionActions: 'Section actions',
+  sidebarActions: 'Sidebar actions',
   moveToSection: 'Move to section',
   rename: 'Rename',
   moveUp: 'Move up',

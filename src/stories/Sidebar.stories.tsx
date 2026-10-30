@@ -1,6 +1,6 @@
 import { useLayoutEffect, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, userEvent, waitFor, within } from 'storybook/test';
+import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import { Sidebar } from '../Sidebar';
 import type { Platform } from '../chrome/windowApi';
 import { date, sections as exampleSections, sessions as exampleSessions } from './fixtures';
@@ -48,7 +48,7 @@ function SidebarExample({ platform, selected, filter, showCollapse, empty, longN
     <div className="workshop-sidebar-note" style={{ background: 'var(--color-sheet)', ...(mac ? {} : { borderTop: '1px solid var(--color-sheet-edge)', borderLeft: '1px solid var(--color-sheet-edge)', borderTopLeftRadius: 'var(--radius-window)' }) }}>
       <h2>Recording organization</h2>
       <p>{message}</p>
-      <p>Use the row menu or drag a recording. Section menus also offer keyboard-accessible Move up and Move down actions. Hover or focus a row for its duration and date, and New recording for its shortcut.</p>
+      <p>Use the row menu or drag a recording. Section menus also offer keyboard-accessible Move up and Move down actions. Right-click empty space for New session and New section. Hover or focus a row for its duration and date, and New session for its shortcut.</p>
     </div>
   </div>;
 }
@@ -78,11 +78,21 @@ export const HoverMeta: Story = {
 };
 export const ShortcutHint: Story = {
   play: async ({ canvasElement }) => {
-    const create = within(canvasElement).getByRole('button', { name: 'New recording' });
+    const create = within(canvasElement).getByRole('button', { name: 'New session' });
     await userEvent.tab();
     await expect(create).toHaveFocus();
     await expect(create).toHaveAttribute('aria-keyshortcuts');
     await expect(create.querySelector('kbd')).toHaveAttribute('aria-hidden', 'true');
+  },
+};
+/** Right-click on empty space in the list: the sidebar's own menu. */
+export const SidebarMenu: Story = {
+  play: async ({ canvasElement }) => {
+    const list = canvasElement.querySelector<HTMLElement>('.recording-list')!;
+    const box = list.getBoundingClientRect();
+    fireEvent.contextMenu(list, { clientX: box.left + 60, clientY: box.bottom - 120 });
+    const menu = await within(canvasElement.ownerDocument.body).findByRole('menu', { name: 'Sidebar actions' });
+    await expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['New session', 'New section']);
   },
 };
 export const Filtered: Story = { args: { filter: 'e' } };
