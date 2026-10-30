@@ -137,3 +137,17 @@ export const ContextMenu: Story = {
     await waitFor(() => expect(canvas.getByRole('menu', { name: 'Recording actions' })).toBeVisible());
   },
 };
+/** A right-click in the panel outside a row or section heading. */
+export const PanelMenu: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const list = canvasElement.querySelector<HTMLElement>('.recording-list')!;
+    const box = list.getBoundingClientRect();
+    await userEvent.pointer({ target: list, coords: { clientX: box.left + 60, clientY: box.bottom - 40 }, keys: '[MouseRight]' });
+    await waitFor(() => expect(canvas.getByRole('menu', { name: 'Recordings panel actions' })).toBeVisible());
+  },
+};
+export const PanelMenuBusy: Story = {
+  args: { locked: true },
+  play: PanelMenu.play,
+};

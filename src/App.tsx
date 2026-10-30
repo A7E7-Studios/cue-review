@@ -25,6 +25,7 @@ import type { NameDialogState } from './app/dialogs';
 import { liveTake, recordingTranscript, releaseMedia, sessionVideoUrl, takeInFlight, takeMarks, takeSwapping } from './app/media';
 import { MICROPHONE_UNAVAILABLE, useCaptureDevices } from './app/useCaptureDevices';
 import { useCompactWindow } from './app/useCompactWindow';
+import { useContextMenuGuard } from './app/useContextMenuGuard';
 import { canTakeFocus, useFocusRescue } from './app/useFocusRescue';
 import { usePreviewStream } from './app/usePreviewStream';
 import { useShortcuts } from './app/useShortcuts';
@@ -56,6 +57,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const report = useCallback((problem: unknown) => { setError(errorMessage(problem)); }, []);
   const reportInDialog = useCallback((problem: unknown) => { setDialogError(errorMessage(problem)); }, []);
   const [theme, setTheme] = useTheme(report, os);
+  useContextMenuGuard();
   const sidebar = useSidebarLayout();
   const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
   const { compact, toggleCompact, exitCompact } = useCompactWindow(report);

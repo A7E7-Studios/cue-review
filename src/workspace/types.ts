@@ -267,6 +267,7 @@ export const NAMES = {
   recordingOptions: 'Recording options',
   recordingActions: 'Recording actions',
   sectionActions: 'Section actions',
+  panelActions: 'Recordings panel actions',
   moveToSection: 'Move to section',
   rename: 'Rename',
   moveUp: 'Move up',

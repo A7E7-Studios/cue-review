@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { DragEvent } from 'react';
+import type { DragEvent, MouseEvent } from 'react';
+import { isTextField } from './app/useContextMenuGuard';
 import type { Project, Session } from './backend';
 import { platform as detectPlatform, shortcut } from './chrome/windowApi';
 import { Icon } from './icons';
@@ -8,7 +9,7 @@ import { usePresence } from './ui/usePresence';
 import { NAMES } from './workspace/types';
 import type { SidebarProps } from './workspace/types';
 
-type Menu = { kind: 'session' | 'section'; id: string; x: number; y: number; moving: boolean };
+type Menu = { kind: 'session' | 'section' | 'panel'; id: string; x: number; y: number; moving: boolean };
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
 
 function shortDate(value: string) {
@@ -85,7 +86,8 @@ export function Sidebar(props: SidebarProps) {
     typeahead.current = { text: '', at: 0 };
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !returnFocus.current?.contains(event.target)) setMenu(null);
+      const onAnchor = menu.kind !== 'panel' && !!returnFocus.current?.contains(event.target as Node);
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !onAnchor) setMenu(null);
     };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
@@ -102,6 +104,15 @@ export function Sidebar(props: SidebarProps) {
     if (locked) return;
     const rect = anchor.getBoundingClientRect(); returnFocus.current = anchor;
     setMenu({ kind: 'section', id: section.id, x: x ?? rect.right, y: y ?? rect.top, moving: false });
+  };
+  // The panel's own menu, for a right-click anywhere in the sidebar without a menu of its own.
+  // Rows and section headings open theirs first and mark the event handled.
+  const openPanelMenu = (event: MouseEvent<HTMLElement>) => {
+    if (event.defaultPrevented || isTextField(event.target)) return;
+    event.preventDefault();
+    const focused = document.activeElement;
+    returnFocus.current = focused instanceof HTMLElement && focused !== document.body ? focused : null;
+    setMenu({ kind: 'panel', id: '', x: event.clientX, y: event.clientY, moving: false });
   };
   const reorder = async (id: string, targetId: string | null, after: boolean) => {
     if (locked || id === targetId || !sections.some(item => item.id === id)) return;
@@ -185,7 +196,7 @@ export function Sidebar(props: SidebarProps) {
   const recentSessions = matches.filter(item => !item.projectId || !sections.some(section => section.id === item.projectId));
   const noMatches = filtering && !matches.length;
 
-  return <aside className="sidebar" data-platform={os} aria-label={NAMES.recordings}>
+  return <aside className="sidebar" data-platform={os} aria-label={NAMES.recordings} onContextMenu={openPanelMenu}>
     {(os === 'macos' || showCollapse) && <div className="side-header" {...(os === 'macos' ? { 'data-tauri-drag-region': '' } : {})}>
       {/* macOS draws its traffic lights here (tauri.macos.conf.json trafficLightPosition). */}
       {os === 'macos' && <span className="side-traffic-lights" aria-hidden="true" data-tauri-drag-region=""/>}
@@ -222,7 +233,7 @@ export function Sidebar(props: SidebarProps) {
       <div className="side-filter-status" role="status">{noMatches && <p className="side-empty">{NAMES.noMatches}</p>}</div>
     </div>
     {props.utilities && <div className="side-bottom">{props.utilities}</div>}
-    {menuPresence.present && shownMenu && (menuSession || menuSection) && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'section' ? NAMES.sectionActions : shownMenu.moving ? NAMES.moveToSection : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }} onFocus={event => {
+    {menuPresence.present && shownMenu && (menuSession || menuSection || shownMenu.kind === 'panel') && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'panel' ? NAMES.panelActions : shownMenu.kind === 'section' ? NAMES.sectionActions : shownMenu.moving ? NAMES.moveToSection : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }} onFocus={event => {
       menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]').forEach(button => { button.tabIndex = button === (event.target as HTMLElement) ? 0 : -1; });
     }} onKeyDown={event => {
       event.stopPropagation();
@@ -243,7 +254,10 @@ export function Sidebar(props: SidebarProps) {
         [...buttons.slice(index + 1), ...buttons.slice(0, index + 1)].find(button => button.textContent?.trim().toLocaleLowerCase().startsWith(query))?.focus();
       }
     }}>
-      {menuSection ? <>
+      {shownMenu.kind === 'panel' ? <>
+        <button role="menuitem" disabled={locked} aria-keyshortcuts={newKey.aria} onClick={() => { closeMenu(); props.onNew(); }}>{NAMES.newRecording}<kbd className="menu-kbd" aria-hidden="true">{newKey.label}</kbd></button>
+        <button role="menuitem" disabled={locked} onClick={() => { closeMenu(); props.onCreateSection(); }}>{NAMES.newSection}</button>
+      </> : menuSection ? <>
         <button role="menuitem" onClick={() => { closeMenu(); props.onRenameSection(menuSection); }}>{NAMES.rename}</button>
         <button role="menuitem" disabled={sections[0]?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index - 1]?.id ?? null, false); }}>{NAMES.moveUp}</button>
         <button role="menuitem" disabled={sections.at(-1)?.id === menuSection.id} onClick={() => { const index = sections.findIndex(item => item.id === menuSection.id); void reorder(menuSection.id, sections[index + 1]?.id ?? null, true); }}>{NAMES.moveDown}</button>

@@ -4,6 +4,8 @@ code:
   - src/app/useContextMenuGuard.ts
   - src/App.tsx
   - src/Sidebar.tsx
+  - src/Sidebar.css
+  - src/workspace/types.ts
 ---
 # Look and feel
 
