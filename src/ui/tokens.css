@@ -138,6 +138,13 @@
   --color-window-close-hover: #C42B1C;
   --color-on-window-close: #FFFFFF;
 
+  /* Scrollbars, dialogs and their backdrop */
+  --color-scrollbar: rgba(24, 24, 27, .22);
+  --color-scrollbar-hover: rgba(24, 24, 27, .40);
+  --color-scrim: rgba(16, 20, 26, .33);
+  --color-dialog: var(--color-sheet);
+  --color-dialog-edge: var(--color-sheet-edge);
+
   /* Media */
   --shadow-video: 0 0 0 1px rgba(24, 24, 27, .08), 0 10px 30px rgba(16, 24, 40, .10);
   --shadow-video-live: 0 0 0 2px var(--color-record), 0 10px 30px rgba(16, 24, 40, .10);
@@ -254,6 +261,14 @@
   --color-record-disabled: #6B4446;
 
   --color-window-control-hover: rgba(255, 255, 255, .08);
+
+  /* Dialogs step forward: a 50% black backdrop (Fluent 2's dark overlay) behind a surface one step
+     lighter than the sheet, since dark surfaces show elevation by getting lighter. */
+  --color-scrollbar: rgba(255, 255, 255, .20);
+  --color-scrollbar-hover: rgba(255, 255, 255, .36);
+  --color-scrim: rgba(0, 0, 0, .50);
+  --color-dialog: #222227;
+  --color-dialog-edge: rgba(255, 255, 255, .09);
 
   --shadow-video: 0 0 0 1px rgba(255, 255, 255, .08), 0 10px 30px rgba(0, 0, 0, .35);
   --shadow-video-live: 0 0 0 2px var(--color-record), 0 10px 30px rgba(0, 0, 0, .35);

@@ -4,9 +4,9 @@
 .ui-dialog.settings-dialog {
   width: 460px;
   padding: 20px 22px 22px;
-  border-color: var(--color-sheet-edge);
+  border-color: var(--color-dialog-edge);
   border-radius: 12px;
-  background: var(--color-sheet);
+  background: var(--color-dialog);
   color: var(--color-text);
   font-size: var(--font-size-body);
   line-height: var(--line-height-body);
@@ -38,6 +38,26 @@
   padding: 8px 10px;
   resize: vertical;
   line-height: 1.5;
+}
+/* The Appearance dropdown, open list included, in the app's menu style (Chromium's customizable
+   select). It stays a native <select>, so keyboard, typeahead and screen readers are unchanged. */
+@supports (appearance: base-select) {
+  .settings-dialog select, .settings-dialog select::picker(select) { appearance: base-select; }
+  .settings-dialog select { display: flex; align-items: center; gap: 6px; padding: 0 8px 0 10px; cursor: pointer; }
+  .settings-dialog select:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--color-text-tertiary), 0 1px 2px rgba(16, 24, 40, .06); }
+  .settings-dialog select::picker-icon {
+    content: ''; width: 12px; height: 12px; margin-left: auto; background: var(--color-text-secondary);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    transition: rotate var(--motion-fast) var(--ease-out);
+  }
+  .settings-dialog select:open::picker-icon { rotate: 180deg; }
+  .settings-dialog select::picker(select) {
+    margin-top: 4px; padding: 5px; border: 1px solid var(--color-sheet-edge); border-radius: var(--radius-panel);
+    background: var(--color-sheet); box-shadow: var(--shadow); color: var(--color-text);
+  }
+  .settings-dialog option { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 6px 8px; border-radius: var(--radius-field); font-size: var(--font-size-control); }
+  .settings-dialog option:hover, .settings-dialog option:focus-visible { background: var(--color-row-hover); outline: none; }
+  .settings-dialog option::checkmark { order: 1; margin-left: auto; content: '✓'; color: var(--color-accent-text); }
 }
 .settings-dialog textarea::placeholder { color: var(--color-text-tertiary); opacity: 1; }
 .settings-dialog select:focus-visible,
