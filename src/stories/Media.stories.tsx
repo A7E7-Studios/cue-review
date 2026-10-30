@@ -72,20 +72,26 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const segments = transcriptProps.transcript.segments;
   const showTranscript = !draft && !focused && !compactMode;
 
+  const bar = {
+    sources, microphones, microphoneId, microphoneUnavailable: false, muted, menu, onMenu: setMenu, onSelectMicrophone: setMicrophoneId, onMuted: setMuted,
+    onRefreshSources: () => setNotice('Refresh selected.'), onRefreshMicrophones: () => setNotice('Refresh selected.'), locked: false, busy: false,
+  };
   const controls = recording
     ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={muted ? 0 : 0.56} sourceName="Display 1" hasMicrophone muted={muted} onMuted={setMuted}
         compact={compactMode} onToggleCompact={() => setCompactMode(value => !value)} stopDisabled={false} onStop={() => setNotice('Stop selected.')}/>
     : draft
-      ? <CaptureControls sources={sources} source={source} microphones={microphones} microphoneId={microphoneId} microphoneUnavailable={false}
-          systemAudio={systemAudio} muted={muted} menu={menu} onMenu={setMenu} onSelectSource={setSourceId} onSelectMicrophone={setMicrophoneId}
-          onSystemAudio={setSystemAudio} onMuted={setMuted} onRefreshSources={() => setNotice('Refresh selected.')} onRefreshMicrophones={() => setNotice('Refresh selected.')}
-          locked={false} busy={false} recordLabel="Record" recordDisabled={!source?.available} onRecord={() => setNotice('Record selected.')}/>
-      : <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
+      ? <CaptureControls {...bar} source={source} systemAudio={systemAudio} onSelectSource={setSourceId} onSystemAudio={setSystemAudio}
+          recordLabel="Record" recordDisabled={!source?.available} onRecord={() => setNotice('Record selected.')}/>
+      : <>
+        <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
           onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
-          onToggleFocus={() => setFocused(value => !value)} recordMoreDisabled={scenario === 'processing'}
-          onRecordMore={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
-          recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>;
+          onToggleFocus={() => setFocused(value => !value)}/>
+        <CaptureControls {...bar} review sourceLocked source={sources[0]} systemAudio={false} onSelectSource={() => {}} onSystemAudio={() => {}}
+          recordLabel="Record more" recordDisabled={scenario === 'processing'}
+          onRecord={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
+          recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>
+      </>;
 
   return <div style={{ height: '100vh', display: 'flex', minWidth: 0, overflow: 'hidden', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
     <div className="cr-center">

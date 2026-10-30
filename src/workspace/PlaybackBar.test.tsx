@@ -8,7 +8,7 @@ import type { PlaybackBarProps } from './types';
 const props = (overrides: Partial<PlaybackBarProps> = {}): PlaybackBarProps => ({
   timeMs: 33400, durationMs: 134000, segments: [{ startMs: 31000, endMs: 36500 }], takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }],
   onSeek: vi.fn(), playing: false, canPlay: true, onTogglePlay: vi.fn(), speed: 1, onCycleSpeed: vi.fn(),
-  focused: false, onToggleFocus: vi.fn(), recordMoreDisabled: false, onRecordMore: vi.fn(), ...overrides,
+  focused: false, onToggleFocus: vi.fn(), ...overrides,
 });
 
 describe('PlaybackBar', () => {
@@ -20,45 +20,22 @@ describe('PlaybackBar', () => {
     await user.click(within(group).getByRole('button', { name: 'Play' }));
     await user.click(within(group).getByRole('button', { name: 'Playback speed 1×' }));
     await user.click(within(group).getByRole('button', { name: 'Focus video' }));
-    const more = within(group).getByRole('button', { name: 'Record more' });
-    expect(more).toHaveAttribute('aria-keyshortcuts', 'Control+R');
-    expect(more.title).toContain('Ctrl+R');
-    await user.click(more);
     expect(handlers.onTogglePlay).toHaveBeenCalledTimes(1);
     expect(handlers.onCycleSpeed).toHaveBeenCalledTimes(1);
     expect(handlers.onToggleFocus).toHaveBeenCalledTimes(1);
-    expect(handlers.onRecordMore).toHaveBeenCalledTimes(1);
     expect(group).toHaveTextContent('0:33 / 2:14');
   });
-  it('switches names for playing, focus mode and speed, and uses ⌘ on macOS', () => {
-    render(<PlaybackBar {...props({ playing: true, focused: true, speed: 1.5, recordMoreDisabled: true, canPlay: false })} platform="macos"/>);
+  it('switches names for playing, focus mode and speed', () => {
+    render(<PlaybackBar {...props({ playing: true, focused: true, speed: 1.5, canPlay: false })} platform="macos"/>);
     expect(screen.getByRole('button', { name: 'Pause' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Restore transcript' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Playback speed 1.5×' })).toHaveTextContent('1.5×');
-    const more = screen.getByRole('button', { name: 'Record more' });
-    expect(more).toBeDisabled();
-    expect(more).toHaveAttribute('aria-keyshortcuts', 'Meta+R');
-    expect(more.title).toContain('⌘R');
   });
-  it('shows why Record more failed beside the pill, with New recording and Dismiss', async () => {
-    const user = userEvent.setup();
-    const handlers = props({ recordMoreError: 'The original window/display for this recording is no longer available.', onNewRecording: vi.fn(), onDismissRecordMoreError: vi.fn() });
-    const { rerender } = render(<PlaybackBar {...handlers} platform="windows"/>);
-    const alert = within(screen.getByRole('group', { name: 'Playback' })).getByRole('alert');
-    expect(alert).toHaveTextContent('no longer available');
-    expect(screen.getByRole('button', { name: 'Record more' })).toHaveAccessibleDescription('The original window/display for this recording is no longer available.');
-    await user.click(within(alert).getByRole('button', { name: 'New recording' }));
-    await user.click(within(alert).getByRole('button', { name: 'Dismiss error' }));
-    expect(handlers.onNewRecording).toHaveBeenCalledTimes(1);
-    expect(handlers.onDismissRecordMoreError).toHaveBeenCalledTimes(1);
-    // Busy for a moment: New recording stays focusable but does nothing.
-    rerender(<PlaybackBar {...handlers} recordMoreBusy platform="windows"/>);
-    const start = within(alert).getByRole('button', { name: 'New recording' });
-    expect(start).toHaveAttribute('aria-disabled', 'true');
-    await user.click(start);
-    expect(handlers.onNewRecording).toHaveBeenCalledTimes(1);
-    rerender(<PlaybackBar {...handlers} recordMoreError={undefined} platform="windows"/>);
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  it('leaves Record more and its refusal to the recording bar under it', () => {
+    render(<PlaybackBar {...props()} platform="windows"/>);
+    const group = within(screen.getByRole('group', { name: 'Playback' }));
+    expect(group.queryByRole('button', { name: 'Record more' })).not.toBeInTheDocument();
+    expect(group.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
 

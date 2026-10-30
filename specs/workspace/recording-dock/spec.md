@@ -2,13 +2,18 @@
 title: Recording dock
 code:
   - src/workspace/RecordingDock.tsx
+  - src/workspace/CaptureControls.tsx
+  - src/workspace/PlaybackBar.tsx
+  - src/workspace/types.ts
   - src/workspace/workspace.css
+  - src/App.tsx
 ---
 # Recording dock
 
 ## Purpose
 
-The dark bar under the preview while a take records: how long it has run, the microphone level, the
+The dark bar under the video. Before a take it holds the display, the microphone and Record (Record
+more in review); while a take records it shows how long it has run, the microphone level, the
 locked source, mute, compact mode and Stop.
 
 ## Requirements
@@ -26,4 +31,55 @@ the second take on changes the dock's width.
 - **AND** the transcript shows "Take 2 · recording"
 - **PROOF** test: src/workspace/RecordingDock.test.tsx::RecordingDock shows the take timer, level and locked source for take 2, with no take label or caption
 - **PROOF** test: src/App.test.tsx::record more unloads the video before recording a take, shows it live, and reloads the video with a cache-buster once processing ends
+- **PROOF** desk: open
+
+### Requirement: The bar is always under the video
+The app SHALL show one dark recording bar under the video whenever nothing records, holding the
+display picker, the microphone picker and a red Record, centred under the preview of a new
+recording, because Record is the workspace's call to action and the reviewer chooses what to
+record right beside it.
+
+#### Scenario: Starting a new recording from the bar
+- **GIVEN** a new recording with a display and a microphone available
+- **WHEN** the reviewer chooses a display and a microphone in the bar and selects Record
+- **THEN** the recording starts with that display and that microphone
+- **AND** the bar keeps to one row as the window narrows, showing the pickers as icons and then
+  Record as an icon, each still named for screen readers
+- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar is one named bar holding the pickers and Record in a draft
+- **PROOF** test: src/App.test.tsx::keyboard interaction opens device choices directly, focuses the selected option, and restores focus on Escape
+- **PROOF** desk: open
+
+### Requirement: Record more uses the bar
+The app SHALL show the recording bar in review in its own row under the playback controls, with
+Record more, a microphone picker that sets the next take's microphone, and the session's own
+display locked, because the reviewer chooses the microphone for each take while a take still
+records the session's own source.
+
+#### Scenario: Recording more from the bar
+- **GIVEN** a ready session recorded from Display 1
+- **WHEN** the reviewer chooses another microphone in the bar under the playback controls and
+  selects Record more
+- **THEN** a new take of the session starts with that microphone and the session's display
+- **AND** the bar shows Display 1 disabled, titled "Another source for Record more comes with
+  separate take videos", and the playback row holds no Record more
+- **PROOF** test: src/App.test.tsx::record more records more from the bar under the playback controls, with its microphone and the session's locked source
+- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar offers Record more in review, with the source locked and its reason, and the microphone still to choose
+- **PROOF** test: src/workspace/PlaybackBar.test.tsx::PlaybackBar leaves Record more and its refusal to the recording bar under it
+- **PROOF** desk: open
+
+### Requirement: A gone display is refused under the bar
+The app SHALL show why Record more was refused right under the recording bar, with New recording
+and Dismiss, and name a display that is no longer listed "Original source", because the reviewer
+needs the reason and the way forward where they selected Record more.
+
+#### Scenario: The session's display is gone
+- **GIVEN** a ready session whose window has closed
+- **WHEN** the reviewer selects Record more
+- **THEN** the bar shows "The original window/display for this recording is no longer
+  available. Start a new recording to capture another source." under it, with New recording and
+  Dismiss, and the video stays playable
+- **AND** New recording opens a new recording where another display can be chosen
+- **PROOF** test: src/App.test.tsx::record more shows a source that is gone under the recording bar, with New recording as the way forward
+- **PROOF** test: src/App.test.tsx::record more names the session's source in the bar as the original source once it is no longer listed
+- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar shows why Record more failed under the bar, with New recording and Dismiss
 - **PROOF** desk: open

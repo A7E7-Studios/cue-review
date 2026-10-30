@@ -54,12 +54,12 @@ const openStuckTake: Story['play'] = async ({ canvasElement }) => {
   await expect(canvas.getByRole('heading', { name: 'Take 2 is not in the video yet' })).toBeVisible();
   await expect(canvas.getByRole('button', { name: 'Record more' })).toBeDisabled();
 };
-// The session's window has closed: Record more is refused beside the pill, offering New recording.
+// The session's window has closed: Record more is refused under the recording bar, offering New recording.
 const refuseRecordMore: Story['play'] = async context => {
   await openTakes(context);
   const canvas = within(context.canvasElement);
   await userEvent.click(canvas.getByRole('button', { name: 'Record more' }));
-  const message = await within(canvas.getByRole('group', { name: 'Playback' })).findByRole('alert');
+  const message = await within(canvas.getByRole('group', { name: 'Recording bar' })).findByRole('alert');
   await expect(message).toHaveTextContent('no longer available');
   await expect(within(message).getByRole('button', { name: 'New recording' })).toBeVisible();
   (context.canvasElement.ownerDocument.activeElement as HTMLElement | null)?.blur();
@@ -207,7 +207,7 @@ export const SourceGoneNewRecording: Story = {
   play: async context => {
     await refuseRecordMore(context);
     const canvas = within(context.canvasElement);
-    const message = within(canvas.getByRole('group', { name: 'Playback' })).getByRole('alert');
+    const message = within(canvas.getByRole('group', { name: 'Recording bar' })).getByRole('alert');
     await userEvent.click(within(message).getByRole('button', { name: 'New recording' }));
     await expect(canvas.getByRole('heading', { level: 1 })).toHaveTextContent('New recording');
     await expect(canvas.queryByRole('alert')).not.toBeInTheDocument();

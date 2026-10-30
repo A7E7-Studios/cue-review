@@ -928,7 +928,7 @@ describe('record more', () => {
     const media = document.querySelector('video');
     backend.recordMore.mockRejectedValueOnce('Record more needs a playable recording.');
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    expect(await within(screen.getByRole('group', { name: NAMES.playback })).findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
+    expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent('Record more needs a playable recording.');
     await waitFor(() => expect(document.querySelector('video')).not.toBe(media));
     const restored = document.querySelector('video')!;
     expect(restored).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
@@ -1038,26 +1038,52 @@ describe('record more', () => {
     expect(discard).toHaveFocus();
     expect(transcriptPane().getByText('Take 2 is saved but has not been added to the recording yet. Retry to finish adding it.')).toBeVisible();
   });
-  it('shows a source that is gone beside Record more, with New recording as the way forward', async () => {
+  it('records more from the bar under the playback controls, with its microphone and the session\'s locked source', async () => {
+    backend.recordMore.mockImplementation(async (id: string) => { sessions = sessions.map(item => item.id === id ? takeTwo(item) : item); status = { state: 'recording', sessionId: id, elapsedMs: 0, takeIndex: 2, takeOffsetMs: 10000 }; return takeTwo(newSession(id)); });
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+    const user = await review();
+    // The playback row holds no Record more; the recording bar under it does.
+    expect(within(screen.getByRole('group', { name: NAMES.playback })).queryByRole('button', { name: NAMES.recordMore })).not.toBeInTheDocument();
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    const source = bar.getByRole('button', { name: 'Display 1' });
+    expect(source).toBeDisabled();
+    expect(source).toHaveAttribute('title', 'Another source for Record more comes with separate take videos');
+    await user.click(bar.getByRole('button', { name: 'Studio microphone' }));
+    await chooseMicrophone(user, 'mic2');
+    await user.click(bar.getByRole('button', { name: NAMES.recordMore }));
+    expect(await screen.findByRole('timer', { name: NAMES.takeTimer(2) })).toBeVisible();
+    expect(backend.recordMore).toHaveBeenCalledWith('s1', 'mic2', false, false);
+    // While the take records, the dock takes the bar's place.
+    expect(screen.queryByRole('group', { name: NAMES.recordingBar })).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: NAMES.recordingControls })).toBeVisible();
+  });
+  it('names the session\'s source in the bar as the original source once it is no longer listed', async () => {
+    sessions = [{ ...newSession(), sourceId: 'window:42' }];
+    await review();
+    const source = within(screen.getByRole('group', { name: NAMES.recordingBar })).getByRole('button', { name: 'Original source' });
+    expect(source).toBeDisabled();
+    expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
+  });
+  it('shows a source that is gone under the recording bar, with New recording as the way forward', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
     const user = await review();
     backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    const playback = within(screen.getByRole('group', { name: NAMES.playback }));
-    const message = await playback.findByRole('alert');
+    const bar = within(screen.getByRole('group', { name: NAMES.recordingBar }));
+    const message = await bar.findByRole('alert');
     expect(message).toHaveTextContent(SOURCE_GONE);
-    // Beside the pill only, not repeated in the workspace banner; the pill is described by it.
+    // Under the bar only, not repeated in the workspace banner; Record more is described by it.
     expect(screen.getAllByRole('alert')).toEqual([message]);
-    expect(playback.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(SOURCE_GONE);
+    expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription(SOURCE_GONE);
     await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4'));
 
     // Dismissing hides it; the next refusal brings it back.
     await user.click(within(message).getByRole('button', { name: NAMES.dismissError }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(playback.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription('Record more (Ctrl+R): continue this session as a new take');
+    expect(bar.getByRole('button', { name: NAMES.recordMore })).toHaveAccessibleDescription('Record more (Ctrl+R): continue this session as a new take');
     backend.recordMore.mockRejectedValueOnce(SOURCE_GONE);
     await user.click(screen.getByRole('button', { name: NAMES.recordMore }));
-    const again = await playback.findByRole('alert');
+    const again = await bar.findByRole('alert');
 
     // New recording opens a draft, where another source can be chosen.
     await user.click(within(again).getByRole('button', { name: NAMES.newRecording }));
@@ -1084,7 +1110,7 @@ describe('record more', () => {
     await user.keyboard('{Enter}');
     expect(backend.recordMore).toHaveBeenCalledOnce();
     await act(async () => refuse(SOURCE_GONE));
-    expect(await within(screen.getByRole('group', { name: NAMES.playback })).findByRole('alert')).toHaveTextContent(SOURCE_GONE);
+    expect(await within(screen.getByRole('group', { name: NAMES.recordingBar })).findByRole('alert')).toHaveTextContent(SOURCE_GONE);
     expect(more).not.toHaveAttribute('aria-disabled');
     expect(more).toHaveFocus();
     expect(more).toHaveAccessibleDescription(SOURCE_GONE);

@@ -50,14 +50,6 @@
   height: var(--size-pill); padding: 0 14px 0 12px; border-radius: var(--radius-pill);
   font-size: var(--font-size-control); font-weight: var(--font-weight-strong);
 }
-.cr-dark-pill {
-  --cr-bg: var(--color-dock); --cr-fg: var(--color-dock-text);
-  --cr-bg-hover: color-mix(in srgb, var(--color-dock) 84%, #fff);
-  --cr-bg-disabled: var(--color-button-disabled); --cr-fg-disabled: var(--color-text-tertiary);
-  height: var(--size-pill-large); gap: 9px; padding: 0 14px 0 12px; border-radius: var(--radius-pill); font-weight: var(--font-weight-strong);
-}
-.cr-record-dot { width: 9px; height: 9px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
-.cr-dark-pill:disabled .cr-record-dot { background: var(--color-record-disabled); }
 
 /* Session header (decision 3) */
 .cr-session-header { flex-shrink: 0; min-width: 0; min-height: var(--size-pill-large); display: flex; align-items: center; gap: 8px; }
@@ -117,7 +109,8 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .cr-live-badge > i { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--color-live); }
-.cr-stage-controls { flex: none; min-width: 0; }
+/* Review stacks the playback bar and the recording bar; a draft and a recording hold one bar. */
+.cr-stage-controls { flex: none; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .cr-stage-controls:empty { display: none; }
 
 /* Playback bar (decision 6, review) */
@@ -138,19 +131,6 @@
   height: var(--size-pill); padding: 0 12px; border-radius: var(--radius-pill);
   font-size: var(--font-size-control); font-weight: var(--font-weight-strong); font-variant-numeric: tabular-nums;
 }
-.cr-control-divider { width: 1px; height: 22px; margin: 0 4px; flex-shrink: 0; background: var(--color-control-divider); }
-/* Why Record more failed, right under the pill, with the way forward (New recording) beside it. */
-.cr-record-more-error {
-  align-self: flex-end; max-width: min(100%, 620px); box-sizing: border-box;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 6px 6px 12px; border-radius: var(--radius-transcript-row);
-  background: var(--color-status-recording); color: var(--color-status-recording-text); font-size: var(--font-size-control); line-height: 1.45;
-}
-.cr-record-more-error > svg { width: 16px; height: 16px; align-self: flex-start; margin-top: 6px; }
-/* The message takes the row; on a narrow window the actions wrap under it. */
-.cr-record-more-error > p { flex: 1 1 240px; min-width: 0; margin: 0; padding: 4px 0; overflow-wrap: anywhere; }
-.cr-record-more-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); margin-left: auto; box-shadow: var(--shadow-button); }
-.cr-record-more-error .cr-record-more-dismiss { --cr-fg: currentColor; --cr-fg-hover: currentColor; --cr-bg-hover: color-mix(in srgb, currentColor 12%, transparent); }
-.cr-record-more-error .cr-record-more-dismiss svg { width: 14px; height: 14px; }
 
 /* Scrubber: a visually hidden range with speech, take ticks and the knob drawn over it. */
 .cr-scrubber { position: relative; height: 18px; touch-action: none; cursor: pointer; user-select: none; }
@@ -251,19 +231,67 @@
   .cr-dock-slot[data-compact] .cr-dock .cr-meter { display: none; }
 }
 
-/* Capture controls (draft) */
-.cr-capture { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+/* The recording bar (a draft and review): the dock's dark capsule, holding the source and microphone
+   pickers and Record in the recording red. It keeps to one row: a long name truncates first, then the
+   container queries below compact it. While a take records, the dock takes its place. */
+.cr-capture-slot { container: cr-capture / inline-size; display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 0; }
+.cr-capture {
+  max-width: 100%; box-sizing: border-box; display: flex; flex-wrap: nowrap; align-items: center; gap: 2px;
+  padding: 6px; border-radius: calc(var(--size-dock-control) / 2 + 6px);
+  background: var(--color-dock); color: var(--color-dock-text); box-shadow: var(--shadow-dock);
+}
+/* Engines without container queries wrap onto a second row instead. */
+@supports not (container-type: inline-size) { .cr-capture { flex-wrap: wrap; } }
+/* The bar's own controls, not the light popovers anchored inside it. */
+.cr-capture > .cr-capture-field > .cr-capture-trigger:focus-visible, .cr-capture > .cr-record:focus-visible { outline-color: var(--color-dock-text); }
 .cr-capture-field { position: relative; display: flex; min-width: 0; }
 .cr-capture-trigger {
-  --cr-bg: var(--color-pill); --cr-fg: var(--color-pill-text);
-  --cr-bg-hover: color-mix(in srgb, var(--color-pill) 88%, var(--color-text)); --cr-fg-disabled: var(--color-text-tertiary);
-  height: var(--size-pill-large); min-width: 0; max-width: 240px; padding: 0 10px 0 12px; border-radius: var(--radius-pill); flex-shrink: 1; font-weight: 500;
+  --cr-fg: var(--color-dock-text); --cr-bg-hover: rgba(255, 255, 255, .08); --cr-fg-disabled: var(--color-dock-text-secondary);
+  position: relative; height: var(--size-dock-control); min-width: var(--size-dock-control); max-width: 220px; flex-shrink: 1; overflow: hidden;
+  gap: 8px; padding: 0 12px 0 14px; border-radius: var(--radius-pill); font-size: 14px; font-weight: var(--font-weight-strong);
 }
-.cr-capture-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.cr-capture-trigger > svg:last-child { width: 12px; height: 12px; color: var(--color-text-tertiary); transform: rotate(90deg); }
-.cr-capture-trigger[aria-expanded='true'] { --cr-bg: color-mix(in srgb, var(--color-pill) 88%, var(--color-text)); }
-.cr-record .cr-record-dot { background: var(--color-record); }
-.cr-record:disabled .cr-record-dot { background: var(--color-record-disabled); }
+.cr-capture-trigger > .cr-capture-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cr-capture-trigger > svg:first-child { width: 17px; height: 17px; }
+.cr-capture-trigger > svg:last-child { width: 12px; height: 12px; color: var(--color-dock-text-secondary); transform: rotate(90deg); }
+.cr-capture-trigger[aria-expanded='true'] { --cr-bg: rgba(255, 255, 255, .12); --cr-bg-hover: rgba(255, 255, 255, .16); }
+/* Record and Record more: Stop's red, which carries white text at 4.7:1. */
+.cr-record {
+  --cr-bg: var(--color-stop); --cr-fg: var(--color-on-stop);
+  --cr-bg-hover: color-mix(in srgb, var(--color-stop) 88%, #000);
+  --cr-bg-disabled: color-mix(in srgb, var(--color-stop) 45%, var(--color-dock)); --cr-fg-disabled: rgba(255, 255, 255, .72);
+  position: relative; height: var(--size-dock-control); margin-left: 2px; gap: 9px; padding: 0 18px 0 16px; border-radius: var(--radius-pill);
+  font-size: 14px; font-weight: 700;
+}
+.cr-record-dot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+
+/* Progressive compaction, measured in Storybook with "Display 1" and "Studio microphone": the review
+   bar needs 476.2px with Record more (a draft's 439.4px with Record). Below that the picker labels
+   drop to icons and their chevrons go; longer names truncate before then. Below the 248.8px the
+   icon-only bar needs with its longest label (Transcribing…; Record more needs 241.9px), Record's
+   label goes too, leaving a 150px bar. Hidden labels stay as visually hidden text, so every control
+   keeps its accessible name. */
+@container cr-capture (max-width: 476.5px) {
+  .cr-capture .cr-capture-trigger { width: var(--size-dock-control); flex-shrink: 0; padding: 0; gap: 0; border-radius: 50%; }
+  .cr-capture .cr-capture-trigger > svg:last-child { display: none; }
+  .cr-capture-trigger > .cr-capture-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+@container cr-capture (max-width: 249px) {
+  .cr-capture .cr-record { width: var(--size-dock-control); padding: 0; gap: 0; }
+  .cr-record > .cr-capture-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+
+/* Why Record more failed, right under the recording bar, with the way forward (New recording) beside it. */
+.cr-record-more-error {
+  align-self: center; max-width: min(100%, 620px); box-sizing: border-box;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 6px 6px 12px; border-radius: var(--radius-transcript-row);
+  background: var(--color-status-recording); color: var(--color-status-recording-text); font-size: var(--font-size-control); line-height: 1.45;
+}
+.cr-record-more-error > svg { width: 16px; height: 16px; align-self: flex-start; margin-top: 6px; }
+/* The message takes the row; on a narrow window the actions wrap under it. */
+.cr-record-more-error > p { flex: 1 1 240px; min-width: 0; margin: 0; padding: 4px 0; overflow-wrap: anywhere; }
+.cr-record-more-error .cr-pill { --cr-bg: var(--color-button); --cr-bg-hover: var(--color-pill); --cr-fg: var(--color-text); margin-left: auto; box-shadow: var(--shadow-button); }
+.cr-record-more-error .cr-record-more-dismiss { --cr-fg: currentColor; --cr-fg-hover: currentColor; --cr-bg-hover: color-mix(in srgb, currentColor 12%, transparent); }
+.cr-record-more-error .cr-record-more-dismiss svg { width: 14px; height: 14px; }
 
 .cr-popover {
   position: fixed; z-index: 30; left: 0; top: 0; box-sizing: border-box; display: flex; flex-direction: column;
@@ -308,17 +336,16 @@
 @media (max-height: 560px) {
   .cr-center { padding-top: 10px; padding-bottom: 12px; }
   .cr-stage { padding-top: 10px; gap: 10px; }
-  .cr-playback { gap: 8px; }
+  .cr-playback, .cr-stage-controls { gap: 8px; }
   .cr-session-header { --size-pill-large: 32px; }
   .cr-session-title { font-size: 15px; }
 }
 @media (max-height: 420px) {
-  .cr-dock-slot { --size-dock-control: 36px; gap: 6px; }
-  .cr-dock { padding: 4px; }
+  .cr-dock-slot, .cr-capture-slot { --size-dock-control: 36px; gap: 6px; }
+  .cr-dock, .cr-capture { padding: 4px; }
   .cr-dock-clock { font-size: 16px; }
   .cr-playback-row { gap: 6px; }
   .cr-playback { --size-play: 34px; --size-pill-large: 32px; --size-pill: 28px; }
-  .cr-capture { --size-pill-large: 32px; }
 }
 @media (max-width: 560px) {
   .cr-center { padding-left: 12px; padding-right: 12px; }
