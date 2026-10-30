@@ -379,7 +379,7 @@ describe('project and session workflows', () => {
   it('cancels the webview menu across the workspace and keeps it in text fields', async () => {
     await review();
     // fireEvent returns false when a handler cancelled the event, which is what keeps the webview's menu away.
-    expect(fireEvent.contextMenu(screen.getByRole('region', { name: NAMES.recordingVideo, exact: true }))).toBe(false);
+    expect(fireEvent.contextMenu(screen.getByRole('region', { name: NAMES.recordingVideo }))).toBe(false);
     expect(fireEvent.contextMenu(screen.getByRole('button', { name: NAMES.settings }))).toBe(false);
     expect(fireEvent.contextMenu(document.body)).toBe(false);
     expect(fireEvent.contextMenu(screen.getByRole('searchbox', { name: NAMES.searchRecordings }))).toBe(true);
