@@ -23,7 +23,7 @@ pub type ErrorSink = Arc<dyn Fn(String) + Send + Sync>;
 /// stream goes on.
 pub type DropSink = Arc<dyn Fn(String) + Send + Sync>;
 pub(crate) fn requires_exclusive_capture(source: &str) -> bool {
-    source.starts_with("v4l2:")
+    source.starts_with("v4l2:") || source.starts_with("avfoundation:")
 }
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 const MAX_STDERR: usize = 8 * 1024;
@@ -162,7 +162,7 @@ impl Drop for Stream {
 }
 impl Preview {
     /// Dropping the stream joins its worker, whose drop waits for the decoder to exit.
-    /// The camera is fully released before the recording process opens it.
+    /// An exclusive source is fully released before the recording process opens it.
     pub fn stop_for_recording(&mut self, source: &str) {
         if requires_exclusive_capture(source) {
             self.active = None;
@@ -1030,32 +1030,40 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_camera_start_waits_for_preview_worker_to_release_source() {
-        let frames = Arc::new(Frames::default());
-        let released = Arc::new(AtomicBool::new(false));
-        let worker_frames = frames.clone();
-        let worker_released = released.clone();
-        let mut preview = Preview {
-            active: Some(Stream {
-                id: "owned-preview".into(),
-                frames,
-                worker: Some(thread::spawn(move || {
-                    let guard = worker_frames.latest.lock().unwrap();
-                    let _guard = worker_frames
-                        .available
-                        .wait_while(guard, |_| !worker_frames.stopped.load(Ordering::Relaxed))
-                        .unwrap();
-                    worker_released.store(true, Ordering::Release);
-                })),
-            }),
-        };
-        for source in ["monitor:1", "x11::0", "android:quest"] {
-            preview.stop_for_recording(source);
-            assert!(preview.active.is_some());
+    fn exclusive_source_start_waits_for_preview_worker_to_release_source() {
+        for exclusive in ["v4l2:/dev/video0", "avfoundation:0", "avfoundation:1"] {
+            let frames = Arc::new(Frames::default());
+            let released = Arc::new(AtomicBool::new(false));
+            let worker_frames = frames.clone();
+            let worker_released = released.clone();
+            let mut preview = Preview {
+                active: Some(Stream {
+                    id: "owned-preview".into(),
+                    frames,
+                    worker: Some(thread::spawn(move || {
+                        let guard = worker_frames.latest.lock().unwrap();
+                        let _guard = worker_frames
+                            .available
+                            .wait_while(guard, |_| !worker_frames.stopped.load(Ordering::Relaxed))
+                            .unwrap();
+                        worker_released.store(true, Ordering::Release);
+                    })),
+                }),
+            };
+            for source in [
+                "monitor:1",
+                "window:123",
+                "x11::0",
+                "android:quest",
+                "dshow:Camera",
+            ] {
+                preview.stop_for_recording(source);
+                assert!(preview.active.is_some(), "{source}");
+            }
+            preview.stop_for_recording(exclusive);
+            assert!(preview.active.is_none(), "{exclusive}");
+            assert!(released.load(Ordering::Acquire), "{exclusive}");
         }
-        preview.stop_for_recording("v4l2:/dev/video0");
-        assert!(preview.active.is_none());
-        assert!(released.load(Ordering::Acquire));
     }
     #[test]
     fn device_preview_finds_packaged_and_explicit_servers() {

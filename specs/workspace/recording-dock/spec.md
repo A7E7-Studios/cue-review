@@ -19,6 +19,26 @@ microphone it records with its level and mute, compact mode and Stop.
 
 ## Requirements
 
+### Requirement: Picker triggers toggle their picker
+The app SHALL close an open source or microphone picker when its trigger is clicked again,
+because a reviewer expects the same control to open and dismiss its choices.
+
+#### Scenario: Dismissing a picker in a new recording
+- **GIVEN** the source or microphone picker is open in a new recording
+- **WHEN** the reviewer clicks that picker's trigger again
+- **THEN** the picker closes and its trigger retains focus
+- **AND** switching pickers, Escape, tabbing to a control outside the picker and clicking outside still dismiss the open picker
+- **PROOF** test: scripts/verify-picker-toggle.cjs
+- **PROOF** desk: open
+
+#### Scenario: Dismissing a picker in review
+- **GIVEN** the source or microphone picker is open in the review recording bar
+- **WHEN** the reviewer clicks that picker's trigger again
+- **THEN** the picker closes and its trigger retains focus
+- **AND** switching pickers, Escape, tabbing to a control outside the picker and clicking outside still dismiss the open picker
+- **PROOF** test: scripts/verify-picker-toggle.cjs
+- **PROOF** desk: open
+
 ### Requirement: The dock does not repeat which take is recording
 The app SHALL show no "Take N" label in the dock and no caption under it, because the transcript's
 "Take N · recording" divider already says which take is recording, and a label that appears from

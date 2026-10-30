@@ -153,7 +153,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const processing = session?.status === 'processing' || (captureBlocked && !!session && status.sessionId === session.id);
   const mode: WorkspaceMode = recording ? 'recording' : draft ? 'draft' : 'review';
   const locked = recording || busy;
-  const previewPaused = sourceId.startsWith('v4l2:') && (recording || startingRecording);
+  const previewPaused = (sourceId.startsWith('v4l2:') || sourceId.startsWith('avfoundation:')) && (recording || startingRecording);
   const { preview, previewError, onPreviewError, onPreviewTimeout } = usePreviewStream(sourceId, (draft || recording) && !previewPaused && !!source?.available, previewRevision);
   /** The video stays unloaded while a later take records or its video is finished. */
   const mediaHeld = takeInFlight(session);

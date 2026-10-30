@@ -2,7 +2,9 @@
 title: Show one recording bar with the source and microphone, before and during a take
 capabilities:
   - workspace/recording-dock
-review: unreviewed
+review: changes-requested
+follow-ups:
+  - macos-recording-controls
 ---
 # Show one recording bar with the source and microphone, before and during a take
 

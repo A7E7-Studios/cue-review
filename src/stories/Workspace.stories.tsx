@@ -159,6 +159,28 @@ export const MacCameraNoViewer: Story = {
   },
 };
 export const MacRecording: Story = { args: { platform: 'macos', scenario: 'recording' } };
+export const MacDisplayRecordingFromPreview: Story = {
+  args: { platform: 'macos', scenario: 'camera-sources' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await canvas.findByRole('img', { name: 'Live preview of Capture screen 0' });
+    await userEvent.click(canvas.getByRole('button', { name: 'Record' }));
+    await expect(await canvas.findByRole('heading', { name: 'Preview paused' })).toBeVisible();
+    await expect(await canvas.findByRole('button', { name: 'Stop' })).toBeEnabled();
+  },
+};
+export const MacCameraRecordingFromPreview: Story = {
+  args: { platform: 'macos', scenario: 'camera-sources' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole('button', { name: 'Capture screen 0' }));
+    await userEvent.click(within(await canvas.findByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'FaceTime HD Camera' }));
+    await canvas.findByRole('img', { name: 'Live preview of FaceTime HD Camera' });
+    await userEvent.click(canvas.getByRole('button', { name: 'Record' }));
+    await expect(await canvas.findByRole('heading', { name: 'Preview paused' })).toBeVisible();
+    await expect(await canvas.findByRole('button', { name: 'Stop' })).toBeEnabled();
+  },
+};
 export const MacRecordingDark: Story = { args: { platform: 'macos', scenario: 'recording' }, globals: dark };
 export const MacRecordingTakeTwo: Story = { args: { platform: 'macos', scenario: 'recording-take' } };
 export const MacRecordingTakeTwoDark: Story = { args: { platform: 'macos', scenario: 'recording-take' }, globals: dark };

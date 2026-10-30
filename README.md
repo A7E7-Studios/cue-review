@@ -160,7 +160,7 @@ $env:CUEREVIEW_CAPTURE_TEST_DIR = "$PWD\test-results\native-capture"
 cargo test --manifest-path src-tauri/Cargo.toml --lib capture::tests -- --include-ignored --test-threads=1
 ```
 
-The `scripts/` folder holds end-to-end checks. Each uses an isolated `CUEREVIEW_DATA_DIR` and never touches normal app data:
+The `scripts/` folder holds end-to-end checks. App and CLI checks use an isolated `CUEREVIEW_DATA_DIR` and never touch normal app data. The browser-only `verify-picker-toggle.cjs` uses Storybook fixtures without app data or capture; see [verification](docs/VERIFICATION.md#scripts).
 
 - No app and no recording: `verify-pipeline.ps1` (known synthesized speech over a captured window, through the real model and CLI), `verify-cli.cjs` (every `cue` command, help and argument errors), `verify-failures.cjs` (missing tools and failing processes) and `verify-alignment.cjs` (phrase-to-frame lookup after ten seconds of silence).
 - An owned app without recording: `verify-sidebar.cjs`, `verify-recovery.cjs` and `verify-folder-open.cjs` launch and close their own release app on a local CDP test port.

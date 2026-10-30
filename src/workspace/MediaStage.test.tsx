@@ -137,7 +137,7 @@ describe('MediaStage', () => {
     expect(captureEmptyState({ source: { available: true } })).toEqual({ title: 'Loading preview…' });
     expect(captureEmptyState({ source: { available: true }, previewError: 'Stream failed' })).toEqual({ title: 'Preview unavailable' });
     expect(captureEmptyState({ source: { available: false, detail: 'Reconnect Quest.' } })).toEqual({ title: 'Capture source unavailable', detail: 'Reconnect Quest.' });
-    expect(captureEmptyState({ paused: true })).toEqual({ title: 'Camera preview paused', detail: 'The camera is in use for recording. Preview returns when you start a new session.' });
+    expect(captureEmptyState({ paused: true })).toEqual({ title: 'Preview paused', detail: 'The selected source is in use for recording. Preview returns when you start a new session.' });
     expect(reviewEmptyState({ loading: true }).title).toBe('Opening recording…');
     expect(reviewEmptyState()).toEqual({ title: 'No video available', detail: 'Open the session folder to inspect its files.' });
   });

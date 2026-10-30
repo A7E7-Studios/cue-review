@@ -1,6 +1,8 @@
 ---
 title: Camera capture
 code:
+  - src-tauri/tauri.conf.json
+  - src-tauri/Entitlements.plist
   - src-tauri/src/capture.rs
   - src-tauri/src/preview.rs
   - src/App.tsx
@@ -38,8 +40,10 @@ because the preview and recording must cooperate over access to the same camera.
 - **GIVEN** the built-in camera's live preview is visible on macOS
 - **WHEN** the person records a short take and stops it
 - **THEN** the recording finishes with a playable video of that camera
+- **AND** preview releases the camera before recording opens it and the video area says Preview paused during recording
 - **AND** playing it in the app shows the recorded camera view
 - **PROOF** test: src/App.test.tsx::starts a macos camera recording from its preview
+- **PROOF** test: src/stories/Workspace.stories.tsx::MacCameraRecordingFromPreview
 - **PROOF** desk: open
 
 ### Requirement: A blocked camera has a recoverable error

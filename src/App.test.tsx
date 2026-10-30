@@ -270,7 +270,8 @@ describe('capture source priority and macos cameras', () => {
     await user.click(screen.getByRole('button', { name: NAMES.record }));
     await screen.findByRole('button', { name: NAMES.stop });
     expect(backend.start).toHaveBeenCalledWith(null, null, camera.id, 'mic1', false, false);
-    expect(screen.getByRole('img', { name: `Live preview of ${camera.name}` })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Preview paused' })).toBeVisible();
+    expect(backend.stopPreview).toHaveBeenCalledWith(previewId);
     await user.click(screen.getByRole('button', { name: NAMES.stop }));
     await screen.findByRole('button', { name: NAMES.play });
     expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
@@ -320,23 +321,38 @@ describe('capture source priority and macos cameras', () => {
 });
 
 describe('keyboard interaction', () => {
-  it('pauses an exclusive camera preview during startup and recording, then restores it after a failed start', async () => {
-    backend.sources.mockResolvedValue([{ id: 'v4l2:/dev/video0', name: 'USB camera', kind: 'camera', available: true }]);
+  it.each<CaptureSource>([
+    { id: 'v4l2:/dev/video0', name: 'USB camera', kind: 'camera', available: true },
+    { id: 'avfoundation:0', name: 'FaceTime HD Camera', kind: 'camera', available: true },
+    { id: 'avfoundation:1', name: 'Capture screen 0', kind: 'display', available: true },
+  ])('pauses $name preview during startup and recording, then restores it after a failed start', async source => {
+    backend.sources.mockResolvedValue([source]);
     let rejectStart!: (error: Error) => void;
     backend.start.mockImplementationOnce(() => new Promise((_, reject) => { rejectStart = reject; }));
-    const user = await ready(); await screen.findByRole('img', { name: 'Live preview of USB camera' });
+    const user = await ready({ platform: source.id.startsWith('avfoundation:') ? 'macos' : 'linux' });
+    await screen.findByRole('img', { name: `Live preview of ${source.name}` });
     const id = backend.preview.mock.calls[0][1];
     await user.click(screen.getByRole('button', { name: NAMES.record }));
-    await screen.findByRole('heading', { name: 'Camera preview paused' });
+    await screen.findByRole('heading', { name: 'Preview paused' });
     await waitFor(() => expect(backend.stopPreview).toHaveBeenCalledWith(id));
     expect(backend.preview).toHaveBeenCalledTimes(1);
-    await act(async () => rejectStart(new Error('Camera failed to start')));
-    await screen.findByRole('img', { name: 'Live preview of USB camera' });
+    expect(screen.queryByRole('img', { name: `Live preview of ${source.name}` })).not.toBeInTheDocument();
+    await act(async () => rejectStart(new Error('Source failed to start')));
+    await screen.findByRole('img', { name: `Live preview of ${source.name}` });
     expect(backend.preview).toHaveBeenCalledTimes(2);
+    const restoredId = backend.preview.mock.calls[1][1];
     await user.click(screen.getByRole('button', { name: NAMES.record }));
     await screen.findByRole('button', { name: NAMES.stop });
-    expect(screen.getByRole('heading', { name: 'Camera preview paused' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Preview paused' })).toBeInTheDocument();
+    expect(backend.stopPreview).toHaveBeenCalledWith(restoredId);
     expect(backend.preview).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('button', { name: NAMES.stop }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: NAMES.stop })).not.toBeInTheDocument());
+    expect(screen.queryByRole('img', { name: `Live preview of ${source.name}` })).not.toBeInTheDocument();
+    expect(backend.preview).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('button', { name: NAMES.newSession }));
+    await screen.findByRole('img', { name: `Live preview of ${source.name}` });
+    expect(backend.preview).toHaveBeenCalledTimes(3);
   });
   it('keeps one continuous preview through recording startup and stops it for review', async () => {
     const user = await ready(); await screen.findByRole('img', { name: 'Live preview of Display 1' });

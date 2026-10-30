@@ -378,12 +378,12 @@ async fn start_preview(
     let s = s.inner().clone();
     blocking(move || {
         // The runtime lock precedes preview everywhere both are needed. Keep it
-        // through startup so preview cannot reopen an exclusive camera mid-start.
+        // through startup so preview cannot reopen an exclusive source mid-start.
         let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
         if preview::requires_exclusive_capture(&source_id)
             && runtime.active.as_ref().is_some_and(|(session, _)| session.source_id == source_id)
         {
-            return Err("Camera preview is paused while recording because this device supports one capture stream. Stop recording to preview it again.".into());
+            return Err("Preview is paused while the selected source is recording. Stop recording before previewing it again.".into());
         }
         s.preview.lock().map_err(|e| e.to_string())?.start(
             id,
