@@ -82,7 +82,7 @@ Rename the session: {command} rename {session} 'Short descriptive name'
 Usage of any command: {command} help frames
 
 Session folder: {folder}
-The CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous. All times are session times: a session recorded in several takes keeps one video per take, and frame, frames, moments and clip read the take each time falls in, so a clip must stay within one take. Frames and clips are written to new files and never overwrite existing ones. cursor is null or absent when no pointer track was recorded."
+The CLI is bundled with CueReview; use its full path as shown. Prefer seekMs, when present, for word-to-visual lookup; startMs/endMs retain the original model intervals. All timestamps are estimates; inspect surrounding frames when ambiguous. All times are session times: a session recorded in several takes can keep a video per take, and frame, frames, moments and clip read the take video each time falls in, so a clip must stay within one take video. Frames and clips are written to new files and never overwrite existing ones. cursor is null or absent when no pointer track was recorded."
     )
 }
 /// `cue transcribe`: transcribes a finished session again.

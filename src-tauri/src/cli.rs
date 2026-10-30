@@ -253,7 +253,7 @@ const SPECS: &[Spec] = &[
                 "Write the PNG here instead of the session's exports folder; fails if PATH exists",
             ),
         ],
-        notes: "MS is session time: the frame comes from the video of the take it falls in, at that take's size. For several frames in one call, use cue frames.",
+        notes: "MS is session time: the frame comes from the take video it falls in, at that video's size. For several frames in one call, use cue frames.",
     },
     Spec {
         name: "frames",
@@ -272,7 +272,7 @@ const SPECS: &[Spec] = &[
                 "Write into DIR (created if missing) instead of the session's exports folder",
             ),
         ],
-        notes: "Each frame comes from the video of the take its time falls in. Every frame is written to a new file; existing files are never overwritten.",
+        notes: "Each frame comes from the take video its time falls in. Every frame is written to a new file; existing files are never overwritten.",
     },
     Spec {
         name: "clip",
@@ -1081,10 +1081,10 @@ mod tests {
     fn frame_help_names_the_take_video() {
         let frame = help_text("frame --help");
         assert!(
-            frame.contains("the frame comes from the video of the take it falls in"),
+            frame.contains("the frame comes from the take video it falls in"),
             "{frame}"
         );
-        assert!(help_text("frames --help").contains("the take its time falls in"));
+        assert!(help_text("frames --help").contains("the take video its time falls in"));
         assert!(help_text("clip --help").contains("crosses into the next take's video is refused"));
         assert!(help_text("info --help").contains("takes/N/video.mp4"));
     }

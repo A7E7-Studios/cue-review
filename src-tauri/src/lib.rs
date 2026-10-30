@@ -559,11 +559,18 @@ fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
     if take.status == TakeStatus::Swapping {
         takes::upgrade(&s.store, id)?;
     }
-    if !takes::list(&s.store.session(id)?)
+    match takes::list(&s.store.session(id)?)
         .iter()
-        .any(|take| take.index == index && takes::on_timeline(take.status))
+        .find(|take| take.index == index)
+        .map(|take| take.status)
     {
-        return Err(format!("Take {index} has no usable video."));
+        Some(status) if takes::on_timeline(status) => (),
+        Some(TakeStatus::Swapping) => {
+            return Err(format!(
+                "Take {index} still waits to be added to the recording: video.mp4 could not be read, and only it tells whether the take is already in it. Try again once video.mp4 can be read."
+            ))
+        }
+        _ => return Err(format!("Take {index} has no usable video.")),
     }
     takes::set_status(&s.store, id, index, TakeStatus::Transcribing)?;
     let result = s
