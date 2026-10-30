@@ -1477,12 +1477,34 @@ impl AudioWriter {
         let spec = wav.spec();
         wav.finalize().map_err(|e| e.to_string())?;
         let part = self.path.with_extension("wav.part");
+        // A failed rewrite (a full disk, say) leaves the track as recorded and no part file.
+        if let Err(e) = self
+            .rewrite(&part, spec, total, ratio)
+            .and_then(|()| fs::rename(&part, &self.path).map_err(|e| e.to_string()))
+        {
+            let _ = fs::remove_file(&part);
+            return Err(e);
+        }
+        self.frames = total;
+        Ok(())
+    }
+    /// Writes the finished track to `part`: each run resampled by `ratio` and placed at its start,
+    /// silence around them, `total` samples in all.
+    fn rewrite(
+        &self,
+        part: &Path,
+        spec: hound::WavSpec,
+        total: u64,
+        ratio: f64,
+    ) -> Result<(), String> {
+        let rate = self.rate as f64;
+        let table = sinc_table(ratio.min(1.0));
         {
             let mut reader = hound::WavReader::open(&self.path).map_err(|e| e.to_string())?;
             let mut input = reader
                 .samples::<f32>()
                 .map(|sample| sample.map_err(|e| e.to_string()));
-            let mut output = hound::WavWriter::create(&part, spec).map_err(|e| e.to_string())?;
+            let mut output = hound::WavWriter::create(part, spec).map_err(|e| e.to_string())?;
             let mut write = |sample: f32| output.write_sample(sample).map_err(|e| e.to_string());
             let places: Vec<u64> = self
                 .runs
@@ -1503,7 +1525,7 @@ impl AudioWriter {
                 let until = places.get(index + 1).copied().unwrap_or(total).max(written);
                 let count = ((run.len as f64 * ratio).round() as u64).min(until - written);
                 let mut samples = (&mut input).take(run.len as usize);
-                resample(&mut samples, run.len, ratio, count, &mut write)?;
+                resample(&mut samples, run.len, ratio, &table, count, &mut write)?;
                 for sample in samples {
                     sample?;
                 }
@@ -1516,8 +1538,6 @@ impl AudioWriter {
             }
             output.finalize().map_err(|e| e.to_string())?;
         }
-        fs::rename(&part, &self.path).map_err(|e| e.to_string())?;
-        self.frames = total;
         Ok(())
     }
 }
@@ -1552,16 +1572,17 @@ fn sinc_table(cutoff: f64) -> Vec<f32> {
 }
 
 /// Writes `count` samples of `input` (`len` samples long) resampled by `ratio` output samples
-/// per input sample, holding only the filter's window of input in memory.
+/// per input sample through `table` (`sinc_table(ratio.min(1.0))`), holding only the filter's
+/// window of input in memory.
 fn resample(
     input: &mut impl Iterator<Item = Result<f32, String>>,
     len: u64,
     ratio: f64,
+    table: &[f32],
     count: u64,
     write: &mut impl FnMut(f32) -> Result<(), String>,
 ) -> Result<(), String> {
     let taps = 2 * SINC_HALF;
-    let table = sinc_table(ratio.min(1.0));
     let mut window = std::collections::VecDeque::with_capacity(taps + 1);
     let (mut base, mut read) = (0i64, 0u64);
     for index in 0..count {
@@ -4208,6 +4229,7 @@ mod tests {
             &mut input.iter().map(|s| Ok(*s)),
             input.len() as u64,
             ratio,
+            &sinc_table(ratio.min(1.0)),
             count,
             &mut |s| {
                 output.push(s);
