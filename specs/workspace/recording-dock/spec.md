@@ -72,8 +72,8 @@ records the session's own source.
 ### Requirement: The locked source names only the session's own source
 The app SHALL name the session's source in the review bar by its listed name only when its id
 cannot have passed to another source; a window or display (a `window:` or `monitor:` id) is
-named by the title the session stored for its window, or "Original source" for a display or a
-window with no stored title, because such an id can name another window or display after a
+named by what the session stored for it, its window's title or its display's device number
+("Display 2"), or "Original source" when it stored neither, because such an id can name another window or display after a
 restart and the listing cannot tell them apart.
 
 #### Scenario: The session's window handle now names another window
@@ -81,7 +81,8 @@ restart and the listing cannot tell them apart.
 - **WHEN** the reviewer opens it
 - **THEN** the bar names its source by the window title the session stored, not by the listed
   window
-- **AND** a session recorded from a display that is still listed shows "Original source"
+- **AND** a session recorded from a display is named by the display device it stored, and one
+  that stored none shows "Original source"
 - **PROOF** test: src/App.test.tsx::record more never names the session's source after a listed window or display that may only share its id
 - **PROOF** desk: open
 

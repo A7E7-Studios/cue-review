@@ -1125,16 +1125,21 @@ describe('record more', () => {
       { id: 'window:42', name: 'Inbox — Mail', kind: 'window', available: true, detail: 'Mail.exe' },
     ]);
     const identity = { kind: 'window' as const, title: 'Design review — Figma', process: 'Figma.exe', class: 'Chrome_WidgetWin_1', pid: 4120 };
-    sessions = [{ ...newSession(), sourceId: 'window:42', sourceIdentity: identity }, { ...newSession('s3'), name: 'Review Beta', sourceId: 'monitor:1' }];
+    const screenTwo = { kind: 'display' as const, device: '\\\\.\\DISPLAY2', left: 0, top: 0, right: 2560, bottom: 1440 };
+    sessions = [{ ...newSession(), sourceId: 'window:42', sourceIdentity: identity }, { ...newSession('s3'), name: 'Review Beta', sourceId: 'monitor:1', sourceIdentity: screenTwo },
+      { ...newSession('s4'), name: 'Review Gamma', sourceId: 'monitor:1' }];
     const user = await review();
     const bar = () => within(screen.getByRole('group', { name: NAMES.recordingBar }));
     // A window is named by the title the session stored, not by the window that has its handle now.
     expect(bar().getByRole('button', { name: 'Design review — Figma' })).toHaveAttribute('aria-disabled', 'true');
     expect(bar().queryByRole('button', { name: 'Inbox — Mail' })).not.toBeInTheDocument();
-    // A display stores no name: it is the original source.
+    // A display is named by the device the session stored, not by the display that has its number now.
     await open(user, /Review Beta/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
-    expect(bar().getByRole('button', { name: 'Original source' })).toHaveAttribute('aria-disabled', 'true');
+    expect(bar().getByRole('button', { name: 'Display 2' })).toHaveAttribute('aria-disabled', 'true');
     expect(bar().queryByRole('button', { name: /DELL/ })).not.toBeInTheDocument();
+    // Without a stored identity it is the original source.
+    await open(user, /Review Gamma/); await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    expect(bar().getByRole('button', { name: 'Original source' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: NAMES.recordMore })).toBeEnabled();
   });
   it('shows a source that is gone under the recording bar, with New recording as the way forward', async () => {

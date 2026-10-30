@@ -35,7 +35,7 @@ export function configureScenario(next: Scenario) {
   sequence = 0;
   status = { state: 'idle' };
   if (next === 'recording' || next === 'processing') {
-    recordings[0] = { ...recordings[0], status: next, sourceId: 'display', microphoneId: 'microphone' };
+    recordings[0] = { ...recordings[0], status: next, sourceId: 'monitor:1', microphoneId: 'microphone' };
     status = { state: next, sessionId: 'library', elapsedMs: 8200, audioLevel: 0.46, liveTranscript: clone(transcript) };
   }
   // The two-take session plays a still of the mocks' recorded screen (videoUrl passes paths through).
@@ -74,7 +74,7 @@ export const backend = {
   markers: async () => clone(markers),
   status: async () => clone(status),
   sources: async (): Promise<CaptureSource[]> => [
-    { id: 'display', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
+    { id: 'monitor:1', name: 'Display 1', kind: 'display', available: scenario !== 'unavailable' },
     { id: 'quest', name: 'Quest 3', kind: 'quest', available: scenario !== 'unavailable', detail: scenario === 'unavailable' ? 'Reconnect this device to resume its preview.' : undefined },
     { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false },
   ],

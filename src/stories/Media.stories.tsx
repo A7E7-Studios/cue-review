@@ -16,7 +16,7 @@ import { SOURCE_GONE, takeTwoLiveTranscript, takeTwoStartMs, transcript as first
 const sample = new URL('../../docs/design/float-v2/sample-capture.svg', import.meta.url).href;
 const SPEEDS = [1, 1.5, 2, 0.75];
 const sources: CaptureSource[] = [
-  { id: 'display', name: 'Display 1', kind: 'display', available: true },
+  { id: 'monitor:1', name: 'Display 1', kind: 'display', available: true },
   { id: 'window', name: 'Library — Component browser', kind: 'window', available: true },
   { id: 'quest', name: 'Quest 3', kind: 'quest', available: true },
   { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false, detail: 'Reconnect this camera and refresh, or choose another source.' },
@@ -44,7 +44,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const [muted, setMuted] = useState(false);
   const [compactMode, setCompactMode] = useState(compact);
   const [menu, setMenu] = useState<CaptureMenu | null>(null);
-  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : 'display');
+  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : 'monitor:1');
   const [microphoneId, setMicrophoneId] = useState('microphone');
   const [systemAudio, setSystemAudio] = useState(false);
   const [notice, setNotice] = useState('');

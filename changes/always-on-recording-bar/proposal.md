@@ -67,9 +67,9 @@ with the display and microphone in it, for a new recording, for Record more and 
 - When the session's source is no longer listed (a closed window), the locked picker reads
   "Original source". A listed `window:` or `monitor:` id may name another window or display after a
   restart, and the listing cannot tell, so the picker names a window by the title the session
-  stored and a display "Original source": in the Windows app a session recorded from a display
-  reads "Original source" in review, even while that display is attached. Naming displays needs the
-  listing to carry the display device, a backend change.
+  stored and a display by the device number it stored (`\\.\DISPLAY2` reads "Display 2"), which
+  can differ from the listing's display numbering. A session that stored neither reads "Original
+  source".
 - In review the bar has no live preview of the source it will record: the video area keeps
   playback. The picker names the source; a preview would replace the video being reviewed.
 

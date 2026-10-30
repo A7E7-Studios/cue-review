@@ -43,15 +43,17 @@ const REUSABLE_SOURCE_ID = /^(window|monitor):/;
  * The session's own source, which Record more records, as the recording bar in review names it. A listed
  * source keeps its listed name only when its id cannot have passed to another source: a `window:` or
  * `monitor:` id can name another window or display after a restart, and the listing lacks what tells
- * them apart (the owning process, the display device), so such a source is named by the title the
- * session stored for its window, or as the original source. A source that is no longer listed is the
- * original source.
+ * them apart (the owning process, the display device), so such a source is named by what the session
+ * stored for it: its window's title, or its display's device number ("Display 1" for `\\.\DISPLAY1`),
+ * else as the original source. A source that is no longer listed is the original source.
  */
 function sessionSourceOf(session: Session, sources: CaptureSource[]): CaptureSource {
   const id = session.sourceId ?? '';
   const listed = sources.find(item => item.id === id);
   if (listed && !REUSABLE_SOURCE_ID.test(id)) return listed;
-  const stored = session.sourceIdentity?.kind === 'window' ? session.sourceIdentity.title.trim() : '';
+  const identity = session.sourceIdentity;
+  const display = identity?.kind === 'display' ? /DISPLAY(\d+)$/i.exec(identity.device)?.[1] : undefined;
+  const stored = identity?.kind === 'window' ? identity.title.trim() : display ? `Display ${display}` : '';
   return { id, name: listed && stored ? stored : ORIGINAL_SOURCE, kind: id.startsWith('window:') ? 'window' : 'display', available: !!listed };
 }
 /** Runtime status polling: every 700 ms, backing off up to 10 s while the backend keeps failing. */
