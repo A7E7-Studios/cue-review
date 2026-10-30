@@ -177,12 +177,14 @@ export interface RecordingDockProps {
   elapsedMs: number;
   /** The take being recorded, named only in the timer's name NAMES.takeTimer(take). 1 for a first recording. */
   take: number;
-  /** 0 to 1. The meter is labelled NAMES.microphoneLevel; hidden when there is no live microphone. */
+  /** Linear RMS, 0 to 1: the loudest since the last status. The meter is labelled NAMES.microphoneLevel and reads it in dBFS; hidden when there is no live microphone. */
   audioLevel?: number;
   /** The locked source, shown as a disabled button. */
   sourceName: string;
   hasMicrophone: boolean;
-  /** Toggle labelled NAMES.muteMicrophone with aria-pressed. */
+  /** The recorded microphone's device name; the chip shows its short form and its tooltip the whole name. */
+  microphoneName?: string;
+  /** The microphone chip: a toggle labelled NAMES.muteMicrophone with aria-pressed, reading NAMES.muted while muted. */
   muted: boolean;
   onMuted: (muted: boolean) => void;
   /** Labelled NAMES.compact or NAMES.expand. */

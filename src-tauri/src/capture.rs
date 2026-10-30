@@ -1377,6 +1377,16 @@ impl AudioWriter {
     }
 }
 
+/// Keeps the loudest packet level until the status reads it, so a word between two reads still
+/// shows. A non-negative `f32`'s bits order as the number does.
+fn hold_level(level: &AtomicU32, rms: f32) {
+    level.fetch_max(rms.max(0.0).to_bits(), Ordering::Relaxed);
+}
+/// The loudest level since the last read, and a fresh start for the next.
+fn take_level(level: &AtomicU32) -> f32 {
+    f32::from_bits(level.swap(0, Ordering::Relaxed))
+}
+
 struct AudioTrack {
     stream: cpal::Stream,
     writer: Arc<Mutex<AudioWriter>>,
@@ -1476,7 +1486,7 @@ fn audio_track(
                 epoch,
                 !loopback && muted.load(Ordering::Relaxed),
             ) {
-                Ok(rms) => level.store(rms.to_bits(), Ordering::Relaxed),
+                Ok(rms) => hold_level(&level, rms),
                 Err(e) => fail(&error, format!("Audio write failed: {e}")),
             }
         }
@@ -1886,7 +1896,7 @@ impl ActiveCapture {
             .as_millis() as u64
     }
     pub fn audio_level(&self) -> f32 {
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+        take_level(&self.level)
     }
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
@@ -3855,6 +3865,17 @@ mod tests {
             .iter()
             .chain(samples[26..].iter())
             .all(|s| *s == 0.0));
+    }
+    #[test]
+    fn the_level_is_the_loudest_since_it_was_read() {
+        let level = AtomicU32::new(0);
+        for rms in [0.01, 0.2, 0.05] {
+            hold_level(&level, rms);
+        }
+        assert_eq!(take_level(&level), 0.2);
+        assert_eq!(take_level(&level), 0.0);
+        hold_level(&level, 0.03);
+        assert_eq!(take_level(&level), 0.03);
     }
     #[test]
     fn snapshot_has_a_finite_latest_30_second_prefix() {

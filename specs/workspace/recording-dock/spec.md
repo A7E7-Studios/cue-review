@@ -8,8 +8,8 @@ code:
 
 ## Purpose
 
-The dark bar under the preview while a take records: how long it has run, the microphone level, the
-locked source, mute, compact mode and Stop.
+The dark bar under the preview while a take records: how long it has run, the locked source, the
+microphone it records with its level and mute, compact mode and Stop.
 
 ## Requirements
 
@@ -52,6 +52,7 @@ meter and mutes the microphone, because the reviewer could not tell which microp
 - **THEN** the microphone chip reads "HD Pro Webcam C920" beside the meter
 - **AND** its tooltip names the whole device
 - **PROOF** test: src/workspace/RecordingDock.test.tsx::RecordingDock names the microphone on its chip
+- **PROOF** test: src/App.test.tsx::a mute from the dock ends with its take
 - **PROOF** desk: open
 
 ### Requirement: Muting is plain and keeps the dock's shape

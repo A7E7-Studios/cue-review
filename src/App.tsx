@@ -322,6 +322,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     actionEpoch.current++; setBusy(true); setError('');
     try {
       const next = await backend.stop();
+      // A mute from the dock lasts for its take: the next one starts unmuted unless Mute is ticked again.
+      setMuted(false);
       setSession(next); setDraft(false);
       runtimeState.current = next.status === 'processing' ? 'processing' : 'idle';
       setStatus({ state: runtimeState.current, sessionId: runtimeState.current === 'processing' ? next.id : undefined }); setDuration(next.durationMs);
@@ -590,7 +592,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
 
   const dock = <RecordingDock platform={os} elapsedMs={status.elapsedMs || 0} take={status.takeIndex ?? 1} audioLevel={status.audioLevel}
-    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable} muted={muted} onMuted={next => void changeMuted(next)}
+    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable}
+    microphoneName={microphones.find(item => item.id === microphoneId)?.name} muted={muted} onMuted={next => void changeMuted(next)}
     compact={compact} onToggleCompact={() => void toggleCompact()} stopDisabled={busy} onStop={() => void stop()}/>;
   // `busy` is a moment, not a state of the control: those buttons stay focusable (aria-disabled), so focus never drops to the page.
   const controls = mode === 'recording' ? dock
