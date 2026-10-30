@@ -17,9 +17,45 @@ Measured at `1ca94a0` (the Phase 1 merge on `codex/design-polish`, before the ap
 
 These do not exercise the integrated app, capture, takes recorded through the UI or cursor tracking on real input.
 
+### macOS preview recovery evidence
+
+Clean source build `c2d76d8` passed 367 frontend tests, 183 Rust library tests, the frontend and
+Storybook builds, formatting, strict all-targets Clippy, and the strict local gate. Windows, Linux
+and macOS CI passed. The Apple Silicon DMG built with the verified bundled speech runtime; its
+extracted app passed strict signature checks and its CLI discovered the speech tools. The portable
+CLI script passed all nine check groups.
+
+The packaged native app used an isolated data root whose FFmpeg and ADB paths were asserted to be
+synthetic wrappers before launch. It selected the display despite camera-first discovery, listed
+the display before the phone and camera, showed actionable injected camera errors, and restored
+updating generated frames with Retry. A video-only generated take finalized as 4.167 seconds,
+decoded fully and played in the native app. Its microphone was unset and system audio was off.
+An initial low-rate fixture did not flush enough output for startup readiness; enabling packet
+flushing in the fixture made the successful take possible without changing production capture
+settings. A separate injected recording failure preserved the real backend cause and recovery
+guidance. Evidence is retained in `test-results/macos-camera-capture/`.
+
+These synthetic runs activate no real screen, camera, microphone or Android capture. Real macOS
+camera preview-to-recording access, permission recovery and the owner's source-selection checks
+remain open in their specs.
+
 ### Unattended tests
 
 `cargo test --lib` and `npm test` need no tools, devices or network. The v0.2.0 additions cover:
+
+Source selection and camera recovery are covered by `src/App.test.tsx`,
+`src/workspace/MediaStage.test.tsx` and `src/app/usePreviewStream.test.tsx`: mixed discovery order,
+stable category priority, unavailable and empty lists, explicit choices across refreshes, missing
+cameras, preview-to-recording orchestration, blocked preview/recording errors, Retry, first-frame
+timeouts and stale callback isolation. `preview::tests` exercises bounded decoder stderr, a flooded
+error pipe, child teardown, the no-viewer timeout, and a real JPEG through the production parser and
+loopback response without opening a camera. Its ignored `preview_decoder_subprocess_fixture` is a
+private helper invoked by these tests, not a hardware check. Storybook's MacSourcePriority,
+MacCameraSelected and MacCameraBlocked stories use the real App with an in-memory backend; the
+blocked story's Retry restores its fixture preview. MacCameraNoFrame exercises the real ten-second
+first-frame watchdog with an image that has no intrinsic dimensions; MacCameraNoViewer renders the
+backend connection-timeout error. Both retain Retry. These checks do not establish real macOS camera
+permission recovery or concurrent preview and recording on physical hardware.
 
 | Area | Covered by |
 | --- | --- |

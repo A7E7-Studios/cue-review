@@ -1,10 +1,81 @@
 import { createRef } from 'react';
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { captureEmptyState, MediaStage, reviewEmptyState } from './MediaStage';
 import { NAMES } from './types';
 
 describe('MediaStage', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('reports a preview with no drawable first frame after ten seconds', () => {
+    vi.useFakeTimers();
+    const onPreviewTimeout = vi.fn();
+    const url = 'http://127.0.0.1:9999/live?view=1';
+    render(<MediaStage mode="draft" previewUrl={url} onPreviewTimeout={onPreviewTimeout}/>);
+    act(() => { vi.advanceTimersByTime(9999); });
+    expect(onPreviewTimeout).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(onPreviewTimeout).toHaveBeenCalledExactlyOnceWith(url);
+    act(() => { vi.advanceTimersByTime(20_000); });
+    expect(onPreviewTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognizes multipart image dimensions without a load event and cancels first-frame failure', () => {
+    vi.useFakeTimers();
+    const onPreviewTimeout = vi.fn();
+    render(<MediaStage mode="draft" previewUrl="http://127.0.0.1:9999/live?view=1" onPreviewTimeout={onPreviewTimeout}/>);
+    const image = screen.getByRole('img');
+    Object.defineProperties(image, { naturalWidth: { value: 640 }, naturalHeight: { value: 480 } });
+    act(() => { vi.advanceTimersByTime(250); });
+    expect(screen.getByRole('region', { name: NAMES.capturePreview })).toHaveStyle({ '--cr-media-aspect': String(640 / 480) });
+    act(() => { vi.advanceTimersByTime(30_000); });
+    expect(onPreviewTimeout).not.toHaveBeenCalled();
+  });
+
+  it('gives each new preview URL a fresh image and first-frame allowance', () => {
+    vi.useFakeTimers();
+    const onPreviewTimeout = vi.fn();
+    const { rerender } = render(<MediaStage mode="draft" previewUrl="http://127.0.0.1:9999/old?view=1" onPreviewTimeout={onPreviewTimeout}/>);
+    const oldImage = screen.getByRole('img');
+    Object.defineProperties(oldImage, { naturalWidth: { value: 640 }, naturalHeight: { value: 480 } });
+    act(() => { vi.advanceTimersByTime(9000); });
+    const nextUrl = 'http://127.0.0.1:9999/new?view=2';
+    rerender(<MediaStage mode="draft" previewUrl={nextUrl} onPreviewTimeout={onPreviewTimeout}/>);
+    expect(screen.getByRole('img')).not.toBe(oldImage);
+    act(() => { vi.advanceTimersByTime(9999); });
+    expect(onPreviewTimeout).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(onPreviewTimeout).toHaveBeenCalledExactlyOnceWith(nextUrl);
+  });
+
+  it('cancels pending first-frame checks on review and unmount', () => {
+    vi.useFakeTimers();
+    const onPreviewTimeout = vi.fn();
+    const { rerender, unmount } = render(<MediaStage mode="draft" previewUrl="http://127.0.0.1:9999/live" onPreviewTimeout={onPreviewTimeout}/>);
+    act(() => { vi.advanceTimersByTime(9000); });
+    rerender(<MediaStage mode="review" onPreviewTimeout={onPreviewTimeout}/>);
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(onPreviewTimeout).not.toHaveBeenCalled();
+    rerender(<MediaStage mode="draft" previewUrl="http://127.0.0.1:9999/next" onPreviewTimeout={onPreviewTimeout}/>);
+    unmount();
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(onPreviewTimeout).not.toHaveBeenCalled();
+  });
+
+  it('restarts the first-frame check when a new stream reuses its fixture URL', () => {
+    vi.useFakeTimers();
+    const firstTimeout = vi.fn();
+    const secondTimeout = vi.fn();
+    const url = 'data:image/svg+xml,<svg/>';
+    const { rerender } = render(<MediaStage mode="draft" previewUrl={url} onPreviewTimeout={firstTimeout}/>);
+    act(() => { vi.advanceTimersByTime(9000); });
+    rerender(<MediaStage mode="draft" previewUrl={url} onPreviewTimeout={secondTimeout}/>);
+    act(() => { vi.advanceTimersByTime(9999); });
+    expect(firstTimeout).not.toHaveBeenCalled();
+    expect(secondTimeout).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(secondTimeout).toHaveBeenCalledExactlyOnceWith(url);
+  });
   it('plays the review video in one bordered box and forwards its element and handlers', () => {
     const ref = createRef<HTMLVideoElement>();
     const onTimeUpdate = vi.fn();

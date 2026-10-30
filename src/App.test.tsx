@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import App from './App';
 import type { AppProps } from './App';
-import type { Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
+import type { CaptureSource, Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
 import { WINDOW_CLOSED } from './stories/fixtures';
 import { NAMES, RETIRED_NAMES } from './workspace/types';
 
@@ -144,6 +144,179 @@ const recordTakeTwo = async (id: string) => {
   return structuredClone(next);
 };
 const figma = { id: 'window:42', name: 'Design review — Figma', kind: 'window' as const, available: true };
+
+describe('capture source priority and macos cameras', () => {
+  const camera: CaptureSource = { id: 'avfoundation:0', name: 'FaceTime HD Camera', kind: 'camera', available: true };
+  const display: CaptureSource = { id: 'avfoundation:1', name: 'Capture screen 0', kind: 'display', available: true };
+  const previewOf = (name: string) => screen.findByRole('img', { name: `Live preview of ${name}` });
+
+  it('lists displays windows and devices before cameras', async () => {
+    const discovery: CaptureSource[] = [
+      camera,
+      { id: 'screen2', name: 'Second discovered display', kind: 'display', available: true },
+      { id: 'quest', name: 'Quest headset', kind: 'quest', available: true },
+      { id: 'window', name: 'Review window', kind: 'window', available: true },
+      { id: 'android', name: 'Android phone', kind: 'android', available: true },
+      display,
+      { id: 'camera2', name: 'External camera', kind: 'camera', available: true },
+    ];
+    backend.sources.mockResolvedValue(Object.freeze(discovery));
+    const user = await ready({ platform: 'macos' });
+    await previewOf('Second discovered display');
+    await user.click(screen.getByRole('button', { name: 'Second discovered display' }));
+    const options = within(screen.getByRole('group', { name: NAMES.captureSources })).getAllByRole('button');
+    expect(options.map(option => option.textContent)).toEqual([
+      'Second discovered display', 'Capture screen 0', 'Review window', 'Quest headset', 'Android phone', 'FaceTime HD Camera', 'External camera',
+    ]);
+    expect(discovery[0]).toBe(camera);
+  });
+
+  it('initially selects a display before a camera', async () => {
+    backend.sources.mockResolvedValue([camera, display]);
+    const user = await ready({ platform: 'macos' });
+    await previewOf(display.name);
+    expect(backend.preview.mock.calls[0][0]).toBe(display.id);
+    await user.click(screen.getByRole('button', { name: display.name }));
+    await chooseSource(user, camera.name);
+    expect(await previewOf(camera.name)).toBeVisible();
+  });
+
+  it('skips unavailable sources when selecting the initial source', async () => {
+    backend.sources.mockResolvedValue([
+      camera,
+      { ...display, available: false },
+      { id: 'window', name: 'Closed window', kind: 'window', available: false },
+      { id: 'phone', name: 'Android phone', kind: 'android', available: true },
+    ]);
+    await ready({ platform: 'macos' });
+    await previewOf('Android phone');
+    expect(backend.preview.mock.calls[0][0]).toBe('phone');
+  });
+
+  it('selects a camera when no higher priority source is available', async () => {
+    backend.sources.mockResolvedValue([
+      { ...camera, id: 'disconnected-camera', name: 'Disconnected camera', available: false },
+      { ...display, available: false }, camera,
+    ]);
+    await ready({ platform: 'macos' });
+    expect(await previewOf(camera.name)).toBeVisible();
+    expect(backend.preview.mock.calls[0][0]).toBe(camera.id);
+  });
+
+  it.each([{ sources: [] }, { sources: [{ ...display, available: false }, { ...camera, available: false }] }])('does not select an unavailable initial source', async ({ sources }) => {
+    backend.sources.mockResolvedValue(sources);
+    render(<App platform="macos"/>);
+    await act(async () => {});
+    expect(screen.getByRole('button', { name: 'Choose source' })).toBeVisible();
+    expect(screen.getByRole('button', { name: NAMES.record })).toBeDisabled();
+    expect(backend.preview).not.toHaveBeenCalled();
+    expect(backend.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit camera selection when a display appears', async () => {
+    backend.sources.mockResolvedValue([{ id: 'phone', name: 'Android phone', kind: 'android', available: true }, camera]);
+    const user = await ready({ platform: 'macos' });
+    await user.click(screen.getByRole('button', { name: 'Android phone' }));
+    await chooseSource(user, camera.name);
+    await previewOf(camera.name);
+    backend.sources.mockResolvedValue([camera, display]);
+    await user.click(screen.getByRole('button', { name: camera.name }));
+    await user.click(screen.getByRole('button', { name: NAMES.refreshCaptureDevices }));
+    const options = within(screen.getByRole('group', { name: NAMES.captureSources }));
+    await options.findByRole('button', { name: display.name });
+    expect(options.getAllByRole('button').map(option => option.textContent)).toEqual([display.name, camera.name]);
+    expect(options.getByRole('button', { name: camera.name })).toHaveAttribute('aria-pressed', 'true');
+    expect(options.getByRole('button', { name: display.name })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('img', { name: `Live preview of ${camera.name}` })).toBeVisible();
+    expect(backend.preview.mock.calls.at(-1)![0]).toBe(camera.id);
+    expect(backend.preview.mock.calls.map(call => call[0])).not.toContain(display.id);
+  });
+
+  it('preserves a missing camera as an unavailable selection', async () => {
+    backend.sources.mockResolvedValue([camera, display]);
+    const user = await ready({ platform: 'macos' });
+    await user.click(screen.getByRole('button', { name: display.name }));
+    await chooseSource(user, camera.name);
+    await previewOf(camera.name);
+    backend.sources.mockResolvedValue([display]);
+    await user.click(screen.getByRole('button', { name: camera.name }));
+    await user.click(screen.getByRole('button', { name: NAMES.refreshCaptureDevices }));
+    const missing = await screen.findByRole('button', { name: NAMES.unavailableSource('Previously selected source') });
+    expect(missing).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('heading', { name: 'Capture source unavailable' })).toBeVisible();
+    expect(screen.getByRole('button', { name: NAMES.record })).toBeDisabled();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(backend.preview.mock.calls.map(call => call[0])).toEqual([display.id, camera.id]);
+  });
+
+  it('starts a macos camera recording from its preview', async () => {
+    backend.sources.mockResolvedValue([display, camera]);
+    backend.start.mockImplementationOnce(async (_project: string | null, _name: string | null, sourceId: string) => {
+      const session = { ...newSession('s2'), name: 'Camera review', sourceId, status: 'recording' as const };
+      sessions.push(session); status = { state: 'recording', sessionId: 's2', elapsedMs: 3000 };
+      return session;
+    });
+    backend.stop.mockImplementationOnce(async () => {
+      const next = { ...sessions.find(item => item.id === 's2')!, status: 'ready' as const };
+      sessions = sessions.map(item => item.id === next.id ? next : item); status = { state: 'idle' };
+      return next;
+    });
+    const user = await ready({ platform: 'macos' });
+    await user.click(screen.getByRole('button', { name: display.name }));
+    await chooseSource(user, camera.name);
+    await previewOf(camera.name);
+    const previewId = backend.preview.mock.calls.at(-1)![1];
+    await user.click(screen.getByRole('button', { name: NAMES.record }));
+    await screen.findByRole('button', { name: NAMES.stop });
+    expect(backend.start).toHaveBeenCalledWith(null, null, camera.id, 'mic1', false, false);
+    expect(screen.getByRole('img', { name: `Live preview of ${camera.name}` })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: NAMES.stop }));
+    await screen.findByRole('button', { name: NAMES.play });
+    expect(document.querySelector('video')).toHaveAttribute('src', 'asset://C:/recordings/video.mp4');
+    expect(backend.stopPreview).toHaveBeenCalledWith(previewId);
+  });
+
+  it.each(['preview', 'recording'] as const)('shows actionable macos camera startup errors for %s', async phase => {
+    const message = phase === 'preview'
+      ? 'Camera access is blocked. Allow camera access in macOS System Settings, then retry.'
+      : 'Capture could not start (exit status: 1); see capture.log\nCheck Camera or Screen Recording access in macOS System Settings, close other apps using the source, then retry.';
+    backend.sources.mockResolvedValue([display, camera]);
+    if (phase === 'preview') backend.preview.mockImplementation(async (sourceId: string, id: string) => {
+      if (sourceId === camera.id) throw new Error(message);
+      return { id, url: 'http://127.0.0.1:9999/live' };
+    });
+    else backend.start.mockRejectedValueOnce(message);
+    const user = await ready({ platform: 'macos' });
+    await user.click(screen.getByRole('button', { name: display.name }));
+    await chooseSource(user, camera.name);
+    if (phase === 'recording') {
+      await previewOf(camera.name);
+      await user.click(screen.getByRole('button', { name: NAMES.record }));
+    }
+    expect(await screen.findByText(message.replace(/\s+/g, ' '))).toBeVisible();
+    if (phase === 'preview') {
+      expect(screen.getByRole('heading', { name: 'Preview unavailable' })).toBeVisible();
+      expect(screen.getByRole('button', { name: NAMES.retryPreview })).toBeVisible();
+    }
+    expect(screen.queryByRole('heading', { name: 'Loading preview…' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: camera.name }));
+    await chooseSource(user, display.name);
+    expect(await previewOf(display.name)).toBeVisible();
+  });
+
+  it('retries a blocked camera preview after access is restored', async () => {
+    const message = 'Camera access is blocked. Allow camera access in macOS System Settings, then retry.';
+    backend.sources.mockResolvedValue([camera]);
+    backend.preview.mockRejectedValueOnce(message);
+    const user = await ready({ platform: 'macos' });
+    await screen.findByText(message);
+    await user.click(screen.getByRole('button', { name: NAMES.retryPreview }));
+    expect(await previewOf(camera.name)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: NAMES.record }));
+    await screen.findByRole('button', { name: NAMES.stop });
+    expect(backend.start).toHaveBeenCalledWith(null, null, camera.id, 'mic1', false, false);
+  });
+});
 
 describe('keyboard interaction', () => {
   it('pauses an exclusive camera preview during startup and recording, then restores it after a failed start', async () => {
@@ -1768,14 +1941,15 @@ describe('local setup recovery and request races', () => {
   });
   it('reconnects a dropped preview image to the same stream, and Retry restarts a failed one', async () => {
     const user = await ready();
-    const image = await screen.findByRole('img', { name: 'Live preview of Display 1' });
-    expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=1');
+    await screen.findByRole('img', { name: 'Live preview of Display 1' });
+    const image = () => screen.getByRole('img', { name: 'Live preview of Display 1' });
+    expect(image()).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=1');
     const onDrop = backend.preview.mock.calls[0][3] as (view: string) => void;
     act(() => onDrop('1'));
-    await waitFor(() => expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=2'));
+    await waitFor(() => expect(image()).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=2'));
     expect(backend.preview).toHaveBeenCalledTimes(1);
-    fireEvent.error(image);
-    await waitFor(() => expect(image).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=3'));
+    fireEvent.error(image());
+    await waitFor(() => expect(image()).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=3'));
     act(() => backend.preview.mock.calls[0][2]('Preview stream ended. Reconnect the source and select it again.'));
     await screen.findByText('Preview stream ended. Reconnect the source and select it again.');
     await user.click(screen.getByRole('button', { name: NAMES.retryPreview }));
