@@ -152,12 +152,10 @@ fn publish_live(s: &Shared, id: &str, cancel: &AtomicBool, result: Result<Transc
         });
     }
 }
-/// How often the live worker looks at the audio again.
-const LIVE_CYCLE: Duration = Duration::from_millis(1500);
 /// The live transcript covers only the capture in progress: a whole first
 /// recording, or just the take being recorded, timed on the session timeline.
 ///
-/// About every 1.5 s it copies the take's live audio from the end of the last
+/// About every second it copies the take's live audio from the end of the last
 /// finished stretch, transcribes each stretch that a pause has finished once
 /// with the language's model and saves it for Stop ([`stretches`]), then
 /// guesses the words after them with base. Whisper runs outside the runtime
@@ -190,7 +188,7 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
     let snapshot = folder.join("snapshot.wav");
     stretches::forget(&take_folder);
     let mut saved: Option<stretches::Stretches> = None;
-    let mut next = Instant::now() + LIVE_CYCLE;
+    let mut next = Instant::now() + stretches::LIVE_CYCLE;
     loop {
         while Instant::now() < next {
             if cancel.load(Ordering::Acquire) {
@@ -198,7 +196,7 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        next = Instant::now() + LIVE_CYCLE;
+        next = Instant::now() + stretches::LIVE_CYCLE;
         let from = saved.as_ref().map_or(0, |saved| saved.until_ms);
         // Copying is bounded to 60 s. Never hold runtime during inference.
         let copied = {

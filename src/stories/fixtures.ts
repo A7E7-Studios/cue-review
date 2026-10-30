@@ -66,8 +66,12 @@ export const twoTakeTranscript: Transcript = {
 };
 /** The backend's refusal when a window chosen in the recording bar has closed since it was listed (src-tauri/src/capture.rs). */
 export const WINDOW_CLOSED = 'This window is no longer available';
-// The same session while take 2 records: its live tail, timed on the combined timeline.
+// The same session while take 2 records, timed on the combined timeline: a finished stretch,
+// then the words still being heard (the `live-` segment, see `Segment`).
 export const takeTwoLiveTranscript: Transcript = {
   status: 'provisional',
-  segments: [line('live-80000-0', 81000, 86000, 'Picking this up again: the export dialog needs')],
+  segments: [
+    line('stretch-81000', 81000, 86000, 'Picking this up again: the export dialog needs a default folder.'),
+    line('live-87000', 87000, 90000, 'Right now it always opens in Documents, and'),
+  ],
 };

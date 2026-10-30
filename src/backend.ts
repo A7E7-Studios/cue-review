@@ -23,6 +23,12 @@ export interface TakeVideo { take: number; startMs: number; durationMs: number }
  */
 export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; sourceIdentity?: SourceIdentity; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[]; formatVersion?: number; videos?: TakeVideo[] }
 export interface Word { text: string; startMs: number; endMs: number; seekMs?: number }
+/**
+ * A transcript sentence. While recording, the live transcript lists the finished stretches first,
+ * ordinary final words whose ids start `stretch-`, then at most one segment of words still being
+ * heard, last, whose id starts `live-` (`stillHeard` in review.ts): its words may change every
+ * second. While nothing is being heard there is no `live-` segment.
+ */
 export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
 export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string; takes?: TakeMark[] }
 export interface CaptureSource { id: string; name: string; kind: 'display' | 'window' | 'android' | 'quest' | 'camera'; available: boolean; detail?: string }

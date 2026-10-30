@@ -9,7 +9,8 @@ import type { TranscriptPaneProps } from './types';
 import './workspace.css';
 import './transcript.css';
 
-export const LIVE_NOTE = 'Live words may change until you stop.';
+/** Under the live box: only its words are still being heard (a `live-` segment, see `Segment`). */
+export const LIVE_NOTE = 'Grey words are still being heard and may change.';
 /** A jump this large between two time updates is a seek, which resumes following. */
 const SEEK_JUMP_MS = 2000;
 /** How long scroll events after an automatic scroll are treated as ours. */

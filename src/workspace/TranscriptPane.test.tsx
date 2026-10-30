@@ -109,9 +109,9 @@ describe('TranscriptPane while recording', () => {
     render(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } })}/>);
     expect(screen.getByRole('status')).toHaveTextContent('Recording');
     const divider = screen.getByText('Take 2 · recording');
-    const tail = divider.nextElementSibling!;
+    const tail = divider.nextElementSibling!.nextElementSibling!;
     expect(tail).toHaveClass('is-tail');
-    expect(tail).toHaveTextContent('Picking this up again: the export dialog needs');
+    expect(tail).toHaveTextContent('Right now it always opens in Documents, and');
     expect(within(tail as HTMLElement).getByText(LIVE_NOTE)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Seek to 0:31' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Seek to grid at 0:33' })).toHaveAttribute('aria-disabled', 'true');
@@ -119,8 +119,29 @@ describe('TranscriptPane while recording', () => {
     // While recording the column shows the live tail only: no Find in transcript.
     expect(screen.queryByRole('button', { name: 'Find in transcript' })).not.toBeInTheDocument();
   });
+  it('shows finished stretches as rows and greys only the words still being heard', () => {
+    const recording = (transcript: Transcript) => props({ mode: 'recording', transcript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } });
+    const { rerender } = render(<TranscriptPane {...recording(liveTranscript)}/>);
+    const stretch = screen.getByText('Picking this up again: the export dialog needs a default folder.').closest<HTMLElement>('.cr-row')!;
+    expect(stretch).not.toHaveClass('is-tail');
+    expect(within(stretch).getByRole('button', { name: 'Seek to 1:21' })).toBeDisabled();
+    expect(stretch.querySelector('.cr-live-caret, .cr-live-note')).toBeNull();
+    const tails = document.querySelectorAll<HTMLElement>('.cr-row.is-tail');
+    expect(tails).toHaveLength(1);
+    const [tail] = tails;
+    expect(stretch.nextElementSibling).toBe(tail);
+    expect(within(tail).getByRole('button', { name: 'Seek to 1:27' })).toBeDisabled();
+    expect(tail.querySelector('.cr-row-text')).toHaveTextContent('Right now it always opens in Documents, and');
+    expect(tail.querySelector('.cr-row-text .cr-live-caret')).not.toBeNull();
+    expect(within(tail).getByText('Grey words are still being heard and may change.')).toBeVisible();
+    // Nothing is being heard: the finished stretch stays a row and no live box shows.
+    rerender(<TranscriptPane {...recording({ ...liveTranscript, segments: liveTranscript.segments.slice(0, -1) })}/>);
+    expect(screen.getByText('Picking this up again: the export dialog needs a default folder.')).toBeVisible();
+    expect(document.querySelector('.cr-row.is-tail, .cr-live-caret')).toBeNull();
+    expect(screen.queryByText(LIVE_NOTE)).not.toBeInTheDocument();
+  });
   it('keeps a tail with its note before the take has words, and shows live problems', () => {
-    const transcript = { ...liveTranscript, segments: liveTranscript.segments.slice(0, -1) };
+    const transcript = { ...liveTranscript, segments: liveTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs) };
     render(<TranscriptPane {...props({ mode: 'recording', transcript, timeMs: 81000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs }, emptyMessage: 'Listening… transcript updates in short batches.', liveError: 'Live transcription paused.' })}/>);
     expect(screen.getByText('Take 2 · recording')).toBeVisible();
     expect(screen.getByText('Listening… transcript updates in short batches.')).toBeVisible();

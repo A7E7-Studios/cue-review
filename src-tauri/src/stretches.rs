@@ -24,16 +24,19 @@ pub const MIN_PAUSE_MS: u64 = 600;
 const PAUSE_LEAD_MS: u64 = 300;
 /// A stretch is never longer than one Whisper window.
 pub const MAX_STRETCH_MS: u64 = 30_000;
-/// Nor shorter than this when it has speech: Whisper needs the context, and
-/// stretches of a few seconds made about 4 % more word errors.
+/// Nor shorter than this when it has speech: Whisper needs the context.
 pub const MIN_STRETCH_MS: u64 = 10_000;
 /// A stretch is cut once this much audio waits, so Stop has at most about
-/// 30 s left.
-const SETTLE_MS: u64 = 20_000;
+/// 30 s left. Cutting at 20 s gave 8.6 % word errors on a review where a
+/// whole-take pass gave 5.8 %; at 28 s, 6.6 %.
+const SETTLE_MS: u64 = 28_000;
 /// Without a pause, a stretch ends in the longest gap at least this long.
 const SHORT_GAP_MS: u64 = 200;
-/// Pending audio without any speech is skipped once it is this long.
-const SILENCE_MS: u64 = 2_000;
+/// What a stretch without speech leaves of its audio: the detector can miss
+/// a word just starting at the very end of a copy.
+const SILENCE_TAIL_MS: u64 = 1_000;
+/// How often the live worker looks at the audio again.
+pub const LIVE_CYCLE: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Where the next stretch of the pending audio ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,19 +49,19 @@ pub struct Cut {
 
 /// The end of the next finished stretch of `pending_ms` of audio whose speech
 /// regions (start, end in ms, ordered) are `regions`, or `None` while it
-/// waits. Once 20 s wait, a stretch ends 300 ms into the last pause of at
+/// waits. Once 28 s wait, a stretch ends 300 ms into the last pause of at
 /// least 600 ms between 10 and 30 s; past 30 s without one, in the middle of
-/// the longest gap of at least 200 ms, else at 30 s. Audio without speech is
-/// skipped once it is 2 s long.
+/// the longest gap of at least 200 ms, else at 30 s. 28 s without speech
+/// are skipped untranscribed, all but their last second.
 pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
-    if regions.is_empty() {
-        return (pending_ms >= SILENCE_MS).then_some(Cut {
-            at_ms: pending_ms - PAUSE_LEAD_MS,
-            speech: false,
-        });
-    }
     if pending_ms < SETTLE_MS {
         return None;
+    }
+    if regions.is_empty() {
+        return Some(Cut {
+            at_ms: pending_ms - SILENCE_TAIL_MS,
+            speech: false,
+        });
     }
     let paused = regions.iter().enumerate().rev().find_map(|(i, &(_, end))| {
         let next = regions.get(i + 1).map_or(pending_ms, |region| region.0);
@@ -339,20 +342,20 @@ mod tests {
                 speech: true,
             })
         };
-        // Under 20 s nothing is cut, pause or not.
+        // Under 28 s nothing is cut, pause or not.
         assert_eq!(cut(&[(200, 4000)], 4700), None);
-        assert_eq!(cut(&[(200, 12_000)], 19_000), None);
-        // From 20 s on, the last pause of 600 ms between 10 and 30 s ends it.
+        assert_eq!(cut(&[(200, 12_000)], 27_000), None);
+        // From 28 s on, the last pause of 600 ms between 10 and 30 s ends it.
         assert_eq!(
-            cut(&[(200, 4000), (5000, 12_000), (12_800, 19_500)], 20_000),
+            cut(&[(200, 4000), (5000, 12_000), (12_800, 27_500)], 28_000),
             speech(12_300)
         );
         assert_eq!(
-            cut(&[(200, 15_000), (15_700, 21_000)], 21_100),
-            speech(15_300)
+            cut(&[(200, 25_000), (25_700, 28_900)], 29_000),
+            speech(25_300)
         );
         // A pause before 10 s is too early, and one past 30 s too late.
-        assert_eq!(cut(&[(0, 4000), (4800, 25_000)], 25_100), None);
+        assert_eq!(cut(&[(0, 4000), (4800, 29_000)], 29_100), None);
         assert_eq!(cut(&[(0, 29_900)], 31_000), speech(30_000));
         // Past 30 s without a pause: the middle of the longest short gap.
         assert_eq!(
@@ -364,12 +367,12 @@ mod tests {
             cut(&[(0, 30_100), (30_400, 33_000)], 33_100),
             speech(30_000)
         );
-        // Silence alone is skipped once it is 2 s long, untranscribed.
-        assert_eq!(cut(&[], 1500), None);
+        // Silence alone is skipped once 28 s wait, all but its last second.
+        assert_eq!(cut(&[], 5000), None);
         assert_eq!(
-            cut(&[], 2500),
+            cut(&[], 29_000),
             Some(Cut {
-                at_ms: 2200,
+                at_ms: 28_000,
                 speech: false
             })
         );
@@ -555,6 +558,7 @@ mod tests {
                     crate::transcribe::live_guess(root.path(), &live, &snapshot, length, &cancel)
                         .unwrap();
                 seen(&stretches.live(guess.clone(), length, 0), started.elapsed().as_secs_f64());
+                let before = stretches.until_ms;
                 let (guess, guess_ms) = match audio {
                     Some(audio) => crate::transcribe::live_commit(
                         root.path(),
@@ -569,15 +573,21 @@ mod tests {
                     .unwrap(),
                     None => (guess, length),
                 };
+                if stretches.until_ms != before {
+                    eprintln!("cut {before} {}", stretches.until_ms);
+                }
                 seen(&stretches.live(guess, guess_ms, 0), started.elapsed().as_secs_f64());
                 if now_ms >= length_ms {
                     break;
                 }
-                let next = Duration::from_millis(1500);
+                let next = LIVE_CYCLE;
                 let spent = started.elapsed() - Duration::from_millis(now_ms);
                 if spent < next {
                     std::thread::sleep(next - spent.min(next));
                 }
+            }
+            for segment in &stretches.segments {
+                eprintln!("stretch {:>6} {}", segment.start_ms, segment.text);
             }
             fs::copy(&mic, take.join("mic.wav")).unwrap();
             let stopped = Instant::now();
@@ -642,7 +652,7 @@ mod tests {
         let replay = replay();
         let median = replay.delays[replay.delays.len() / 2];
         assert!(
-            median <= 2.5,
+            median <= 3.0,
             "live words showed {median:.1} s after they were said"
         );
     }

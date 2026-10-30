@@ -209,7 +209,7 @@ export interface TranscriptPaneProps {
   onSeek: (ms: number) => void;
   /** The only status chip: shown while recording or processing, never once ready. */
   status?: 'recording' | 'processing';
-  /** The take being recorded: its divider and the live tail with its note. */
+  /** The take being recorded: its divider, its finished stretches as rows, and its words still being heard in the live box with its note. */
   liveTake?: TakeMark;
   /** Live transcription problem, shown as a status note. */
   liveError?: string;
