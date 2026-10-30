@@ -14,7 +14,7 @@ code:
 ## Purpose
 
 The dark bar under the video. Before a take it holds the display, the microphone and Record (Record
-more in review); while a take records it shows how long it has run, the locked source, the
+more in review); while a take records it shows how long it has run, the source it records, the
 microphone it records with its level and mute, compact mode and Stop.
 
 ## Requirements
@@ -52,55 +52,34 @@ record right beside it.
 
 ### Requirement: Record more uses the bar
 The app SHALL show the recording bar in review in its own row under the playback controls, with
-Record more, a microphone picker that sets the next take's microphone, and the session's own
-display locked, because the reviewer chooses the microphone for each take while a take still
-records the session's own source.
+Record more and the same source and microphone pickers as a new recording, which set the next
+take's display, window or device, its system audio and its microphone, because a take can record
+any source.
 
 #### Scenario: Recording more from the bar
 - **GIVEN** a ready session recorded from Display 1
-- **WHEN** the reviewer chooses another microphone in the bar under the playback controls and
-  selects Record more
-- **THEN** a new take of the session starts with that microphone and the session's display
-- **AND** the bar shows the session's source locked, titled and described "Record more records
-  this session's own source", reachable with Tab but opening no picker, and the playback row
-  holds no Record more
-- **PROOF** test: src/App.test.tsx::record more records more from the bar under the playback controls, with its microphone and the session's locked source
-- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar offers Record more in review, with the source locked and its reason, and the microphone still to choose
-- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar keeps the locked source focusable while Record more is busy
+- **WHEN** the reviewer chooses a window and another microphone in the bar under the playback
+  controls and selects Record more
+- **THEN** a new take of the session starts with that window and that microphone
+- **AND** the bar's source picker opens like a new recording's, and the playback row holds no
+  Record more
+- **PROOF** test: src/App.test.tsx::record more records more from the bar under the playback controls, with the source and microphone chosen there
+- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar offers Record more in review with both pickers to choose
 - **PROOF** test: src/workspace/PlaybackBar.test.tsx::PlaybackBar leaves Record more and its refusal to the recording bar under it
 - **PROOF** desk: open
 
-### Requirement: The locked source names only the session's own source
-The app SHALL name the session's source in the review bar by its listed name only when its id
-cannot have passed to another source; a window or display (a `window:` or `monitor:` id) is
-named by what the session stored for it, its window's title or its display's device number
-("Display 2"), or "Original source" when it stored neither, because such an id can name another
-window or display after a restart and the listing cannot tell them apart.
-
-#### Scenario: The session's window handle now names another window
-- **GIVEN** a ready session recorded from a window, whose handle now names another listed window
-- **WHEN** the reviewer opens it
-- **THEN** the bar names its source by the window title the session stored, not by the listed
-  window
-- **AND** a session recorded from a display is named by the display device it stored, and one
-  that stored none shows "Original source"
-- **PROOF** test: src/App.test.tsx::record more never names the session's source after a listed window or display that may only share its id
-- **PROOF** desk: open
-
-### Requirement: A gone display is refused under the bar
+### Requirement: A refused Record more shows under the bar
 The app SHALL show why Record more was refused right under the recording bar, with New recording
-and Dismiss, and name a display that is no longer listed "Original source", because the reviewer
-needs the reason and the way forward where they selected Record more.
+and Dismiss, because the reviewer needs the reason and the way forward where they selected Record
+more.
 
-#### Scenario: The session's display is gone
-- **GIVEN** a ready session whose window has closed
-- **WHEN** the reviewer selects Record more
-- **THEN** the bar shows "The original window/display for this recording is no longer
-  available. Start a new recording to capture another source." under it, with New recording and
-  Dismiss, and the video stays playable
-- **AND** New recording opens a new recording where another display can be chosen
-- **PROOF** test: src/App.test.tsx::record more shows a source that is gone under the recording bar, with New recording as the way forward
-- **PROOF** test: src/App.test.tsx::record more names the session's source in the bar as the original source once it is no longer listed
+#### Scenario: Record more is refused
+- **GIVEN** a ready session, with a window chosen in the bar that closed after it was listed
+- **WHEN** the reviewer selects Record more and the take cannot start
+- **THEN** the bar shows the reason under it, with New recording and Dismiss, and the video stays
+  playable
+- **AND** another source can be chosen in the bar and recorded with Record more
+- **PROOF** test: src/App.test.tsx::record more shows a refusal under the recording bar, with another source or New recording as the way forward
 - **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls as the recording bar shows why Record more failed under the bar, with New recording and Dismiss
 - **PROOF** desk: open
 
