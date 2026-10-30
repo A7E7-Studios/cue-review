@@ -3,6 +3,9 @@ title: Recording dock
 code:
   - src/workspace/RecordingDock.tsx
   - src/workspace/workspace.css
+  - src/workspace/types.ts
+  - src/App.tsx
+  - src-tauri/src/capture.rs
 ---
 # Recording dock
 
@@ -29,14 +32,14 @@ the second take on changes the dock's width.
 - **PROOF** desk: open
 
 ### Requirement: The meter reads the microphone in decibels
-The dock's level meter SHALL light one of its 10 bars for every 6 dB above −60 dBFS of the loudest
-level since its last update, the top two bars (above −12 dBFS) in the high colour, because quiet
+The dock's level meter SHALL light one of its 10 bars for each 6 dB step above −60 dBFS that the
+loudest level since its last update reaches into, the top two bars (above −12 dBFS) in the high colour, because quiet
 speech left a linear meter dark and the reviewer took the microphone for dead.
 
 #### Scenario: Quiet speech lights the meter
 - **GIVEN** a microphone picking up speech at −38 dBFS
 - **WHEN** the dock updates
-- **THEN** three bars of the meter are lit, in the low colour
+- **THEN** four bars of the meter are lit, in the low colour
 - **AND** a word spoken between two updates still lights the meter
 - **PROOF** test: src/workspace/RecordingDock.test.tsx::RecordingDock lights one bar per 6 dB above −60 dBFS
 - **PROOF** test: src-tauri/src/capture.rs::tests::the_level_is_the_loudest_since_it_was_read

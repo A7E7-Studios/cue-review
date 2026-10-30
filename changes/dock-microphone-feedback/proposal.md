@@ -60,8 +60,9 @@ different icon. Muting also hid the meter, so the dock changed width under the p
 - The level the backend reports is the loudest packet RMS since the UI last read it (the status
   poll), not the last packet's, so a word between two polls still shows. The alternative, a decay
   in the UI, would lag behind the voice.
-- The chip shows the device's short name: a leading "Default — " and a "Microphone (…)" wrapper
-  are dropped ("HD Pro Webcam C920"), and the tooltip names the whole device. Showing the full
+- The chip shows the device's short name: a leading "Default — " and a one-word endpoint wrapper in
+  any language ("Microphone (…)", "Mikrofon (…)") are dropped ("HD Pro Webcam C920"), and the tooltip
+  names the whole device. Showing the full
   name would truncate to "Default — Microphone (HD…" and hide the part that tells devices apart.
 - In a window too narrow for the name, the chip keeps its icon and meter; muted, it keeps the
   live colour and the crossed-out icon but has no room for "Muted" (its tooltip and pressed state
@@ -70,8 +71,11 @@ different icon. Muting also hid the meter, so the dock changed width under the p
   bar shows the microphone before a take: during a take the bar becomes this dock, and the name is
   what the owner asked for at 2:37. Dropping it later means removing one span.
 - The chip's button keeps the accessible name "Mute microphone" (the scripts find it by that
-  name), its pressed state says whether it is muted, and the microphone's name is its
-  description.
+  name), its pressed state says whether it is muted, and the microphone's name, drawn over the chip
+  beside the button rather than inside it, is its description.
+- A bar lights as soon as the level reaches into its 6 dB step (bar n above −60 + 6(n − 1) dBFS),
+  so −38 dBFS lights four bars and the top two light above −12 and −6 dBFS, as the scale was asked
+  for. Counting whole steps instead would light the tenth bar only at full scale.
 
 ## Out of scope
 

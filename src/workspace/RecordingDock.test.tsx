@@ -66,28 +66,30 @@ describe('RecordingDock', () => {
   });
   it('lights one bar per 6 dB above −60 dBFS', () => {
     const at = (db: number) => 10 ** (db / 20);
-    expect([at(-61), at(-53.9), at(-38), at(-13), at(-11.9), 1, 0].map(litBars)).toEqual([0, 1, 3, 7, 8, 10, 0]);
+    expect([at(-61), at(-59), at(-38), at(-12.5), at(-11.9), at(-5.9), 1, 0].map(litBars)).toEqual([0, 1, 4, 8, 9, 10, 10, 0]);
     const { rerender } = render(<RecordingDock {...props({ audioLevel: at(-38) })}/>);
     const meter = screen.getByRole('meter', { name: 'Microphone level' });
     expect(meter).toHaveAttribute('aria-valuenow', '-38');
     const bars = [...meter.querySelectorAll('span')].map(bar => bar.dataset.level);
-    expect(bars).toEqual(['low', 'low', 'low', 'off', 'off', 'off', 'off', 'off', 'off', 'off']);
+    expect(bars).toEqual(['low', 'low', 'low', 'low', 'off', 'off', 'off', 'off', 'off', 'off']);
     rerender(<RecordingDock {...props({ audioLevel: 1 })}/>);
     expect([...meter.querySelectorAll('span')].map(bar => bar.dataset.level).slice(7)).toEqual(['low', 'high', 'high']);
   });
   it('names the microphone on its chip', () => {
     render(<RecordingDock {...props({ microphoneName: 'Default — Microphone (HD Pro Webcam C920)' })}/>);
     const mute = screen.getByRole('button', { name: 'Mute microphone' });
-    expect(mute).toHaveTextContent('HD Pro Webcam C920');
     expect(mute).toHaveAccessibleDescription('HD Pro Webcam C920');
+    expect(mute.closest('.cr-mic-chip')).toHaveTextContent(/^HD Pro Webcam C920$/);
     expect(mute.title).toBe('Mute Default — Microphone (HD Pro Webcam C920)');
     expect(shortMicrophoneName('Headset Microphone (Oculus Virtual Audio Device)')).toBe('Headset Microphone (Oculus Virtual Audio Device)');
+    expect(shortMicrophoneName('Mikrofon (HD Pro Webcam C920)')).toBe('HD Pro Webcam C920');
   });
   it('keeps the chip and a flat meter while muted, and says Muted', () => {
     render(<RecordingDock {...props({ microphoneName: 'Microphone (HD Pro Webcam C920)', muted: true })}/>);
     const mute = screen.getByRole('button', { name: 'Mute microphone' });
     expect(mute).toHaveAttribute('aria-pressed', 'true');
-    expect(mute).toHaveTextContent(/^Muted$/);
+    expect(mute).toHaveAccessibleDescription('Muted');
+    expect(mute.closest('.cr-mic-chip')).toHaveTextContent(/^Muted$/);
     expect(mute.title).toBe('Unmute Microphone (HD Pro Webcam C920)');
     const meter = screen.getByRole('meter', { name: 'Microphone level' });
     expect(meter).toHaveAttribute('aria-valuetext', 'Muted');

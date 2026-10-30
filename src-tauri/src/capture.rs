@@ -2128,7 +2128,9 @@ impl ActiveCapture {
             .unwrap_or_else(|| self.epoch.elapsed())
             .as_millis() as u64
     }
-    pub fn audio_level(&self) -> f32 {
+    /// The loudest microphone level since the last call, which starts the next hold: the status
+    /// poll is its only caller.
+    pub fn take_audio_level(&self) -> f32 {
         take_level(&self.level)
     }
     pub fn set_muted(&self, muted: bool) {

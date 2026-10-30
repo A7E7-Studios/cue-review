@@ -239,7 +239,7 @@ describe('keyboard interaction', () => {
     await screen.findByRole('timer', { name: NAMES.takeTimer(2) });
     const mute = screen.getByRole('button', { name: NAMES.muteMicrophone });
     // The dock names the microphone it records.
-    expect(mute).toHaveTextContent('Studio microphone');
+    expect(mute).toHaveAccessibleDescription('Studio microphone');
     await user.click(mute);
     await waitFor(() => expect(screen.getByRole('button', { name: NAMES.muteMicrophone })).toHaveAttribute('aria-pressed', 'true'));
     expect(backend.mute).toHaveBeenLastCalledWith(true);

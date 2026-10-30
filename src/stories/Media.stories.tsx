@@ -170,7 +170,7 @@ export const MuteWhileRecording: Story = {
     const width = dock.getBoundingClientRect().width;
     await userEvent.click(mute);
     await expect(mute).toHaveAttribute('aria-pressed', 'true');
-    await expect(mute).toHaveTextContent('Muted');
+    await expect(mute).toHaveAccessibleDescription('Muted');
     // The meter stays, flat, and the dock keeps its width.
     await expect(canvas.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute('aria-valuetext', 'Muted');
     await expect(dock.getBoundingClientRect().width).toBe(width);

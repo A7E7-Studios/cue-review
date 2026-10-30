@@ -208,12 +208,16 @@
   border-radius: var(--radius-pill); font-weight: 500;
 }
 .cr-mic-toggle svg { width: 18px; height: 18px; flex-shrink: 0; }
-.cr-mic-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cr-mic-name {
+  position: absolute; top: 0; left: 38px; right: 81px; line-height: var(--size-dock-control);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-dock-source); font-weight: 500; pointer-events: none;
+}
 .cr-mic-chip .cr-meter { position: absolute; top: 0; right: 12px; height: 100%; padding: 0; pointer-events: none; }
 .cr-mic-chip[data-muted] .cr-mic-toggle {
   --cr-bg: color-mix(in srgb, var(--color-live) 22%, transparent); --cr-bg-hover: color-mix(in srgb, var(--color-live) 30%, transparent);
-  --cr-fg: color-mix(in srgb, var(--color-live) 40%, var(--color-dock-text)); font-weight: 700;
+  --cr-fg: color-mix(in srgb, var(--color-live) 40%, var(--color-dock-text));
 }
+.cr-mic-chip[data-muted] .cr-mic-name { color: color-mix(in srgb, var(--color-live) 40%, var(--color-dock-text)); font-weight: 700; }
 .cr-mic-chip[data-muted] .cr-meter > span { height: 3px; }
 .cr-stop {
   --cr-bg: var(--color-stop); --cr-fg: var(--color-on-stop);
@@ -229,12 +233,12 @@
 .cr-dock-slot[data-compact] .cr-dock-timer { padding: 0 6px 0 10px; gap: 8px; }
 .cr-dock-slot[data-compact] .cr-dock-source { max-width: 132px; padding: 0 8px; }
 .cr-dock-slot[data-compact] .cr-stop { padding: 0 14px 0 12px; }
-.cr-dock-slot[data-compact] .cr-mic-chip { width: 232px; }
+.cr-dock-slot[data-compact] .cr-mic-chip { width: 258px; }
 
 /* Progressive compaction, measured on the dock with a microphone (the widest; every take and the
-   muted state are the same width): it needs 626.3px with 44px controls and 549.9px in
+   muted state are the same width): it needs 626.3px with 44px controls and 575.9px in
    compact mode. Each step applies just below the width the previous one needs: the source drops to
-   an icon, then the microphone's name goes, then Stop drops to an icon (and the divider goes), then
+   an icon, then Stop drops to an icon (and the divider goes), then the microphone's name goes, then
    the meter goes. Hidden labels stay as visually hidden text, so every control keeps its
    accessible name; the timer is named "Take N elapsed time". */
 .cr-dock-source, .cr-stop { position: relative; }
@@ -244,32 +248,32 @@
   .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-timer { padding-right: 4px; }
 }
 @container cr-dock (max-width: 561.5px) {
-  .cr-dock-slot:not([data-compact]) .cr-dock .cr-mic-chip { width: auto; }
-  .cr-dock-slot:not([data-compact]) .cr-mic-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-}
-@container cr-dock (max-width: 408.5px) {
   .cr-dock-slot:not([data-compact]) .cr-dock .cr-stop { width: var(--size-dock-control); padding: 0; gap: 0; justify-content: center; }
   .cr-dock-slot:not([data-compact]) .cr-stop > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .cr-dock-slot:not([data-compact]) .cr-dock .cr-dock-divider { display: none; }
+}
+@container cr-dock (max-width: 509px) {
+  .cr-dock-slot:not([data-compact]) .cr-dock .cr-mic-chip { width: auto; }
+  .cr-dock-slot:not([data-compact]) .cr-mic-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
 @container cr-dock (max-width: 356px) {
   .cr-dock-slot:not([data-compact]) .cr-dock .cr-mic-chip .cr-meter { display: none; }
   .cr-dock-slot:not([data-compact]) .cr-dock .cr-mic-toggle { width: var(--size-dock-control); padding: 0; justify-content: center; border-radius: 50%; }
 }
 /* The same steps for the compact recorder's 36px controls. */
-@container cr-dock (max-width: 550px) {
+@container cr-dock (max-width: 576px) {
   .cr-dock-slot[data-compact] .cr-dock .cr-dock-source { width: var(--size-dock-control); flex-shrink: 0; padding: 0; gap: 0; justify-content: center; border-radius: 50%; }
   .cr-dock-slot[data-compact] .cr-dock-source > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .cr-dock-slot[data-compact] .cr-dock .cr-dock-timer { padding-right: 4px; }
 }
-@container cr-dock (max-width: 487.5px) {
-  .cr-dock-slot[data-compact] .cr-dock .cr-mic-chip { width: auto; }
-  .cr-dock-slot[data-compact] .cr-mic-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-}
-@container cr-dock (max-width: 366.5px) {
+@container cr-dock (max-width: 513.5px) {
   .cr-dock-slot[data-compact] .cr-dock .cr-stop { width: var(--size-dock-control); padding: 0; gap: 0; justify-content: center; }
   .cr-dock-slot[data-compact] .cr-stop > .cr-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .cr-dock-slot[data-compact] .cr-dock .cr-dock-divider { display: none; }
+}
+@container cr-dock (max-width: 461px) {
+  .cr-dock-slot[data-compact] .cr-dock .cr-mic-chip { width: auto; }
+  .cr-dock-slot[data-compact] .cr-mic-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
 @container cr-dock (max-width: 313.5px) {
   .cr-dock-slot[data-compact] .cr-dock .cr-mic-chip .cr-meter { display: none; }
