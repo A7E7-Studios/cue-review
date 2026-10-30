@@ -130,6 +130,7 @@ export function CaptureControls(props: CaptureControlsViewProps) {
   const trigger = (which: CaptureMenu) => which === 'source' ? sourceTrigger.current : micTrigger.current;
   const choose = (which: CaptureMenu, action: () => void) => { action(); onMenu(null); trigger(which)?.focus(); };
 
+  // Explicit trigger tabindex keeps WebKit pointer focus inside the field before blur runs.
   // Opening a picker focuses its selected option; a click outside closes it.
   useEffect(() => {
     if (!menu) return;
@@ -171,7 +172,7 @@ export function CaptureControls(props: CaptureControlsViewProps) {
   return <div className="cr-capture-slot" role="group" aria-label={NAMES.recordingBar}>
     <div className="cr-capture">
       <div ref={sourceField} className="cr-capture-field" {...fieldHandlers('source')}>
-        <button ref={sourceRef} type="button" className="cr-btn cr-capture-trigger source-trigger" title={source?.name} disabled={locked}
+        <button ref={sourceRef} type="button" tabIndex={0} className="cr-btn cr-capture-trigger source-trigger" title={source?.name} disabled={locked}
           aria-expanded={menu === 'source'} aria-controls={menu === 'source' ? `${ids}-source` : undefined} onClick={() => onMenu(menu === 'source' ? null : 'source')}>
           <Icon name="monitor" strokeWidth={1.7}/><span className="cr-capture-label">{source?.name || 'Choose source'}</span><Icon name="chevron" strokeWidth={2}/>
         </button>
@@ -182,7 +183,7 @@ export function CaptureControls(props: CaptureControlsViewProps) {
         </Popover>}
       </div>
       <div ref={micField} className="cr-capture-field" {...fieldHandlers('microphone')}>
-        <button ref={micRef} type="button" className="cr-btn cr-capture-trigger mic-trigger" disabled={busy}
+        <button ref={micRef} type="button" tabIndex={0} className="cr-btn cr-capture-trigger mic-trigger" disabled={busy}
           title={microphoneUnavailable ? 'Selected microphone unavailable. Reconnect it or choose another input.' : undefined}
           aria-expanded={menu === 'microphone'} aria-controls={menu === 'microphone' ? `${ids}-microphone` : undefined} onClick={() => onMenu(menu === 'microphone' ? null : 'microphone')}>
           <Icon name={microphone && !muted ? 'mic' : 'micOff'} strokeWidth={1.7}/><span className="cr-capture-label">{micLabel}</span><Icon name="chevron" strokeWidth={2}/>

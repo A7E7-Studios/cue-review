@@ -27,7 +27,7 @@ because a reviewer expects the same control to open and dismiss its choices.
 - **GIVEN** the source or microphone picker is open in a new recording
 - **WHEN** the reviewer clicks that picker's trigger again
 - **THEN** the picker closes and its trigger retains focus
-- **AND** switching pickers, Escape, Tab and clicking outside still dismiss the open picker
+- **AND** switching pickers, Escape, tabbing to a control outside the picker and clicking outside still dismiss the open picker
 - **PROOF** test: scripts/verify-picker-toggle.cjs
 - **PROOF** desk: open
 
@@ -35,7 +35,7 @@ because a reviewer expects the same control to open and dismiss its choices.
 - **GIVEN** the source or microphone picker is open in the review recording bar
 - **WHEN** the reviewer clicks that picker's trigger again
 - **THEN** the picker closes and its trigger retains focus
-- **AND** switching pickers, Escape, Tab and clicking outside still dismiss the open picker
+- **AND** switching pickers, Escape, tabbing to a control outside the picker and clicking outside still dismiss the open picker
 - **PROOF** test: scripts/verify-picker-toggle.cjs
 - **PROOF** desk: open
 

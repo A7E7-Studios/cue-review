@@ -2025,20 +2025,8 @@ pub fn start_muted(
             let mut command = deps::command("ffmpeg")?;
             command.args(["-y", "-hide_banner", "-loglevel", "warning"]);
             configure_video_input(&mut command, &config.source_id, config.fps, "256M")?;
+            configure_recording_output(&mut command, config.fps);
             let child = command
-                .args([
-                    "-an",
-                    "-vf",
-                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                    "-r",
-                    &config.fps.to_string(),
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-pix_fmt",
-                    "yuv420p",
-                ])
                 .arg(&input)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
@@ -2426,6 +2414,26 @@ fn recording_startup_error(source: &str, error: String) -> String {
     } else {
         error
     }
+}
+
+/// Flush encoded packets so Matroska/AVIO buffering cannot hide healthy output
+/// from `ready_process`. Shared with synthetic startup checks.
+fn configure_recording_output(command: &mut std::process::Command, fps: u32) {
+    command.args([
+        "-an",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-r",
+        &fps.to_string(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-flush_packets",
+        "1",
+    ]);
 }
 
 fn ready_process(
@@ -3027,6 +3035,205 @@ fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bounded version of the same clean FFmpeg quit used by `ActiveCapture::stop`.
+    /// Always reap the process, including when an assertion about its output will fail.
+    fn stop_synthetic_recording(mut child: Child) -> Result<(), String> {
+        let quit = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Recording stdin was not piped".to_string())
+            .and_then(|mut stdin| stdin.write_all(b"q\n").map_err(|error| error.to_string()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        if quit.is_ok() {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => return Ok(()),
+                    Ok(Some(status)) => return Err(format!("FFmpeg quit with {status}")),
+                    Ok(None) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(quit.err().unwrap_or_else(|| "FFmpeg did not quit".into()))
+    }
+
+    #[test]
+    #[ignore = "Requires FFmpeg/ffprobe; generates video only, with no hardware capture"]
+    fn actual_ffmpeg_recording_startup_flushes_static_and_moving_video() {
+        let root = tempfile::Builder::new()
+            .prefix("record-start-")
+            .tempdir()
+            .unwrap();
+        let mut failures = Vec::new();
+        for (name, source) in [
+            ("static", "color=c=red:size=640x360:rate=10"),
+            ("moving", "testsrc=size=640x360:rate=10"),
+        ] {
+            let folder = root.path().join(name);
+            fs::create_dir(&folder).unwrap();
+            let input = folder.join("native-video.mkv");
+            let log = folder.join("capture.log");
+            let mut command = deps::command("ffmpeg").unwrap();
+            command.args(["-y", "-hide_banner", "-loglevel", "warning"]);
+            command.args(["-re", "-f", "lavfi", "-i", source]);
+            // No fixture-only output options: a regression in the production
+            // encoder or its flushing must also break these real FFmpeg runs.
+            configure_recording_output(&mut command, 10);
+            let epoch = Instant::now();
+            let child = command
+                .arg(&input)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(File::create(&log).unwrap()))
+                .spawn()
+                .unwrap();
+            let video = match ready_process(child, input.clone(), None, epoch) {
+                Ok(video) => video,
+                Err(error) => {
+                    failures.push(format!(
+                        "{name}: {error}; bytes={:?}; log={}",
+                        input.metadata().map(|m| m.len()),
+                        fs::read_to_string(&log).unwrap_or_default()
+                    ));
+                    continue;
+                }
+            };
+            let startup = epoch.elapsed();
+            let child = match video {
+                VideoCapture::Process { child, .. } => child.into_inner().unwrap(),
+                #[cfg(windows)]
+                VideoCapture::Native(_) => panic!("Expected an FFmpeg recording"),
+            };
+            // Clean up before asserting the bound, so a timing regression
+            // cannot leave an encoder running after the test fails.
+            let stopped = stop_synthetic_recording(child);
+            eprintln!("{name}: ready in {startup:?}, clean stop={stopped:?}");
+            assert!(stopped.is_ok(), "{name}: {stopped:?}");
+            assert!(
+                startup < Duration::from_secs(2),
+                "{name}: recording readiness took {startup:?}"
+            );
+
+            let mut probe = deps::command("ffprobe").unwrap();
+            probe
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "json",
+                ])
+                .arg(&input);
+            let output = output_with_timeout(probe, Duration::from_secs(5)).unwrap();
+            assert!(output.status.success(), "{name}: {:?}", output.stderr);
+            let streams: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let frames = streams["streams"][0]["nb_read_frames"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            assert!(frames > 0, "{name}: {streams}");
+            let mut decode = deps::command("ffmpeg").unwrap();
+            decode
+                .args(["-v", "error", "-xerror", "-i"])
+                .arg(&input)
+                .args(["-map", "0:v:0", "-f", "null", "-"]);
+            let output = output_with_timeout(decode, Duration::from_secs(5)).unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: full decode failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    #[ignore = "Requires FFmpeg; checks synthetic stalled/failed startup cleanup without hardware"]
+    fn actual_ffmpeg_recording_failed_start_reaps_processes() {
+        let root = tempfile::Builder::new()
+            .prefix("record-start-")
+            .tempdir()
+            .unwrap();
+        for (name, arguments, expected) in [
+            (
+                "no-input",
+                vec![
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    "rgb24",
+                    "-video_size",
+                    "64x64",
+                    "-framerate",
+                    "10",
+                    "-i",
+                    "pipe:0",
+                ],
+                "Capture produced no frames",
+            ),
+            (
+                "early-exit",
+                vec!["-f", "lavfi", "-i", "cuereview_no_such_filter"],
+                "Capture could not start",
+            ),
+        ] {
+            let folder = root.path().join(name);
+            fs::create_dir(&folder).unwrap();
+            let input = folder.join("native-video.mkv");
+            let log = folder.join("capture.log");
+            let mut command = deps::command("ffmpeg").unwrap();
+            command.args(["-y", "-hide_banner", "-loglevel", "warning"]);
+            command.args(arguments);
+            configure_recording_output(&mut command, 10);
+            let mut child = command
+                .arg(&input)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(File::create(&log).unwrap()))
+                .spawn()
+                .unwrap();
+            // Keep the input open without supplying a frame. Returning an
+            // error must close the child's reader, not leave it waiting here.
+            let mut stdin = child.stdin.take().unwrap();
+            let epoch = Instant::now();
+            let result = ready_process(child, input, None, epoch);
+            let elapsed = epoch.elapsed();
+            let error = match result {
+                Err(error) => error,
+                Ok(VideoCapture::Process { child, .. }) => {
+                    drop(stdin);
+                    let _ = stop_synthetic_recording(child.into_inner().unwrap());
+                    panic!("{name}: empty capture became ready");
+                }
+                #[cfg(windows)]
+                Ok(VideoCapture::Native(_)) => panic!("Expected an FFmpeg recording"),
+            };
+            assert!(
+                stdin.write_all(&[0]).is_err(),
+                "{name}: child still reads stdin"
+            );
+            assert!(error.starts_with(expected), "{name}: {error}");
+            assert!(error.contains("capture.log"), "{name}: {error}");
+            assert!(elapsed < Duration::from_secs(12), "{name}: {elapsed:?}");
+            if name == "early-exit" {
+                assert!(elapsed < Duration::from_secs(2), "{name}: {elapsed:?}");
+                assert!(fs::read_to_string(log)
+                    .unwrap()
+                    .contains("cuereview_no_such_filter"));
+            }
+            eprintln!("{name}: {error}; returned in {elapsed:?}, child pipe closed");
+        }
+    }
+
     #[test]
     fn avfoundation_startup_failures_keep_the_cause_and_offer_recovery() {
         for cause in [

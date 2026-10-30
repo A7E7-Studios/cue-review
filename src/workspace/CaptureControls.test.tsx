@@ -45,6 +45,28 @@ describe('CaptureControls', () => {
     expect(screen.getByRole('button', { name: 'Refresh capture devices' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Include system audio' })).not.toBeChecked();
   });
+  it.each([{ mode: 'draft', review: false }, { mode: 'review', review: true }])('closes either picker on a second trigger activation in $mode', async ({ review }) => {
+    const user = userEvent.setup();
+    render(<main tabIndex={-1}><Harness platform="macos" review={review} recordLabel={review ? 'Record more' : 'Record'}/></main>);
+    for (const { name, group } of [
+      { name: 'Display 1', group: 'Capture sources' },
+      { name: 'Studio microphone', group: 'Microphone options' },
+    ]) {
+      const trigger = screen.getByRole('button', { name });
+      await user.click(trigger);
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      expect(within(screen.getByRole('group', { name: group })).getByRole('button', { name })).toHaveFocus();
+      await user.click(trigger);
+      expect(trigger).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('group', { name: group })).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+      await user.keyboard('{Enter}');
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      await user.keyboard('{Escape}');
+      expect(trigger).toHaveAttribute('aria-expanded', 'false');
+      expect(trigger).toHaveFocus();
+    }
+  });
   it('moves through options with arrows, Home, End and typeahead, keeping one tab stop', async () => {
     const user = userEvent.setup();
     render(<Harness initialMenu="source"/>);

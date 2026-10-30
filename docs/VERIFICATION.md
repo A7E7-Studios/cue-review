@@ -85,6 +85,8 @@ Run each with `cargo test --manifest-path src-tauri/Cargo.toml --lib NAME -- --i
 | `capture::tests::actual_cursor_sampler_follows_the_pointer_over_an_owned_window` | Moves the real pointer and clicks an owned topmost window; records nothing | yes |
 | `capture::tests::actual_windows_capture`, `actual_window_capture`, `actual_loopback_silence_gaps`, `actual_initial_mute`, `actual_live_audio_snapshots`, `actual_desktop_sync_over_static_interval`, `actual_selected_window_occlusion`, `actual_source_close_and_odd_geometry`, `actual_immediate_stop_then_restart` | Records the display, a window, the microphone or loopback; plays quiet tones | yes |
 | `capture::tests::actual_final_video_validation_rejects_incomplete_output` | FFmpeg | no |
+| `capture::tests::actual_ffmpeg_recording_startup_flushes_static_and_moving_video` | FFmpeg/ffprobe: real generated video, production recording arguments and startup check, followed by frame probing and full decode | no |
+| `capture::tests::actual_ffmpeg_recording_failed_start_reaps_processes` | FFmpeg: a stalled generated input and an invalid filter return startup errors and close the owned child pipes | no |
 | `capture::tests::actual_device_finalize_keeps_frames_after_a_turn` | FFmpeg: a synthetic device recording that changes frame size twice keeps each second at its time, to the frame, letterboxed | no |
 | `capture::tests::actual_size_optimized_finalization_preserves_timeline`, `actual_quest_metadata_extent_covers_retained_packet_extents` | Existing recordings named by environment variables | no |
 | `preview::tests::actual_continuous_preview` | A real display, window, camera or authorized device | yes |
@@ -101,6 +103,7 @@ Every script uses an isolated data folder and never attaches to, changes or clos
 
 | Script | Needs | Records | Checks |
 | --- | --- | --- | --- |
+| `verify-picker-toggle.cjs` | Storybook at `http://127.0.0.1:6006`, Playwright Chromium and WebKit (`npx playwright install chromium webkit`) | no | Real pointer clicks close each open source/microphone picker in draft and review; trigger focus, switching, Escape, Tab and outside dismissal. Story fixtures replace all capture. |
 | `verify-pipeline.ps1` | Debug `cue.exe`, Whisper, a captured window video (`test-results/native-capture/window/video.mp4` or `CUEREVIEW_PIPELINE_VIDEO`) | no | Known synthesized speech through the real model; phrase, frame and clip retrieval. Its session is the fixture for the scripts below. |
 | `verify-cli.cjs [--release]` | `cue.exe` (`cargo build --bin cue`) | no | Help for every command without opening the store or taking the lock, rejected flags, `transcript --segments` with take dividers, `frames` batches and `--max-width`, no overwrites, `rename` beside a held lock, `moments`. |
 | `verify-failures.cjs` | Release `cue.exe`, the pipeline fixture | no | Missing tools and failing FFmpeg, VAD and Whisper processes leave media untouched and report actionable errors. |
