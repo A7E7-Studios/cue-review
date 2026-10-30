@@ -223,7 +223,7 @@ export interface TranscriptPaneProps {
   retryBusy?: boolean;
 }
 
-/** Settings → Appearance, capability statuses, technical details and the vocabulary (decision 14, C5). */
+/** Settings → Appearance, capability statuses, technical details, the transcription language and its model, and the vocabulary (decision 14, C5). */
 export interface SettingsDialogProps {
   open: boolean;
   onClose: () => void;
@@ -235,6 +235,14 @@ export interface SettingsDialogProps {
   installing: boolean;
   onInstall: () => void;
   onCheckAgain: () => void;
+  /**
+   * Reads the language model's state alone and puts it into `setup`: right after the language
+   * changes or a download starts, then about each second while it downloads, the next read only
+   * after the last reply. Settles once the reply is applied or ignored.
+   */
+  onPollLanguageModel: () => Promise<void>;
+  /** Starts the language model's download, or starts it again after a failure; rejects with a message to show (e.g. while transcription is not installed). */
+  onDownloadLanguageModel: () => Promise<void>;
   /** null until loaded. */
   settings: Settings | null;
   onSaveSettings: (settings: Settings) => Promise<void>;
@@ -356,6 +364,10 @@ export const NAMES = {
   downloadingSpeechTools: 'Downloading speech tools…',
   checkAgain: 'Check again',
   reviewSetup: 'Review setup',
+  language: 'Language',
+  modelDownload: (model: string) => `${model} download`,
+  retryModelDownload: 'Try again',
+  downloadModel: 'Download',
   vocabulary: 'Vocabulary',
   nameField: 'Name',
   save: 'Save',

@@ -139,6 +139,10 @@ export default function App({ platform: requested }: AppProps = {}) {
   const pollError = useRef('');
   /** Whether a dialog is open, for errors that arrive from outside it. */
   const dialogOpen = useRef(false);
+  /** Whether Settings is open: a language model reply that arrives after it closed is dropped. */
+  const settingsShown = useRef(false);
+  /** Setup reads sent, and the latest one whose reply is shown, so an older reply never replaces a newer one. */
+  const setupReads = useRef({ sent: 0, shown: 0 });
 
   const recording = status.state === 'recording';
   /** The runtime transcribes one job at a time and refuses a new capture meanwhile, whichever recording it is. */
@@ -160,7 +164,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   /** Devices must have loaded: until then the microphone choice is unknown and a take would record without it. */
   const devicesReady = microphoneId !== undefined;
   const canRecordMore = !!session && !draft && settled(session) && !!videoSrc && devicesReady;
-  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; });
+  useLayoutEffect(() => { dialogOpen.current = !!dialog || !!deletion || settingsOpen; settingsShown.current = settingsOpen; });
   const noAudio = !microphoneId && !systemAudio;
   const deviceAudioOnly = (source?.kind === 'android' || source?.kind === 'quest') && !microphoneId && systemAudio;
 
@@ -622,13 +626,35 @@ export default function App({ platform: requested }: AppProps = {}) {
   const reportFromSettings = (problem: unknown) => (dialogOpen.current ? reportInDialog : report)(problem);
   const install = async () => {
     setInstalling(true); setDialogError('');
-    try { await backend.installTranscription(); setSetup(await backend.setup()); setNotice('Transcription tools installed'); }
+    try { await backend.installTranscription(); await readSetup(); setNotice('Transcription tools installed'); }
     catch (problem) { reportFromSettings(problem); }
     finally { setInstalling(false); }
+  };
+  /**
+   * A full setup reply always shows the tools; its language model only when no later read has shown the
+   * model already. The light poll shows only the model, and only while Settings is open.
+   */
+  const readSetup = async () => {
+    const ticket = ++setupReads.current.sent;
+    const value = await backend.setup();
+    const stale = ticket < setupReads.current.shown;
+    if (!stale) setupReads.current.shown = ticket;
+    setSetup(current => stale && current ? { ...value, languageModel: current.languageModel } : value);
+  };
+  /** Settings reads it on opening and on Check again. */
+  const refreshSetup = () => void readSetup().catch(reportFromSettings);
+  /** The light read Settings polls while the language model downloads. */
+  const pollLanguageModel = async () => {
+    const ticket = ++setupReads.current.sent;
+    const model = await backend.languageModel();
+    if (ticket < setupReads.current.shown || !settingsShown.current) return;
+    setupReads.current.shown = ticket;
+    setSetup(current => current && { ...current, languageModel: model ?? undefined });
   };
   const openSettings = () => {
     setDialogError(''); setSettingsOpen(true);
     backend.settings().then(setSettings).catch(reportFromSettings);
+    refreshSetup();
   };
   const saveSettings = async (next: Settings) => { setSettings(await backend.saveSettings(next)); };
 
@@ -800,7 +826,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} sessions={sessions} sections={projects} transcripts={searchTranscripts}
       onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
-      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
+      setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={refreshSetup}
+      onPollLanguageModel={pollLanguageModel} onDownloadLanguageModel={backend.downloadLanguageModel}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
     <NameDialog state={dialog} busy={busy} error={dialog ? dialogError : ''} fallbackFocusRef={sheet}
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>

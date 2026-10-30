@@ -62,8 +62,12 @@ pub fn load(root: &Path) -> Settings {
 /// Validates and normalizes the settings, writes `settings.json` atomically
 /// and returns the settings as stored. An empty vocabulary turns the prompt off.
 pub fn save(root: &Path, settings: &Settings) -> Result<Settings, String> {
+    // English is the default, so it is not written; an unknown language
+    // (from a hand-edited file) reads as English and is dropped.
+    let language = (language(settings) == "de").then(|| "de".to_owned());
     let stored = Settings {
         vocabulary: normalize_vocabulary(settings.vocabulary.as_deref().unwrap_or(""))?,
+        language,
     };
     write_json(&path(root), &stored)?;
     Ok(stored)
@@ -180,7 +184,16 @@ fn letter_tokens(run: &[u8]) -> usize {
     total
 }
 
-const BASE_ARGS: [&str; 4] = ["-l", "auto", "-ojf", "-ng"];
+/// The language every transcription is held to: `"de"` when German is
+/// chosen, else `"en"`.
+pub fn language(settings: &Settings) -> &'static str {
+    match settings.language.as_deref() {
+        Some("de") => "de",
+        _ => "en",
+    }
+}
+
+const BASE_ARGS: [&str; 2] = ["-ojf", "-ng"];
 const TAIL_ARGS: [&str; 3] = ["-nf", "-nth", "0.3"];
 
 /// Whisper decoding options for every final and live transcription.
@@ -190,8 +203,9 @@ const TAIL_ARGS: [&str; 3] = ["-nf", "-nth", "0.3"];
 /// for speech activity detection. A saved vocabulary adds a prompt repeated in
 /// every window, sized so no decoded text is carried (see the module notes).
 /// When the prompt's tokens cannot be counted, decoding stays as without it.
-pub fn decoding_args(settings: &Settings) -> Vec<String> {
-    decoding_args_with(settings, prompt_tokens)
+/// `model` is the model that will transcribe, whose tokenizer counts the prompt.
+pub fn decoding_args(settings: &Settings, model: &Path) -> Vec<String> {
+    decoding_args_with(settings, |prompt| prompt_tokens(model, prompt))
 }
 
 fn decoding_args_with(
@@ -207,7 +221,8 @@ fn decoding_args_with(
                 .filter(|tokens| (1..=MAX_PROMPT_TOKENS).contains(tokens))
                 .map(|tokens| (prompt, tokens))
         });
-    let mut args: Vec<String> = BASE_ARGS.into_iter().map(String::from).collect();
+    let mut args: Vec<String> = vec!["-l".into(), language(settings).into()];
+    args.extend(BASE_ARGS.into_iter().map(String::from));
     match prompt {
         Some((prompt, tokens)) => args.extend([
             "-mc".into(),
@@ -232,16 +247,15 @@ type TokenCounts = Mutex<HashMap<String, Option<usize>>>;
 
 /// The prompt's exact token count from the transcription model's own tokenizer,
 /// remembered for the life of the process.
-fn prompt_tokens(prompt: &str) -> Option<usize> {
+fn prompt_tokens(model: &Path, prompt: &str) -> Option<usize> {
     static COUNTS: OnceLock<TokenCounts> = OnceLock::new();
-    let model = deps::model_path();
     // Not remembered: the model can still be installed while the app runs.
     if !model.is_file() {
         return None;
     }
     let key = format!("{}\n{prompt}", model.display());
     remembered(COUNTS.get_or_init(Default::default), key, || {
-        probe_prompt_tokens(&model, prompt)
+        probe_prompt_tokens(model, prompt)
     })
 }
 
@@ -374,21 +388,21 @@ fn silent_wav() -> Vec<u8> {
 mod tests {
     use super::*;
 
-    const TODAY: [&str; 9] = [
-        "-l", "auto", "-ojf", "-ng", "-mc", "0", "-nf", "-nth", "0.3",
-    ];
+    const TODAY: [&str; 9] = ["-l", "en", "-ojf", "-ng", "-mc", "0", "-nf", "-nth", "0.3"];
 
     fn vocabulary(text: &str) -> Settings {
         Settings {
             vocabulary: Some(text.into()),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn decoding_args_match_the_v0_1_options() {
+    fn decoding_args_match_the_v0_1_options_held_to_english() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(decoding_args(&load(root.path())), TODAY);
-        assert_eq!(decoding_args(&Settings::default()), TODAY);
+        let model = root.path().join("no-model.bin");
+        assert_eq!(decoding_args(&load(root.path()), &model), TODAY);
+        assert_eq!(decoding_args(&Settings::default(), &model), TODAY);
         let never = |_: &str| -> Option<usize> { panic!("no prompt to count") };
         assert_eq!(decoding_args_with(&Settings::default(), never), TODAY);
         assert_eq!(decoding_args_with(&vocabulary(" ,\n "), never), TODAY);
@@ -404,7 +418,7 @@ mod tests {
             args,
             [
                 "-l",
-                "auto",
+                "en",
                 "-ojf",
                 "-ng",
                 "-mc",
@@ -653,6 +667,39 @@ mod tests {
     }
 
     #[test]
+    fn decoding_is_held_to_the_chosen_language() {
+        let never = |_: &str| -> Option<usize> { panic!("no prompt to count") };
+        let chosen = |language: Option<&str>| Settings {
+            language: language.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(language(&chosen(None)), "en");
+        assert_eq!(language(&chosen(Some("en"))), "en");
+        assert_eq!(language(&chosen(Some("de"))), "de");
+        assert_eq!(&decoding_args_with(&chosen(None), never)[..2], ["-l", "en"]);
+        assert_eq!(
+            &decoding_args_with(&chosen(Some("de")), never)[..2],
+            ["-l", "de"]
+        );
+        let root = tempfile::tempdir().unwrap();
+        let saved = save(root.path(), &chosen(Some("de"))).unwrap();
+        assert_eq!(saved.language.as_deref(), Some("de"));
+        assert_eq!(load(root.path()), saved);
+        // English is the default, so it is not written.
+        assert_eq!(
+            save(root.path(), &chosen(Some("en"))).unwrap(),
+            Settings::default()
+        );
+        // An unknown language from a hand-edited file reads as English and
+        // never blocks saving the vocabulary.
+        assert_eq!(language(&chosen(Some("fr"))), "en");
+        assert_eq!(
+            save(root.path(), &chosen(Some("fr"))).unwrap(),
+            Settings::default()
+        );
+    }
+
+    #[test]
     fn settings_round_trip_and_damaged_files_fall_back_to_defaults() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(load(root.path()), Settings::default());
@@ -688,7 +735,7 @@ mod tests {
             .arg(deps::model_path())
             .arg("-f")
             .arg(input)
-            .args(decoding_args(settings))
+            .args(decoding_args(settings, &deps::model_path()))
             .args(["-t", "2", "-of"])
             .arg(prefix)
             .output()
@@ -722,10 +769,11 @@ mod tests {
 
         // The model's own tokenizer sizes the context so no decoded text is carried.
         let began = std::time::Instant::now();
-        let tokens = prompt_tokens(&prompt).expect("whisper-cli should count the prompt");
+        let tokens = prompt_tokens(&deps::model_path(), &prompt)
+            .expect("whisper-cli should count the prompt");
         let probe_ms = began.elapsed().as_millis();
         assert!((8..=32).contains(&tokens), "{tokens} tokens");
-        let args = decoding_args(&settings);
+        let args = decoding_args(&settings, &deps::model_path());
         let context = (tokens + 1).to_string();
         assert_eq!(
             args[4..9],
@@ -773,7 +821,10 @@ mod tests {
             );
         }
 
-        // Noise yields no words, from the gated path and from Whisper alone.
+        // Noise yields no words on the app's live and final paths, which the
+        // speech gate guards. Whisper alone, held to a language, writes
+        // annotations or fragments on pure noise with or without the prompt
+        // (base held to English, small.en), so it is only printed.
         for (name, input) in [
             ("generated-noise", noise.clone()),
             (
@@ -782,15 +833,21 @@ mod tests {
             ),
         ] {
             let folder = tempfile::tempdir().unwrap();
-            let gated = transcribe_snapshot(root.path(), &input, folder.path(), &cancel).unwrap();
+            let live = transcribe_snapshot(root.path(), &input, folder.path(), &cancel).unwrap();
+            assert!(live.segments.is_empty(), "{name}: the live path wrote text");
+            let take = tempfile::tempdir().unwrap();
+            std::fs::copy(&input, take.path().join("mic.wav")).unwrap();
+            let duration = hound::WavReader::open(&input).unwrap().duration() as u64 * 1000 / 16000;
+            let last =
+                crate::transcribe::transcribe_media(root.path(), take.path(), duration, true)
+                    .unwrap();
             assert!(
-                gated.segments.is_empty(),
-                "{name}: the gated path produced text"
+                last.segments.is_empty(),
+                "{name}: the final path wrote text"
             );
             let (ungated, _) = ungated_whisper(&settings, &input, &evidence.join(name));
-            assert!(
-                ungated.segments.is_empty(),
-                "{name}: the prompt made Whisper invent {:?}",
+            eprintln!(
+                "{name}: Whisper without the gate wrote {:?}",
                 ungated.segments.iter().map(|s| &s.text).collect::<Vec<_>>()
             );
         }
