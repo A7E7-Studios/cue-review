@@ -32,23 +32,15 @@ export function Sidebar(props: SidebarProps) {
   const os = props.platform ?? detectPlatform();
   const showCollapse = props.showCollapse ?? true;
   const newKey = shortcut('n', os);
+  const searchKey = shortcut('k', os);
   const [closed, setClosed] = useState<Set<string>>(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem('cuereview.closedSections') || '[]');
       return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []);
     } catch { return new Set(); }
   });
-  // While filtering, every section with a match starts open. Toggles then apply to this query only
-  // and leave the saved disclosure state alone.
-  const query = (props.filter ?? '').trim().toLocaleLowerCase();
-  const filtering = query.length > 0;
-  const [filterClosed, setFilterClosed] = useState<{ query: string; ids: Set<string> }>({ query: '', ids: new Set() });
-  const isClosed = (id: string) => filtering ? filterClosed.query === query && filterClosed.ids.has(id) : closed.has(id);
-  const toggleSection = (id: string) => {
-    const flip = (ids: Set<string>) => { const next = new Set(ids); if (next.has(id)) next.delete(id); else next.add(id); return next; };
-    if (filtering) setFilterClosed(current => ({ query, ids: flip(current.query === query ? current.ids : new Set()) }));
-    else setClosed(flip);
-  };
+  const isClosed = (id: string) => closed.has(id);
+  const toggleSection = (id: string) => setClosed(ids => { const next = new Set(ids); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const [menu, setMenu] = useState<Menu | null>(null);
   const menuPresence = usePresence(!!menu, 120);
   const lastMenu = useRef<Menu | null>(null);
@@ -261,11 +253,8 @@ export function Sidebar(props: SidebarProps) {
       <button className="session-options" onContextMenu={event => { event.preventDefault(); openMenu(item, event.currentTarget, event.clientX, event.clientY); }} aria-label={NAMES.recordingOptions} title={`Options for ${item.name}`} aria-haspopup="menu" aria-expanded={menu?.kind === 'session' && menu.id === item.id} disabled={!movable(item)} onClick={event => menu?.kind === 'session' && menu.id === item.id ? closeMenu() : openMenu(item, event.currentTarget)}><Icon name="more"/></button>
     </div>;
   };
-  const matches = filtering ? sessions.filter(item => item.name.toLocaleLowerCase().includes(query)) : sessions;
-  const shownSections = filtering ? sections.filter(section => matches.some(item => item.projectId === section.id)) : sections;
   // Older recordings retain their section IDs. If a section is unavailable, keep its recordings reachable.
-  const recentSessions = matches.filter(item => !item.projectId || !sections.some(section => section.id === item.projectId));
-  const noMatches = filtering && !matches.length;
+  const recentSessions = sessions.filter(item => !item.projectId || !sections.some(section => section.id === item.projectId));
 
   // Rows, section headings and their buttons open their own menus; anywhere else in the sidebar
   // opens the sidebar's. Every handler calls preventDefault, so no webview menu shows.
@@ -290,9 +279,15 @@ export function Sidebar(props: SidebarProps) {
         <span className="new-session-label">{NAMES.newSession}</span>
         <kbd className="kbd-hint" aria-hidden="true">{newKey.label}</kbd>
       </button>
+      {/* Search opens the search window over every recording and transcript (search spec). */}
+      {props.onSearch && <button className="new-session side-search has-kbd" disabled={locked} onClick={props.onSearch} aria-keyshortcuts={searchKey.aria}>
+        <Icon name="search" size={16} strokeWidth={1.9}/>
+        <span className="new-session-label">{NAMES.search}</span>
+        <kbd className="kbd-hint" aria-hidden="true">{searchKey.label}</kbd>
+      </button>}
     </div>
     <div className="recording-list">
-      {shownSections.map(section => {
+      {sections.map(section => {
         const sectionClosed = isClosed(section.id);
         return <section key={section.id} data-section-id={section.id} aria-label={NAMES.section(section.name)} className={`recording-section ${dropTarget === section.id ? 'drop-target' : ''} ${draggingSection === section.id ? 'dragging-section' : ''} ${insertion?.id === section.id ? insertion.after ? 'insert-after' : 'insert-before' : ''}`} {...dropHandlers(section.id)}>
           <div className="section-heading">
@@ -301,19 +296,17 @@ export function Sidebar(props: SidebarProps) {
               onDragEnd={finishDrag}
               onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }}
               aria-expanded={!sectionClosed} onClick={() => toggleSection(section.id)}><span>{section.name}</span><Icon name="chevron" className="section-chevron"/></button>
-            {props.onNewInSection && !locked && !filtering && <button className="section-new" onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }} aria-label={NAMES.newSessionInSection(section.name)} title={NAMES.newSessionInSection(section.name)}
+            {props.onNewInSection && !locked && <button className="section-new" onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }} aria-label={NAMES.newSessionInSection(section.name)} title={NAMES.newSessionInSection(section.name)}
               onClick={() => { expand(section.id); props.onNewInSection?.(section.id); }}><Icon name="plus"/></button>}
             <button className="section-options" onContextMenu={event => { event.preventDefault(); openSectionMenu(section, event.currentTarget, event.clientX, event.clientY); }} disabled={locked} aria-label={NAMES.sectionOptions(section.name)} aria-haspopup="menu" aria-expanded={menu?.kind === 'section' && menu.id === section.id} onClick={event => menu?.kind === 'section' && menu.id === section.id ? closeMenu() : openSectionMenu(section, event.currentTarget)}><Icon name="more"/></button>
           </div>
-          <div className="section-reveal" data-open={!sectionClosed} aria-hidden={sectionClosed} inert={sectionClosed}><div className="section-sessions">{matches.filter(item => item.projectId === section.id).map(renderSession)}{!sessions.some(item => item.projectId === section.id) && <p className="side-empty">{dragging ? 'Drop here' : NAMES.noRecordings}</p>}</div></div>
+          <div className="section-reveal" data-open={!sectionClosed} aria-hidden={sectionClosed} inert={sectionClosed}><div className="section-sessions">{sessions.filter(item => item.projectId === section.id).map(renderSession)}{!sessions.some(item => item.projectId === section.id) && <p className="side-empty">{dragging ? 'Drop here' : NAMES.noRecordings}</p>}</div></div>
         </section>;
       })}
-      {(!filtering || recentSessions.length > 0) && <section aria-label={NAMES.recents} className={`recording-section recent-list ${dropTarget === 'recents' ? 'drop-target' : ''} ${insertion?.id === 'recents' ? 'insert-before' : ''}`} {...dropHandlers(null)}>
+      <section aria-label={NAMES.recents} className={`recording-section recent-list ${dropTarget === 'recents' ? 'drop-target' : ''} ${insertion?.id === 'recents' ? 'insert-before' : ''}`} {...dropHandlers(null)}>
         <div className="section-heading recents-heading">{NAMES.recents}</div>
         {recentSessions.map(renderSession)}{!recentSessions.length && !props.loading && <p className="side-empty">{dragging ? 'Drop here' : NAMES.noRecordings}</p>}
-      </section>}
-      {/* Always mounted so screen readers hear "No matches" as the search narrows to nothing. */}
-      <div className="side-filter-status" role="status">{noMatches && <p className="side-empty">{NAMES.noMatches}</p>}</div>
+      </section>
     </div>
     {props.utilities && <div className="side-bottom">{props.utilities}</div>}
     {menuPresence.present && shownMenu && (menuSession || menuSection || shownMenu.kind === 'list') && <div ref={menuRef} className="sidebar-menu" data-state={menuPresence.phase} aria-hidden={!menu} inert={!menu} role="menu" aria-label={shownMenu.kind === 'list' ? NAMES.sidebarActions : shownMenu.kind === 'section' ? NAMES.sectionActions : NAMES.recordingActions} style={{ left: shownMenu.x, top: shownMenu.y }}

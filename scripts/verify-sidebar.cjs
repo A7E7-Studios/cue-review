@@ -167,23 +167,29 @@ const rowText = () => page.evaluate(() => {
     assert((await invoke('list_sessions', { projectId: null })).length === 4, 'Deleted recording returned after reload.');
     assert(!(await invoke('list_projects')).some(item => item.id === sections[1].id), 'Deleted section returned after reload.');
     result.checks.deleteRecordingFiles = true;
-    // Ctrl+K focuses the title bar search, which filters by session name only (decision 11).
-    const rows = () => sidebar.locator('.session').count();
-    const allRows = await rows();
+    // Ctrl+K opens the search window over names and transcript lines (search spec); the title bar has no field.
+    assert(await page.getByRole('banner').getByRole('searchbox').count() === 0, 'The title bar still has a search field.');
+    await page.locator('body').click({ position: { x: 5, y: 5 } }).catch(() => {});
     await page.keyboard.press('Control+k');
-    const search = page.getByRole('searchbox', { name: 'Search recordings', exact: true });
-    assert(await search.evaluate(input => input === document.activeElement), 'Ctrl+K did not focus Search recordings.');
+    const searchWindow = page.getByRole('dialog', { name: 'Search', exact: true });
+    await searchWindow.waitFor();
+    const search = searchWindow.getByRole('combobox', { name: 'Search recordings', exact: true });
+    assert(await search.evaluate(input => input === document.activeElement), 'Ctrl+K did not focus the search field.');
+    const recent = await searchWindow.getByRole('option').count();
+    assert(recent > 0, 'Search listed no recent recordings before typing.');
     await search.fill('quest');
-    await sidebar.getByRole('button', { name: 'Quest performance', exact: true }).waitFor();
-    assert(await rows() === 1, 'Search did not narrow the sidebar to the matching session.');
+    await searchWindow.getByRole('option', { name: /Quest performance/ }).first().waitFor();
     await search.fill('moment');
-    await sidebar.getByRole('status').filter({ hasText: 'No matches' }).waitFor();
-    assert(await rows() === 0, 'Search matched transcript text instead of session names only.');
-    await page.screenshot({ path: path.join(output, 'search-no-matches.png') });
-    await search.fill('');
-    for (let i = 0; i < 50 && await rows() !== allRows; i++) await delay(100);
-    assert(await rows() === allRows, 'Clearing the search did not restore every session.');
-    result.checks.search = { rows: allRows, quest: 1, transcriptOnlyTerm: 0 };
+    const transcriptLines = searchWindow.getByRole('group', { name: 'In transcripts', exact: true }).getByRole('option');
+    await transcriptLines.first().waitFor({ timeout: 15000 });
+    const lines = await transcriptLines.count();
+    assert(lines > 0, 'Search found no transcript line for a word only the transcripts contain.');
+    await page.screenshot({ path: path.join(output, 'search-transcript-lines.png') });
+    await search.fill('zebra-not-said');
+    await searchWindow.getByRole('status').filter({ hasText: 'No matches' }).waitFor();
+    await page.keyboard.press('Escape');
+    await searchWindow.waitFor({ state: 'detached' });
+    result.checks.search = { recent, quest: 1, transcriptLines: lines };
     assert(result.pageErrors.length === 0, 'WebView errors occurred.');
     result.passed = true;
   } catch (error) { result.error = error.stack || String(error); result.passed = false; process.exitCode = 1; if (page) { await page.screenshot({ path: path.join(output, 'failure.png') }).catch(() => {}); result.alerts = await page.getByRole('alert').allTextContents().catch(() => []); } }

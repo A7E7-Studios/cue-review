@@ -35,50 +35,8 @@
 .chrome-toolbar[data-platform='macos'] .chrome-icon { width: 32px; height: 30px; border-radius: 8px; }
 .chrome-toolbar[data-platform='macos'] .chrome-icon > svg { width: 16px; height: 16px; }
 
-/* Fills the bar between the leading controls and Settings; its empty sides are drag regions. */
+/* Fills the bar between the leading controls and Settings, as a drag region. */
 .chrome-center { flex: 1; min-width: 0; align-self: stretch; display: flex; align-items: center; justify-content: center; padding: 0 12px; }
-
-.chrome-search {
-  width: 100%;
-  max-width: 420px;
-  height: 28px;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  border-radius: var(--radius-field);
-  background: var(--color-button);
-  box-shadow: 0 0 0 1px var(--color-control-ring);
-  color: var(--color-text-tertiary);
-  cursor: text;
-}
-.chrome-toolbar[data-platform='macos'] .chrome-search { max-width: 380px; height: 30px; padding: 0 12px; border-radius: var(--radius-pill); background: var(--color-toolbar-search); box-shadow: none; }
-.chrome-bar .chrome-search:focus-within { box-shadow: 0 0 0 2px var(--color-focus); }
-.chrome-search > svg { flex: none; }
-.chrome-search input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--color-text);
-  font: inherit;
-  font-size: var(--font-size-control);
-  outline: none;
-}
-.chrome-toolbar[data-platform='macos'] .chrome-search input { font-size: 13px; }
-.chrome-search input:focus-visible { outline: none; }
-.chrome-search input::placeholder { color: var(--color-text-tertiary); opacity: 1; }
-.chrome-search input::-webkit-search-cancel-button { cursor: pointer; }
-
-/* Decision 7: the hint is aria-hidden and fades in on hover or focus (no fade under reduced motion,
-   where --motion-fast is 0ms). It hides once there is a query, beside the native clear button. */
-.chrome-search .kbd-hint { flex: none; font-family: inherit; font-size: var(--font-size-kbd); color: var(--color-text-tertiary); white-space: nowrap; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
-.chrome-toolbar[data-platform='macos'] .chrome-search .kbd-hint { font-size: var(--font-size-meta); }
-.chrome-search:hover .kbd-hint, .chrome-search:focus-within .kbd-hint { opacity: 1; }
-.chrome-search input:not(:placeholder-shown) ~ .kbd-hint { display: none; }
 
 .window-controls { display: flex; flex: none; align-self: stretch; margin-left: 6px; }
 .window-control { width: var(--size-window-control); height: 100%; display: grid; place-items: center; padding: 0; border-radius: 0; background: transparent; color: var(--color-text); }

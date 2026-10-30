@@ -10,6 +10,7 @@ import type { Platform } from './chrome/windowApi';
 import { SettingsDialog } from './dialogs/SettingsDialog';
 import { Icon } from './icons';
 import { errorMessage, seekTime } from './review';
+import { SearchDialog } from './search/SearchDialog';
 import { Sidebar } from './Sidebar';
 import { CaptureControls } from './workspace/CaptureControls';
 import { captureEmptyState, MediaStage, reviewEmptyState } from './workspace/MediaStage';
@@ -45,7 +46,8 @@ function storedSpeed() {
 const POLL_MS = 700;
 const POLL_MAX_MS = 10000;
 const pollDelay = (failures: number) => Math.min(POLL_MS * 2 ** failures, POLL_MAX_MS);
-type Playback = { id: string; time: number; playing: boolean };
+/** Where a reloaded or newly opened video should stand; `fromSearch` marks a search result's line, whose load is no reload. */
+type Playback = { id: string; time: number; playing: boolean; fromSearch?: boolean };
 /** A seek into a take video that is still loading, applied once its metadata has loaded. */
 type PendingSeek = { localMs: number; play: boolean };
 const inProgress = (item: Session) => item.status === 'recording' || item.status === 'processing';
@@ -67,7 +69,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [theme, setTheme] = useTheme(report, os);
   useContextMenuGuard();
   const sidebar = useSidebarLayout();
-  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay, show: showSidebar } = sidebar;
+  const { visible: sidebarVisible, overlay: sidebarOverlay, dismissOverlay } = sidebar;
   const { compact, toggleCompact, exitCompact } = useCompactWindow(report);
   const {
     sourceOptions, microphones, source, microphoneUnavailable, refreshDevices,
@@ -93,7 +95,15 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [deletion, setDeletion] = useState<{ id: string; name: string } | null>(null);
   /** Why Record more failed, shown under the recording bar rather than in the workspace banner. */
   const [recordMoreError, setRecordMoreError] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** The transcripts the search window searches, by session id. */
+  const [searchTranscripts, setSearchTranscripts] = useState<ReadonlyMap<string, Transcript>>(() => new Map());
+  /** The sessions as they are now, for the search window's reader, which starts once per opening. */
+  const searchSessions = useRef<Session[]>([]);
+  /** A search result's time, for a recording whose video may not load again (search spec). */
+  const searchSeek = useRef<{ id: string; time: number; request: number } | null>(null);
+  /** Each Ctrl/⌘+F asks the transcript to open its find bar. */
+  const [findRequest, setFindRequest] = useState(0);
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
   const [mediaRevision, setMediaRevision] = useState(0);
   /** Which of the session's take videos the <video> plays. */
@@ -109,7 +119,6 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [draftSection, setDraftSection] = useState<string | null>(null);
 
   const video = useRef<HTMLVideoElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
   const appRoot = useRef<HTMLDivElement>(null);
   const sheet = useRef<HTMLElement>(null);
   const deletionFocus = useRef<HTMLElement | null>(null);
@@ -169,13 +178,14 @@ export default function App({ platform: requested }: AppProps = {}) {
     });
   }, []);
 
-  const openSession = useCallback(async (id: string) => {
+  /** Opens a recording; resolves true once it is shown, false when superseded or failed. */
+  const openSession = useCallback(async (id: string): Promise<boolean> => {
     const request = ++selection.current;
     restorePlayback.current = null; pendingSeek.current = null; setDraftSection(null); setLoading(true); setCaptureMenu(null); setError(''); setRecordMoreError(''); dismissOverlay();
     try {
       const next = await backend.session(id);
       const text = await backend.transcript(id);
-      if (request !== selection.current) return;
+      if (request !== selection.current) return false;
       shownId.current = next.id;
       setSession(next); setTranscript(text); setDraft(false); setTime(0); setVideoIndex(0); setPlaying(false); setDuration(next.durationMs);
       if (next.status === 'recording') {
@@ -186,7 +196,8 @@ export default function App({ platform: requested }: AppProps = {}) {
         setMicrophoneId(take ? take.microphoneId || '' : next.microphoneId || '');
         setSystemAudio(take ? take.systemAudio : next.systemAudio || false);
       }
-    } catch (problem) { if (request === selection.current) report(problem); }
+      return true;
+    } catch (problem) { if (request === selection.current) report(problem); return false; }
     finally { if (request === selection.current) setLoading(false); }
   }, [report, dismissOverlay, setSourceId, setMicrophoneId, setSystemAudio]);
 
@@ -416,19 +427,77 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
   const recordCommand = () => { if (recording) void stop(); else if (draft) void start(); else void recordMore(); };
 
-  const changeSearch = (value: string) => {
-    setSearch(value);
-    if (value.trim() && !sidebarVisible) showSidebar();
+  /** Search waits while recording, like the sidebar's rows. */
+  const openSearch = () => { if (!locked) setSearchOpen(true); };
+  searchSessions.current = sessions;
+  // Each opening reads every settled recording's transcript again, four at a time, so a transcript
+  // that changed (a retry, `cue transcribe`) is searched as it is now. Lines read at an earlier
+  // opening stay listed until their new read arrives.
+  useEffect(() => {
+    if (!searchOpen) return;
+    let alive = true;
+    const queue = searchSessions.current.filter(settled);
+    const next = async () => {
+      for (let item = queue.shift(); item && alive; item = queue.shift()) {
+        const read = await backend.transcript(item.id).catch(() => null);
+        if (!alive || !read) continue;
+        const id = item.id;
+        setSearchTranscripts(current => new Map(current).set(id, read));
+      }
+    };
+    void Promise.all([next(), next(), next(), next()]);
+    return () => { alive = false; };
+  }, [searchOpen]);
+  /** A search result: the recording, standing paused at the line's time, or at its start. */
+  const openResult = (id: string, atMs?: number) => {
+    if (!draft && !loading && session?.id === id) {
+      // Already open: the video does not load again, so seek it here.
+      dismissOverlay();
+      video.current?.pause();
+      seek(atMs ?? 0);
+      return;
+    }
+    const opening = openSession(id);
+    const request = selection.current, time = (atMs ?? 0) / 1000;
+    // A new source applies a line's time when it loads (a recording starts at 0 anyway); the layout
+    // effect below covers the same source.
+    if (atMs !== undefined) restorePlayback.current = { id, time, playing: false, fromSearch: true };
+    searchSeek.current = { id, time, request };
+    void opening.then(shown => {
+      // A failed load drops what it would have applied; a superseded one leaves the newer choice's.
+      if (shown || request !== selection.current) return;
+      if (searchSeek.current?.request === request) searchSeek.current = null;
+      if (restorePlayback.current?.fromSearch && restorePlayback.current.id === id) restorePlayback.current = null;
+    });
+  };
+  // When the chosen recording commits, the video it shows is final. If it is the video already
+  // there (the same source, shown while another load ran), it does not load again: seek it now.
+  // Only for the latest selection, so an earlier choice never acts on a later one.
+  useLayoutEffect(() => {
+    const pending = searchSeek.current, media = video.current;
+    if (!pending || session?.id !== pending.id) return;
+    searchSeek.current = null;
+    if (pending.request !== selection.current || !media || media.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    if (restorePlayback.current?.id === pending.id) restorePlayback.current = null;
+    media.pause();
+    // A session time, which may fall in another take's video.
+    seek(pending.time * 1000);
+  }, [session]);
+  /** Ctrl/⌘+F: Find in the transcript; in focus, the transcript comes back first. */
+  const openFind = () => {
+    if (!focusVideo) { setFindRequest(value => value + 1); return; }
+    setFocusVideo(false);
+    requestAnimationFrame(() => setFindRequest(value => value + 1));
   };
   useShortcuts({
     platform: os,
-    enabled: !dialog && !deletion && !settingsOpen && !captureMenu,
+    enabled: !dialog && !deletion && !settingsOpen && !searchOpen && !captureMenu,
     onRecord: recordCommand,
     onNew: prepare,
     onTogglePlay: mode === 'review' && videoSrc ? () => void togglePlay() : undefined,
     onSeekBy: mode === 'review' ? delta => seek(time + delta) : undefined,
-    search: searchRef,
-    onClearSearch: () => setSearch(''),
+    onSearch: locked ? undefined : openSearch,
+    onFind: mode === 'review' ? openFind : undefined,
     onEscape: sidebarOverlay ? dismissOverlay : focusVideo ? () => setFocusVideo(false) : undefined,
   });
 
@@ -592,6 +661,12 @@ export default function App({ platform: requested }: AppProps = {}) {
         pendingSeek.current = null; restorePlayback.current = null;
         media.currentTime = pending.localMs / 1000; setTime(startMs + pending.localMs);
         if (pending.play) void media.play().catch(report);
+      } else if (restore && restore.id === session?.id && restore.fromSearch) {
+        // A search result's line is a session time: it may fall in another take's video.
+        restorePlayback.current = null;
+        const target = videoAt(videos, restore.time * 1000);
+        if (target && target.index !== shownVideo) { loadVideo(target.index, target.localMs, false); return; }
+        media.currentTime = (target?.localMs ?? restore.time * 1000) / 1000; setTime(restore.time * 1000);
       } else if (restore && restore.id === session?.id) {
         restorePlayback.current = null;
         media.currentTime = restore.time; setTime(startMs + restore.time * 1000);
@@ -609,9 +684,10 @@ export default function App({ platform: requested }: AppProps = {}) {
     onClick: () => void togglePlay(),
     onError: () => {
       pendingSeek.current = null;
-      const restoring = restorePlayback.current?.id === session?.id;
-      if (restoring) restorePlayback.current = null;
-      if (!releasing.current && !restoring) setError('This recording could not be played. Open its folder to inspect the video file.');
+      // The app's own reload of a video may fail on the way; a search result's video is no reload.
+      const restore = restorePlayback.current?.id === session?.id ? restorePlayback.current : null;
+      if (restore) restorePlayback.current = null;
+      if (!releasing.current && (!restore || restore.fromSearch)) setError('This recording could not be played. Open its folder to inspect the video file.');
     },
   };
 
@@ -688,14 +764,15 @@ export default function App({ platform: requested }: AppProps = {}) {
       <TranscriptPane mode={mode} transcript={shownTranscript} timeMs={recording ? (status.takeOffsetMs ?? 0) + (status.elapsedMs || 0) : time} onSeek={seek}
         status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
-        error={transcriptError} onRetry={() => void retry()} retryDisabled={captureBlocked} retryBusy={busy}/>
+        error={transcriptError} onRetry={() => void retry()} retryDisabled={captureBlocked} retryBusy={busy}
+        findRequest={findRequest}/>
     </div>}
   </main>;
 
   // The sidebar slides out and in, except beside a live preview or a recording, so live video is never resized by an animation.
   const liveVideo = mode !== 'review';
   const sidebarSlide = useSidebarSlide(sidebarVisible, sidebarOverlay, liveVideo);
-  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} filter={search} utilities={null}
+  const sidebarElement = sidebarSlide.present && <div className="app-sidebar-slot" data-state={sidebarSlide.phase} inert={!sidebarVisible || undefined}><Sidebar platform={os} showCollapse={os === 'macos'} utilities={null} onSearch={openSearch}
     sections={projects} sessions={sessions} activeId={draft ? undefined : session?.id} locked={locked} loading={loading}
     onCollapse={sidebar.hide} onNew={prepare} onOpen={id => void openSession(id)}
     onRename={item => openDialog({ kind: 'renameRecording', id: item.id, value: item.name })}
@@ -704,7 +781,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     onMove={moveSession} onReorder={reorderSections} onDeleteSection={item => void deleteSection(item)}
     onDeleteSession={item => { deletionFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setDialogError(''); setDeletion({ id: item.id, name: item.name }); }}/></div>;
   const titleBar = <TitleBar platform={os} sidebarVisible={sidebarVisible} onToggleSidebar={toggleSidebar}
-    search={search} onSearch={changeSearch} searchRef={searchRef} onOpenSettings={openSettings}/>;
+    onOpenSettings={openSettings}/>;
 
   return <div ref={appRoot} className="app" data-platform={os} data-sidebar={compact ? undefined : !sidebarSlide.present ? 'hidden' : sidebarSlide.overlay ? 'overlay' : 'docked'}
     data-sidebar-motion={liveVideo ? 'instant' : 'slide'} data-compact={compact || undefined}>
@@ -720,6 +797,8 @@ export default function App({ platform: requested }: AppProps = {}) {
     </>}
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
+    <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} sessions={sessions} sections={projects} transcripts={searchTranscripts}
+      onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
