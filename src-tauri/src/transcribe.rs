@@ -379,24 +379,27 @@ fn file_name(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
-/// One live update over `snapshot`, the take's live audio copied from
-/// `stretches.until_ms` (`length_ms` long): transcribes and saves every
-/// finished stretch in it with `model`, then guesses the words after them
-/// with base. Returns the guess and how long the audio after the stretches is.
-#[allow(clippy::too_many_arguments)]
-pub fn live_cycle(
+/// The take's live audio after its finished stretches, as one live update
+/// found it: converted to 16 kHz, with its speech regions.
+pub struct LiveAudio {
+    speech: std::path::PathBuf,
+    regions: Vec<(u64, u64)>,
+    length_ms: u64,
+}
+/// The first half of a live update, which the person sees at once: converts
+/// `snapshot` (the live audio from `stretches.until_ms`, `length_ms` long),
+/// finds its speech and guesses its words with base. Returns the guess,
+/// timed from the snapshot's start, and the audio for [`live_commit`].
+pub fn live_guess(
     root: &Path,
-    take: &Path,
     folder: &Path,
     snapshot: &Path,
-    model: &deps::ModelChoice,
-    stretches: &mut Stretches,
     length_ms: u64,
     cancel: &AtomicBool,
-) -> Result<(Transcript, u64), String> {
+) -> Result<(Transcript, Option<LiveAudio>), String> {
     // Too short to hold a word; the detector refuses an empty file.
     if length_ms < 300 {
-        return Ok((Transcript::default(), length_ms));
+        return Ok((Transcript::default(), None));
     }
     let speech = folder.join("speech.wav");
     to_speech(
@@ -408,18 +411,49 @@ pub fn live_cycle(
         Some(cancel),
     )?;
     let regions = speech_regions(&speech, folder, cancel)?;
+    let guess = if regions.is_empty() {
+        Transcript::default()
+    } else {
+        let threads = live_threads(logical_threads());
+        let raw = folder.join("whisper.json");
+        let model = deps::live_model();
+        run_whisper(root, &speech, folder, &model, threads, Some(cancel), &raw)?
+    };
+    let audio = LiveAudio {
+        speech,
+        regions,
+        length_ms,
+    };
+    Ok((guess, Some(audio)))
+}
+/// The second half of a live update: transcribes every stretch of `audio`
+/// that a pause has finished once with `model` and saves it, then returns the
+/// words of `guess` after them, timed from the new `stretches.until_ms`, and
+/// how long the audio after them is.
+#[allow(clippy::too_many_arguments)]
+pub fn live_commit(
+    root: &Path,
+    take: &Path,
+    folder: &Path,
+    model: &deps::ModelChoice,
+    stretches: &mut Stretches,
+    audio: &LiveAudio,
+    guess: Transcript,
+    cancel: &AtomicBool,
+) -> Result<(Transcript, u64), String> {
     let after = |done: u64| -> Vec<(u64, u64)> {
-        regions
+        audio
+            .regions
             .iter()
             .filter(|region| region.1 > done)
             .map(|&(start, end)| (start.saturating_sub(done), end - done))
             .collect()
     };
     let mut done = 0;
-    while let Some(cut) = stretches::cut(&after(done), length_ms.saturating_sub(done)) {
+    while let Some(cut) = stretches::cut(&after(done), audio.length_ms.saturating_sub(done)) {
         let words = if cut.speech {
             let part = folder.join("stretch.wav");
-            wav_slice(&speech, &part, done, done + cut.at_ms)?;
+            wav_slice(&audio.speech, &part, done, done + cut.at_ms)?;
             fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
             let raw = stretches::folder(take).join(format!("{}.json", stretches.until_ms));
             let threads = live_threads(logical_threads());
@@ -431,24 +465,7 @@ pub fn live_cycle(
         stretches::save(take, stretches)?;
         done += cut.at_ms;
     }
-    let left = length_ms.saturating_sub(done);
-    if left == 0 || after(done).is_empty() {
-        return Ok((Transcript::default(), left));
-    }
-    let part = folder.join("guess.wav");
-    wav_slice(&speech, &part, done, length_ms)?;
-    let threads = live_threads(logical_threads());
-    let raw = folder.join("whisper.json");
-    let guess = run_whisper(
-        root,
-        &part,
-        folder,
-        &deps::live_model(),
-        threads,
-        Some(cancel),
-        &raw,
-    )?;
-    Ok((guess, left))
+    Ok((stretches::after(guess, done), audio.length_ms - done))
 }
 /// Only scratch files are written here; final session transcript files are untouched.
 /// `root` is the data root whose settings choose the decoding options.

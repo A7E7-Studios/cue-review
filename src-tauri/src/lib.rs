@@ -223,16 +223,29 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             if cancel.load(Ordering::Acquire) {
                 return Err("Live transcription cancelled.".into());
             }
-            let (guess, guess_ms) = transcribe::live_cycle(
-                &root,
-                &take_folder,
-                &folder,
-                &snapshot,
-                &model,
-                stretches,
-                end - start,
+            // The guess shows at once; finishing stretches takes longer.
+            let length = end - start;
+            let (guess, audio) =
+                transcribe::live_guess(&root, &folder, &snapshot, length, &cancel)?;
+            publish_live(
+                &s,
+                &id,
                 &cancel,
-            )?;
+                Ok(stretches.live(guess.clone(), length, offset)),
+            );
+            let (guess, guess_ms) = match audio {
+                Some(audio) => transcribe::live_commit(
+                    &root,
+                    &take_folder,
+                    &folder,
+                    &model,
+                    stretches,
+                    &audio,
+                    guess,
+                    &cancel,
+                )?,
+                None => (guess, length),
+            };
             Ok(stretches.live(guess, guess_ms, offset))
         });
         publish_live(&s, &id, &cancel, result);

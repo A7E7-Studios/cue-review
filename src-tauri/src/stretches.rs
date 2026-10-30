@@ -181,6 +181,36 @@ impl Stretches {
     }
 }
 
+/// The words of `transcript` that start at or after `from_ms`, timed from
+/// there; a word cut in two by `from_ms` is left out.
+pub fn after(transcript: Transcript, from_ms: u64) -> Transcript {
+    let segments = transcript
+        .segments
+        .into_iter()
+        .filter_map(|mut segment| {
+            segment.words.retain(|word| word.start_ms >= from_ms);
+            for word in &mut segment.words {
+                word.start_ms -= from_ms;
+                word.end_ms -= from_ms;
+                word.seek_ms = word.seek_ms.and_then(|seek| seek.checked_sub(from_ms));
+            }
+            let (first, last) = (segment.words.first()?, segment.words.last()?);
+            segment.start_ms = first.start_ms;
+            segment.end_ms = last.end_ms;
+            segment.text = segment
+                .words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(segment)
+        })
+        .collect();
+    Transcript {
+        segments,
+        ..transcript
+    }
+}
 /// `transcript`'s segments moved by `start_ms`, their words kept within
 /// `length_ms`, with ids `<prefix>-<start_ms>-<n>`.
 fn shift(
@@ -375,6 +405,17 @@ mod tests {
     }
 
     #[test]
+    fn the_guess_after_a_finished_stretch_keeps_only_later_words() {
+        let guess = spoken(&[("one", 100, 400), ("two", 900, 1300), ("three", 1600, 1900)]);
+        let rest = after(guess, 1000);
+        assert_eq!(texts(&rest), [("three".to_string(), 600)]);
+        assert_eq!(rest.segments[0].text, "three");
+        assert!(after(spoken(&[("one", 100, 400)]), 1000)
+            .segments
+            .is_empty());
+    }
+
+    #[test]
     fn saved_stretches_are_used_only_when_they_match() {
         let take = tempfile::tempdir().unwrap();
         assert!(usable(take.path(), "mic.wav", "ggml-small.en.bin", "en").is_none());
@@ -412,6 +453,8 @@ mod tests {
         stop: std::time::Duration,
         one_pass: Vec<String>,
         whole: Vec<String>,
+        /// The words actually said, from `reference.txt` beside the take.
+        reference: Vec<String>,
     }
 
     fn normalized(transcript: &Transcript) -> Vec<String> {
@@ -469,7 +512,17 @@ mod tests {
             let mut stretches = Stretches::new("mic.wav", &model_file, "en");
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let snapshot = live.join("snapshot.wav");
-            let mut first_seen: Vec<(String, f64)> = Vec::new();
+            let first_seen: std::cell::RefCell<Vec<(String, f64)>> = Default::default();
+            // When each word first shows, against when it ended in the audio.
+            let seen = |shown: &Transcript, at: f64| {
+                let mut first_seen = first_seen.borrow_mut();
+                for word in shown.segments.iter().flat_map(|s| &s.words) {
+                    let key = format!("{}@{}", word.text, word.start_ms / 1000);
+                    if !first_seen.iter().any(|(seen, _)| *seen == key) {
+                        first_seen.push((key, at - word.end_ms as f64 / 1000.));
+                    }
+                }
+            };
             let started = Instant::now();
             loop {
                 let now_ms = (started.elapsed().as_millis() as u64).min(length_ms);
@@ -480,25 +533,26 @@ mod tests {
                     writer.write_sample(*sample).unwrap();
                 }
                 writer.finalize().unwrap();
-                let (guess, guess_ms) = crate::transcribe::live_cycle(
-                    root.path(),
-                    &take,
-                    &live,
-                    &snapshot,
-                    &model,
-                    &mut stretches,
-                    now_ms - from,
-                    &cancel,
-                )
-                .unwrap();
-                let shown = stretches.live(guess, guess_ms, 0);
-                let at = started.elapsed().as_secs_f64();
-                for word in shown.segments.iter().flat_map(|s| &s.words) {
-                    let key = format!("{}@{}", word.text, word.start_ms / 1000);
-                    if !first_seen.iter().any(|(seen, _)| *seen == key) {
-                        first_seen.push((key, at - word.end_ms as f64 / 1000.));
-                    }
-                }
+                let length = now_ms - from;
+                let (guess, audio) =
+                    crate::transcribe::live_guess(root.path(), &live, &snapshot, length, &cancel)
+                        .unwrap();
+                seen(&stretches.live(guess.clone(), length, 0), started.elapsed().as_secs_f64());
+                let (guess, guess_ms) = match audio {
+                    Some(audio) => crate::transcribe::live_commit(
+                        root.path(),
+                        &take,
+                        &live,
+                        &model,
+                        &mut stretches,
+                        &audio,
+                        guess,
+                        &cancel,
+                    )
+                    .unwrap(),
+                    None => (guess, length),
+                };
+                seen(&stretches.live(guess, guess_ms, 0), started.elapsed().as_secs_f64());
                 if now_ms >= length_ms {
                     break;
                 }
@@ -516,24 +570,36 @@ mod tests {
             forget(&take);
             let whole =
                 crate::transcribe::transcribe_media(root.path(), &take, length_ms, true).unwrap();
-            let mut delays: Vec<f64> = first_seen.into_iter().map(|(_, delay)| delay).collect();
+            let mut delays: Vec<f64> =
+                first_seen.into_inner().into_iter().map(|(_, delay)| delay).collect();
             delays.sort_by(f64::total_cmp);
+            let reference = fs::read_to_string(fixtures.join("reference.txt"))
+                .expect("test-results/replay/reference.txt")
+                .split_whitespace()
+                .map(|w| {
+                    w.to_lowercase()
+                        .chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect::<String>()
+                })
+                .filter(|w| !w.is_empty())
+                .collect();
             let replay = Replay {
                 delays,
                 stop,
                 one_pass: normalized(&one_pass),
                 whole: normalized(&whole),
+                reference,
             };
             eprintln!(
-                "replay of {} s: {} stretches; live delay median {:.1} s, 90th {:.1} s; Stop {:?}; {} words one-pass, {} whole, {:.1} % apart",
+                "replay of {} s: {} stretches; live delay median {:.1} s, 90th {:.1} s; Stop {:?}; word errors one-pass {:.1} %, whole {:.1} %",
                 length_ms / 1000,
                 stretches.segments.len(),
                 replay.delays[replay.delays.len() / 2],
                 replay.delays[replay.delays.len() * 9 / 10],
                 replay.stop,
-                replay.one_pass.len(),
-                replay.whole.len(),
-                100. * word_errors(&replay.whole, &replay.one_pass)
+                100. * word_errors(&replay.reference, &replay.one_pass),
+                100. * word_errors(&replay.reference, &replay.whole)
             );
             eprintln!("one-pass: {}", replay.one_pass.join(" "));
             eprintln!("whole:    {}", replay.whole.join(" "));
@@ -542,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires Whisper, small.en, base, the speech detector and test-results/replay/mic.wav; runs in real time"]
+    #[ignore = "Requires Whisper, small.en, base, the speech detector, test-results/replay/mic.wav and its reference.txt; runs in real time"]
     fn actual_replay_shows_words_within_seconds() {
         let replay = replay();
         let median = replay.delays[replay.delays.len() / 2];
@@ -553,21 +619,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires Whisper, small.en, base, the speech detector and test-results/replay/mic.wav; runs in real time"]
+    #[ignore = "Requires Whisper, small.en, base, the speech detector, test-results/replay/mic.wav and its reference.txt; runs in real time"]
     fn actual_replay_finishes_within_seconds_of_stop() {
         let stop = replay().stop;
         assert!(stop.as_secs_f64() < 5.0, "Stop took {stop:?}");
     }
 
     #[test]
-    #[ignore = "Requires Whisper, small.en, base, the speech detector and test-results/replay/mic.wav; runs in real time"]
+    #[ignore = "Requires Whisper, small.en, base, the speech detector, test-results/replay/mic.wav and its reference.txt; runs in real time"]
     fn actual_replay_matches_a_whole_take_pass() {
         let replay = replay();
-        let apart = word_errors(&replay.whole, &replay.one_pass);
+        let one_pass = word_errors(&replay.reference, &replay.one_pass);
+        let whole = word_errors(&replay.reference, &replay.whole);
         assert!(
-            apart <= 0.08,
-            "one-pass differs from a whole-take pass in {:.1} % of words",
-            100. * apart
+            one_pass <= whole + 0.02,
+            "one-pass misses {:.1} % of words, a whole-take pass {:.1} %",
+            100. * one_pass,
+            100. * whole
         );
         // No stretch boundary doubles words: no run of four words repeats back to back.
         let doubled = replay.one_pass.windows(8).any(|w| w[..4] == w[4..]);
