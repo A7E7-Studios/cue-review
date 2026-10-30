@@ -407,7 +407,7 @@ describe('project and session workflows', () => {
     // Windows keeps the toggle in the title bar only; the sidebar has no second Hide sidebar button.
     expect(sidebar().queryByRole('button', { name: NAMES.hideSidebar })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
     expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
     expect(screen.queryByRole('button', { name: RETIRED_NAMES.useDarkTheme })).not.toBeInTheDocument();
@@ -469,18 +469,78 @@ describe('layout', () => {
   it('auto-hides the sidebar below 1000px and shows it over the sheet until a recording opens', async () => {
     window.innerWidth = 900;
     const user = await ready();
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
     expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
     await open(user);
     await screen.findByRole('button', { name: 'Seek to here at 0:02' });
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
     await act(async () => { window.innerWidth = 1280; window.dispatchEvent(new Event('resize')); });
     expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'docked');
     expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
+  });
+  it('slides the sidebar out and in', async () => {
+    const user = await review();
+    const app = document.querySelector('.app');
+    expect(app).toHaveAttribute('data-sidebar-motion', 'slide');
+    // Opening the app does not slide.
+    expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    const slot = document.querySelector('.app-sidebar-slot');
+    expect(slot).toHaveAttribute('data-state', 'exiting');
+    expect(slot).toHaveAttribute('inert');
+    expect(app).toHaveAttribute('data-sidebar', 'docked');
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument());
+    expect(app).toHaveAttribute('data-sidebar', 'hidden');
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open'));
+    expect(document.querySelector('.app-sidebar-slot')).not.toHaveAttribute('inert');
+  });
+  it('slides the sidebar over the sheet in a narrow window', async () => {
+    window.innerWidth = 900;
+    const user = await ready();
+    // Opening a recording from the overlay hides it again.
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:02' });
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'entering');
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open'));
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await user.keyboard('{Escape}');
+    expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'exiting');
+    // It leaves over the sheet: the layout stays the overlay until it is gone.
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar', 'overlay');
+    await waitFor(() => expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument());
+  });
+  it('hides the sidebar at once beside live video', async () => {
+    // A new recording shows its source's live preview.
+    const user = await ready();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar-motion', 'instant');
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+    expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
+    // And while recording.
+    await user.keyboard('{Control>}r{/Control}');
+    expect(await screen.findByRole('button', { name: NAMES.stop })).toBeEnabled();
+    expect(document.querySelector('.app')).toHaveAttribute('data-sidebar-motion', 'instant');
+    await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+    expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument();
+  });
+  it('hides the sidebar at once under reduced motion', async () => {
+    document.documentElement.dataset.motion = 'reduced';
+    try {
+      const user = await review();
+      await user.click(screen.getByRole('button', { name: NAMES.hideSidebar }));
+      expect(document.querySelector('.app-sidebar-slot')).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
+      expect(document.querySelector('.app-sidebar-slot')).toHaveAttribute('data-state', 'open');
+    } finally { delete document.documentElement.dataset.motion; }
   });
   it('shows the sidebar when a search starts while it is hidden', async () => {
     window.innerWidth = 900;
@@ -493,7 +553,7 @@ describe('layout', () => {
     expect(screen.getByRole('banner', { name: NAMES.toolbar })).toBeVisible();
     expect(screen.queryByRole('button', { name: NAMES.minimizeWindow })).not.toBeInTheDocument();
     await user.click(sidebar().getByRole('button', { name: NAMES.hideSidebar }));
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: NAMES.showSidebar }));
     expect(sidebar().getByRole('button', { name: 'Review Alpha' })).toBeVisible();
   });
@@ -701,7 +761,7 @@ describe('recording and processing', () => {
     expectCallOrder(windowApi.setMinSize, windowApi.setSize, windowApi.setAlwaysOnTop);
     // The dock moves into the compact layout; focus follows from Compact to Expand.
     expect(screen.getByRole('button', { name: NAMES.expand })).toHaveFocus();
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
     expect(screen.queryByRole('region', { name: NAMES.transcript })).not.toBeInTheDocument();
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
     expect(screen.getByRole('banner', { name: NAMES.titleBar })).toBeVisible();
@@ -1404,8 +1464,8 @@ describe('dialogs, focus and announcements', () => {
     const user = await ready({ platform: 'macos' });
     sidebar().getByRole('button', { name: NAMES.hideSidebar }).focus();
     await user.keyboard('{Enter}');
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: NAMES.showSidebar })).toHaveFocus();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: NAMES.showSidebar })).toHaveFocus());
     await user.keyboard('{Enter}');
     expect(sidebar().getByRole('button', { name: NAMES.hideSidebar })).toHaveFocus();
   });
@@ -1417,8 +1477,8 @@ describe('dialogs, focus and announcements', () => {
     sidebar().getByRole('button', { name: 'Review Alpha' }).focus();
     await user.keyboard('{Enter}');
     await screen.findByRole('button', { name: 'Seek to here at 0:02' });
-    expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: NAMES.showSidebar })).toHaveFocus();
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: NAMES.recordings })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: NAMES.showSidebar })).toHaveFocus());
   });
 
   it('keeps focus on a control that is busy for a moment', async () => {

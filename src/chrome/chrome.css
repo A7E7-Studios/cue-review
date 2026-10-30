@@ -27,12 +27,13 @@
 .chrome-mark { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border-radius: 5px; background: var(--color-accent); }
 .chrome-mark > span { width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--color-on-accent); border-radius: 50%; }
 
-.chrome-icon { width: 34px; height: 28px; flex: none; display: grid; place-items: center; padding: 0; border-radius: var(--radius-field); background: transparent; color: var(--color-text-secondary); }
+.chrome-icon { width: var(--size-chrome-icon-button-width); height: var(--size-chrome-icon-button-height); flex: none; display: grid; place-items: center; padding: 0; border-radius: var(--radius-field); background: transparent; color: var(--color-text-secondary); }
 .chrome-icon:hover { background: var(--color-window-control-hover); color: var(--color-text); }
 .chrome-icon:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 0; }
 .chrome-brand + .chrome-sidebar-toggle { margin-left: 6px; }
 /* Settings and Show sidebar: 8px corners on macOS too (FloatV2ReviewMac). */
 .chrome-toolbar[data-platform='macos'] .chrome-icon { width: 32px; height: 30px; border-radius: 8px; }
+.chrome-toolbar[data-platform='macos'] .chrome-icon > svg { width: 16px; height: 16px; }
 
 /* Fills the bar between the leading controls and Settings; its empty sides are drag regions. */
 .chrome-center { flex: 1; min-width: 0; align-self: stretch; display: flex; align-items: center; justify-content: center; padding: 0 12px; }
@@ -83,6 +84,7 @@
 .window-control { width: var(--size-window-control); height: 100%; display: grid; place-items: center; padding: 0; border-radius: 0; background: transparent; color: var(--color-text); }
 .window-control:hover { background: var(--color-window-control-hover); color: var(--color-text); }
 .window-control-close:hover { background: var(--color-window-close-hover); color: var(--color-on-window-close); }
+.window-glyph { display: block; }
 .window-control:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
 /* The traffic lights end about 78px from the window's leading edge: x 24, then three buttons 20px apart. */

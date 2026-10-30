@@ -77,28 +77,45 @@ function SearchField({ os, value, onChange, input }: { os: Platform; value: stri
   </div>;
 }
 
+// Toolbar icons are 20px in 36×32 buttons on Windows and Linux; macOS draws them at 16px (chrome.css).
 function SidebarToggle({ visible, onToggle }: { visible: boolean; onToggle: () => void }) {
   return <button type="button" className="chrome-icon chrome-sidebar-toggle" aria-label={visible ? NAMES.hideSidebar : NAMES.showSidebar} onClick={onToggle}>
-    <Icon name="panel" size={16} strokeWidth={1.7}/>
+    <Icon name="panel" size={20} strokeWidth={1.6}/>
   </button>;
 }
 
 function SettingsButton({ onOpen }: { onOpen: () => void }) {
   return <button type="button" className="chrome-icon" aria-label={NAMES.settings} aria-haspopup="dialog" onClick={onOpen}>
-    <Icon name="sliders" size={16} strokeWidth={1.7}/>
+    <Icon name="sliders" size={20} strokeWidth={1.6}/>
   </button>;
+}
+
+/**
+ * Window-control glyphs drawn as Windows draws its own: a 10×10 box with 1px lines on whole pixels
+ * (the half-pixel coordinates centre each line on a pixel row). Close is diagonal, so it keeps
+ * anti-aliasing; the others are drawn with crisp edges.
+ */
+const windowGlyphs = {
+  minimize: 'M0 5.5h10',
+  maximize: 'M.5.5h9v9h-9z',
+  restore: 'M.5 2.5h7v7h-7zM2.5 2.5v-2h7v7h-2',
+  close: 'M.5.5l9 9M9.5.5l-9 9',
+} as const;
+function WindowGlyph({ name }: { name: keyof typeof windowGlyphs }) {
+  return <svg className="window-glyph" viewBox="0 0 10 10" width={10} height={10} fill="none" stroke="currentColor" strokeWidth={1}
+    shapeRendering={name === 'close' ? 'geometricPrecision' : 'crispEdges'} aria-hidden="true"><path d={windowGlyphs[name]}/></svg>;
 }
 
 function WindowControls({ maximized, compact = false }: { maximized: boolean; compact?: boolean }) {
   return <div className="window-controls">
     <button type="button" className="window-control" aria-label={NAMES.minimizeWindow} onClick={run(windowApi.minimize)}>
-      <Icon name="minimize" size={10} strokeWidth={1.6}/>
+      <WindowGlyph name="minimize"/>
     </button>
     {!compact && <button type="button" className="window-control" aria-label={maximized ? NAMES.restoreWindow : NAMES.maximizeWindow} onClick={run(windowApi.toggleMaximize)}>
-      <Icon name={maximized ? 'restore' : 'maximize'} size={10} strokeWidth={1.6}/>
+      <WindowGlyph name={maximized ? 'restore' : 'maximize'}/>
     </button>}
     <button type="button" className="window-control window-control-close" aria-label={NAMES.closeWindow} onClick={run(windowApi.close)}>
-      <Icon name="close" size={10} strokeWidth={1.6}/>
+      <WindowGlyph name="close"/>
     </button>
   </div>;
 }
