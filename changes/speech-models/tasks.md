@@ -13,7 +13,7 @@
 
 - [x] 2.1 Download to `.download`, check size and SHA-256, rename; discard otherwise; test: src-tauri/src/deps.rs::tests::a_damaged_model_download_is_discarded
 - [x] 2.2 Start at app start and on a language change; `languageModel` in setup status; `download_language_model`; check: An upgraded app fetches the English model by itself
-- [x] 2.3 `cue setup --install` fetches the language model; test: cargo test --lib cli::
+- [x] 2.3 `cue setup --install` fetches the language model and `cue setup` reports it; test: src-tauri/src/models.rs::tests::the_language_model_is_reported_in_camel_case
 - [x] 2.4 Update README.md (Install transcription); test: node tools/gate/gate.mjs --local
 
 ## 3. Settings (after 2)

@@ -62,7 +62,9 @@ export const backend = {
   microphones: () => call<Microphone[]>('list_microphones'),
   setup: () => call<SetupStatus>('get_setup_status'),
   installTranscription: () => call<void>('install_transcription'),
-  /** Starts the chosen language's model download in the background, or starts it again after a failure. Progress arrives in `setup().languageModel`. */
+  /** The chosen language's model alone, as `setup().languageModel` reports it, without checking the tools: read each second while it downloads. */
+  languageModel: () => call<LanguageModel | null>('get_language_model'),
+  /** Starts the chosen language's model download in the background, or starts it again after a failure; the model reads `downloading` once it returns. Rejects with a message to show, e.g. while transcription is not installed. */
   downloadLanguageModel: () => call<void>('download_language_model'),
   status: () => call<RecordingStatus>('get_recording_status'),
   start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),

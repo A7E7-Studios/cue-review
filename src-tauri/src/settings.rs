@@ -62,11 +62,9 @@ pub fn load(root: &Path) -> Settings {
 /// Validates and normalizes the settings, writes `settings.json` atomically
 /// and returns the settings as stored. An empty vocabulary turns the prompt off.
 pub fn save(root: &Path, settings: &Settings) -> Result<Settings, String> {
-    let language = match settings.language.as_deref() {
-        None | Some("en") => None,
-        Some("de") => Some("de".to_owned()),
-        Some(other) => return Err(format!("Choose English or German, not \"{other}\".")),
-    };
+    // English is the default, so it is not written; an unknown language
+    // (from a hand-edited file) reads as English and is dropped.
+    let language = (language(settings) == "de").then(|| "de".to_owned());
     let stored = Settings {
         vocabulary: normalize_vocabulary(settings.vocabulary.as_deref().unwrap_or(""))?,
         language,
@@ -692,8 +690,13 @@ mod tests {
             save(root.path(), &chosen(Some("en"))).unwrap(),
             Settings::default()
         );
-        let error = save(root.path(), &chosen(Some("fr"))).unwrap_err();
-        assert!(error.contains("English or German"), "{error}");
+        // An unknown language from a hand-edited file reads as English and
+        // never blocks saving the vocabulary.
+        assert_eq!(language(&chosen(Some("fr"))), "en");
+        assert_eq!(
+            save(root.path(), &chosen(Some("fr"))).unwrap(),
+            Settings::default()
+        );
     }
 
     #[test]

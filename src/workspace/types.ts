@@ -233,9 +233,13 @@ export interface SettingsDialogProps {
   installing: boolean;
   onInstall: () => void;
   onCheckAgain: () => void;
-  /** Reads the setup status again: each second while the language model downloads, and after the language changes. */
-  onRefreshSetup: () => void;
-  /** Starts the language model's download, or starts it again after a failure; rejects with a message to show. */
+  /**
+   * Reads the language model's state alone and puts it into `setup`: right after the language
+   * changes or a download starts, then about each second while it downloads, the next read only
+   * after the last reply. Settles once the reply is applied or ignored.
+   */
+  onPollLanguageModel: () => Promise<void>;
+  /** Starts the language model's download, or starts it again after a failure; rejects with a message to show (e.g. while transcription is not installed). */
   onDownloadLanguageModel: () => Promise<void>;
   /** null until loaded. */
   settings: Settings | null;
