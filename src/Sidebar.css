@@ -81,14 +81,14 @@
 .section-heading:hover .section-chevron, .section-toggle:focus-visible .section-chevron { opacity: 1; }
 .recents-heading { min-height: 0; padding: 0 10px 4px; font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); line-height: 1.45; }
 
-.section-options, .session-options { min-width: 26px; min-height: 26px; padding: 3px; color: var(--color-text-secondary); opacity: 0; }
+.section-new, .section-options, .session-options { min-width: 26px; min-height: 26px; padding: 3px; color: var(--color-text-secondary); opacity: 0; }
 /* Centred on the heading text without making the heading taller. */
-.sidebar .section-options { min-width: 24px; min-height: 24px; align-self: flex-start; margin: -3px 0; padding: 2px; }
-.section-options svg, .session-options svg { width: 14px; height: 14px; }
-.section-heading:hover .section-options, .section-heading:focus-within .section-options,
+.sidebar :is(.section-new, .section-options) { min-width: 24px; min-height: 24px; align-self: flex-start; margin: -3px 0; padding: 2px; }
+.section-new svg, .section-options svg, .session-options svg { width: 14px; height: 14px; }
+.section-heading:hover :is(.section-new, .section-options), .section-heading:focus-within :is(.section-new, .section-options),
 .session-row:hover .session-options, .session-row:focus-within .session-options,
 .section-options[aria-expanded=true], .session-options[aria-expanded=true] { opacity: 1; }
-.sidebar .section-options:hover, .sidebar .session-options:hover { background: var(--color-row-hover); color: var(--color-text); }
+.sidebar .section-new:hover, .sidebar .section-options:hover, .sidebar .session-options:hover { background: var(--color-row-hover); color: var(--color-text); }
 
 .session-row { display: flex; position: relative; align-items: center; min-height: var(--size-row); margin-bottom: 1px; border-radius: var(--radius-row); transition: background-color var(--motion-fast) linear; }
 .session-row:not(.active):hover { background: var(--color-row-hover); }
@@ -142,6 +142,10 @@
 .sidebar-menu button:not(.menu-separated) > svg:last-child { margin-left: auto; }
 .sidebar-menu .menu-separated { border-top: 1px solid var(--color-divider); border-radius: 0; margin-top: 4px; padding-top: 9px; }
 .sidebar-menu-title { font-size: var(--font-size-meta); color: var(--color-text-tertiary); padding: 5px 8px 7px; }
+/* Move to section opens beside the recording's menu (placeSubmenu); its trigger stays highlighted. */
+.sidebar-submenu { z-index: 26; animation: sidebar-submenu-in var(--motion-fast) var(--ease-out); }
+@keyframes sidebar-submenu-in { from { opacity: 0; } }
+.sidebar-menu button[aria-expanded='true'] { background: var(--color-row-hover); }
 .section-destinations { max-height: 192px; overflow: auto; scrollbar-width: thin; }
 
 .dragging-section { opacity: .45; }
