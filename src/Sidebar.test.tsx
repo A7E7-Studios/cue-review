@@ -203,6 +203,9 @@ describe('the panel menu', () => {
     await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('button', { name: 'Workspace' }) });
     expect(screen.getByRole('menu', { name: 'Section actions' })).toBeInTheDocument();
     expect(screen.queryByRole('menu', { name: 'Recordings panel actions' })).not.toBeInTheDocument();
+    // A right-click on an item of the open menu keeps that menu.
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('menuitem', { name: 'Rename' }) });
+    expect(screen.getByRole('menu', { name: 'Section actions' })).toBeInTheDocument();
   });
 
   test('the panel menu disables its items while recording', async () => {

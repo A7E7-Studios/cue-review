@@ -29,6 +29,7 @@ where text is typed.
   workspace
 - **THEN** no menu appears
 - **PROOF** test: src/app/useContextMenuGuard.test.ts::suppresses the webview menu outside text fields
+- **PROOF** test: src/App.test.tsx::cancels the webview menu across the workspace and keeps it in text fields
 - **PROOF** desk: open
 
 #### Scenario: Right-clicking a text field keeps its editing menu

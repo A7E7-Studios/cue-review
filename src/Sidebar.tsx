@@ -86,8 +86,8 @@ export function Sidebar(props: SidebarProps) {
     typeahead.current = { text: '', at: 0 };
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
     const outside = (event: PointerEvent) => {
-      const onAnchor = menu.kind !== 'panel' && !!returnFocus.current?.contains(event.target as Node);
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !onAnchor) setMenu(null);
+      if (!(event.target instanceof Node) || menuRef.current?.contains(event.target)) return;
+      if (menu.kind === 'panel' || !returnFocus.current?.contains(event.target)) setMenu(null);
     };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
@@ -110,6 +110,8 @@ export function Sidebar(props: SidebarProps) {
   const openPanelMenu = (event: MouseEvent<HTMLElement>) => {
     if (event.defaultPrevented || isTextField(event.target)) return;
     event.preventDefault();
+    // A right-click inside an open menu leaves that menu as it is.
+    if (event.target instanceof Node && menuRef.current?.contains(event.target)) return;
     const focused = document.activeElement;
     returnFocus.current = focused instanceof HTMLElement && focused !== document.body ? focused : null;
     setMenu({ kind: 'panel', id: '', x: event.clientX, y: event.clientY, moving: false });
