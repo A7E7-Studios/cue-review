@@ -121,6 +121,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [searchTranscripts, setSearchTranscripts] = useState<ReadonlyMap<string, Transcript>>(() => new Map());
   /** The sessions as they are now, for the search window's reader, which starts once per opening. */
   const searchSessions = useRef<Session[]>([]);
+  /** A search result's time, for a recording whose video may not load again (search spec). */
+  const searchSeek = useRef<{ id: string; time: number; request: number } | null>(null);
   /** Each Ctrl/⌘+F asks the transcript to open its find bar. */
   const [findRequest, setFindRequest] = useState(0);
   /** Changing it remounts the <video>, for example to restore playback after a failed delete. */
@@ -453,7 +455,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     return () => { alive = false; };
   }, [searchOpen]);
   /** A search result: the recording, standing paused at the line's time, or at its start. */
-  const openResult = async (id: string, atMs?: number) => {
+  const openResult = (id: string, atMs?: number) => {
     if (!draft && !loading && session?.id === id) {
       // Already open: the video does not load again, so seek it here.
       dismissOverlay();
@@ -461,18 +463,24 @@ export default function App({ platform: requested }: AppProps = {}) {
       seek(atMs ?? 0);
       return;
     }
-    const opening = openSession(id);
-    restorePlayback.current = { id, time: (atMs ?? 0) / 1000, playing: false };
-    await opening;
-    // A new source applies the time when it loads. The same source (the recording was still
-    // shown while another load ran) does not load again: apply it to the video already there.
-    await new Promise(resolve => requestAnimationFrame(resolve));
-    const media = video.current, restore = restorePlayback.current;
-    if (!media || !restore || restore.id !== id || shownId.current !== id || media.readyState < HTMLMediaElement.HAVE_METADATA) return;
-    restorePlayback.current = null;
-    media.pause();
-    media.currentTime = restore.time; setTime(restore.time * 1000);
+    void openSession(id);
+    const time = (atMs ?? 0) / 1000;
+    // A new source applies the time when it loads; the layout effect below covers the same source.
+    restorePlayback.current = { id, time, playing: false };
+    searchSeek.current = { id, time, request: selection.current };
   };
+  // When the chosen recording commits, the video it shows is final. If it is the video already
+  // there (the same source, shown while another load ran), it does not load again: seek it now.
+  // Only for the latest selection, so an earlier choice never acts on a later one.
+  useLayoutEffect(() => {
+    const pending = searchSeek.current, media = video.current;
+    if (!pending || session?.id !== pending.id) return;
+    searchSeek.current = null;
+    if (pending.request !== selection.current || !media || media.readyState < HTMLMediaElement.HAVE_METADATA) return;
+    if (restorePlayback.current?.id === pending.id) restorePlayback.current = null;
+    media.pause();
+    media.currentTime = pending.time; setTime(pending.time * 1000);
+  }, [session]);
   /** Ctrl/⌘+F: Find in the transcript; in focus, the transcript comes back first. */
   const openFind = () => {
     if (!focusVideo) { setFindRequest(value => value + 1); return; }
@@ -814,7 +822,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     {sidebarOverlay && !compact && <div className="app-scrim" aria-hidden="true" onMouseDown={dismissOverlay}/>}
 
     <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} sessions={sessions} sections={projects} transcripts={searchTranscripts}
-      onOpen={(id, atMs) => void openResult(id, atMs)} fallbackFocusRef={sheet}/>
+      onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup).catch(reportFromSettings)}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>

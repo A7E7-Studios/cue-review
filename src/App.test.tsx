@@ -392,6 +392,34 @@ describe('keyboard interaction', () => {
     await waitFor(() => expect(media.currentTime).toBe(1));
     expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:01');
   });
+  it('applies only the latest of two lines chosen while loads run', async () => {
+    transcript = { segments: [
+      { id: 'line1', text: 'Look here', startMs: 1000, endMs: 2000, words: [{ text: 'Look', startMs: 1000, endMs: 1500 }, { text: 'here', startMs: 1500, endMs: 2000 }] },
+      { id: 'line2', text: 'Look there', startMs: 3000, endMs: 4000, words: [] },
+    ] };
+    const user = await ready();
+    await open(user);
+    await screen.findByRole('button', { name: 'Seek to here at 0:01' });
+    const media = document.querySelector('video')!;
+    Object.defineProperty(media, 'readyState', { configurable: true, get: () => HTMLMediaElement.HAVE_METADATA });
+    const pending: (() => void)[] = [];
+    const slow = (id: string) => new Promise<Session>(resolve => { pending.push(() => resolve(sessions.find(item => item.id === id)!)); });
+    backend.session.mockImplementationOnce(slow).mockImplementationOnce(slow).mockImplementationOnce(slow);
+    // A load runs (the row clicked again) while two lines are chosen, one after the other.
+    await user.click(sidebar().getByRole('button', { name: 'Review Alpha' }));
+    for (const line of [/Look here/, /Look there/]) {
+      await user.keyboard('{Control>}k{/Control}');
+      const dialog = await screen.findByRole('dialog', { name: NAMES.search });
+      await user.type(within(dialog).getByRole('combobox'), 'look');
+      await user.click(await within(dialog).findByRole('option', { name: line }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+    // The loads finish in order; only the last choice applies, and the clock agrees with the video.
+    // A frame passes between them, as it would in the app.
+    for (const finish of pending) await act(async () => { finish(); await new Promise(resolve => setTimeout(resolve, 50)); });
+    await waitFor(() => expect(media.currentTime).toBe(3));
+    expect(screen.getByRole('group', { name: NAMES.playback })).toHaveTextContent('0:03');
+  });
   it('searches each transcript as it is when search opens', async () => {
     const user = await ready();
     await user.keyboard('{Control>}k{/Control}');
