@@ -83,9 +83,10 @@ The owner was away for these; each was taken on the measurements above.
   alignment points, which a guess shown while recording never needs). The median delay is
   2.7–3.2 s, and it reaches 8–13 s right after a stretch is finished, which takes about 2.5 s
   with small.en on 4 threads. Getting closer to 2 s needs more threads while recording or a GPU.
-- **Silence.** Audio without speech is skipped only once 28 s of it wait, keeping its last second:
-  skipping 2 s of supposed silence cut off words the detector had not yet found at the very end of
-  a copy.
+- **Silence.** Audio without speech is never sent to Whisper: 28 s of it are skipped but their last
+  second, and so is a cut in the silence before the first word, or one at 30 s before any speech.
+  Skipping as soon as 2 s of supposed silence waited cut off words the detector had not yet found at
+  the very end of a copy.
 - **The transcript at Stop looks final.** It is not marked as about to be replaced, though Q11 had
   provisional words look different while recording: after Stop its words are already the
   language's model's, and marking them would suggest they are guesses. Marking them is a small
