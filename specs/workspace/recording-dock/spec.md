@@ -31,7 +31,7 @@ the second take on changes the dock's width.
   with no "Take 2" label and no caption under it
 - **AND** the transcript shows "Take 2 · recording"
 - **PROOF** test: src/workspace/RecordingDock.test.tsx::RecordingDock shows the take timer, level and locked source for take 2, with no take label or caption
-- **PROOF** test: src/App.test.tsx::record more unloads the video before recording a take, shows it live, and reloads the video with a cache-buster once processing ends
+- **PROOF** test: src/App.test.tsx::record more pauses the video before recording a take, shows it live, and plays the new take once processing ends
 - **PROOF** desk: open
 
 ### Requirement: The bar is always under the video

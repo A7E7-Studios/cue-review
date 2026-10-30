@@ -282,8 +282,6 @@
 .cr-capture-trigger > .cr-capture-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cr-capture-trigger > svg:first-child { width: 17px; height: 17px; }
 .cr-capture-trigger > svg:last-child { width: 12px; height: 12px; color: var(--color-dock-text-secondary); transform: rotate(90deg); }
-/* Why a locked source is locked, read as its description. */
-.cr-capture-reason { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .cr-capture-trigger[aria-expanded='true'] { --cr-bg: rgba(255, 255, 255, .12); --cr-bg-hover: rgba(255, 255, 255, .16); }
 /* Record and Record more: Stop's red, which carries white text at 4.7:1. */
 .cr-record {

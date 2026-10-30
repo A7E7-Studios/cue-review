@@ -11,12 +11,12 @@ import { TrafficLights, usePlatformAttribute } from './Sidebar.stories';
 // do nothing outside the desktop app. macOS draws stand-in traffic lights where the native
 // ones sit. Use the viewport toolbar for 1280 × 820, 900 × 650 and the 520 × 320 compact recorder.
 
-type Scenario = 'fresh' | 'recording' | 'recording-take' | 'processing' | 'takes' | 'stuck-take' | 'source-gone' | 'unavailable' | 'setup' | 'compact';
+type Scenario = 'fresh' | 'recording' | 'recording-take' | 'processing' | 'takes' | 'window-closed' | 'unavailable' | 'setup' | 'compact';
 const FIXTURE: Record<Scenario, FixtureScenario> = {
   fresh: 'fresh', recording: 'recording', 'recording-take': 'recording-take', processing: 'processing',
-  takes: 'takes', 'stuck-take': 'stuck-take', 'source-gone': 'source-gone', unavailable: 'unavailable', setup: 'setup', compact: 'recording-take',
+  takes: 'takes', 'window-closed': 'window-closed', unavailable: 'unavailable', setup: 'setup', compact: 'recording-take',
 };
-const SCENARIOS: Scenario[] = ['fresh', 'recording', 'recording-take', 'processing', 'takes', 'stuck-take', 'source-gone', 'unavailable', 'setup', 'compact'];
+const SCENARIOS: Scenario[] = ['fresh', 'recording', 'recording-take', 'processing', 'takes', 'window-closed', 'unavailable', 'setup', 'compact'];
 interface Args { scenario: Scenario; platform: Platform }
 
 function Workspace({ scenario, platform }: Args) {
@@ -46,20 +46,15 @@ const openTakes: Story['play'] = async ({ canvasElement }) => {
   await userEvent.unhover(canvas.getByRole('button', { name: 'Seek to grid at 0:33' }));
   (canvasElement.ownerDocument.activeElement as HTMLElement | null)?.blur();
 };
-// Take 2 could not be added to video.mp4: Retry and Discard take 2 sit in the transcript's error.
-const openStuckTake: Story['play'] = async ({ canvasElement }) => {
-  const canvas = within(canvasElement);
-  await openLibrary(canvas);
-  await expect(await canvas.findByRole('button', { name: 'Discard take 2' })).toBeVisible();
-  await expect(canvas.getByRole('heading', { name: 'Take 2 is not in the video yet' })).toBeVisible();
-  await expect(canvas.getByRole('button', { name: 'Record more' })).toBeDisabled();
-};
-// The session's window has closed: Record more is refused under the recording bar, offering New recording.
+// The window chosen in the bar has closed: Record more is refused under the recording bar, offering New recording.
 const refuseRecordMore: Story['play'] = async context => {
   await openTakes(context);
   const canvas = within(context.canvasElement);
-  await userEvent.click(canvas.getByRole('button', { name: 'Record more' }));
-  const message = await within(canvas.getByRole('group', { name: 'Recording bar' })).findByRole('alert');
+  const bar = within(canvas.getByRole('group', { name: 'Recording bar' }));
+  await userEvent.click(bar.getByRole('button', { name: 'Display 1' }));
+  await userEvent.click(within(await canvas.findByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'Design review — Figma' }));
+  await userEvent.click(bar.getByRole('button', { name: 'Record more' }));
+  const message = await bar.findByRole('alert');
   await expect(message).toHaveTextContent('no longer available');
   await expect(within(message).getByRole('button', { name: 'New recording' })).toBeVisible();
   (context.canvasElement.ownerDocument.activeElement as HTMLElement | null)?.blur();
@@ -97,10 +92,8 @@ export const WindowsProcessing: Story = { args: { scenario: 'processing' } };
 export const WindowsProcessingDark: Story = { args: { scenario: 'processing' }, globals: dark };
 export const WindowsReviewTakes: Story = { args: { scenario: 'takes' }, play: openTakes };
 export const WindowsReviewTakesDark: Story = { args: { scenario: 'takes' }, globals: dark, play: openTakes };
-export const WindowsStuckTake: Story = { args: { scenario: 'stuck-take' }, play: openStuckTake };
-export const WindowsStuckTakeDark: Story = { args: { scenario: 'stuck-take' }, globals: dark, play: openStuckTake };
-export const WindowsSourceGone: Story = { args: { scenario: 'source-gone' }, play: refuseRecordMore };
-export const WindowsSourceGoneDark: Story = { args: { scenario: 'source-gone' }, globals: dark, play: refuseRecordMore };
+export const WindowsWindowClosed: Story = { args: { scenario: 'window-closed' }, play: refuseRecordMore };
+export const WindowsWindowClosedDark: Story = { args: { scenario: 'window-closed' }, globals: dark, play: refuseRecordMore };
 export const WindowsUnavailable: Story = { args: { scenario: 'unavailable' } };
 export const WindowsUnavailableDark: Story = { args: { scenario: 'unavailable' }, globals: dark };
 export const WindowsSetup: Story = { args: { scenario: 'setup' } };
@@ -119,10 +112,8 @@ export const MacProcessing: Story = { args: { platform: 'macos', scenario: 'proc
 export const MacProcessingDark: Story = { args: { platform: 'macos', scenario: 'processing' }, globals: dark };
 export const MacReviewTakes: Story = { args: { platform: 'macos', scenario: 'takes' }, play: openTakes };
 export const MacReviewTakesDark: Story = { args: { platform: 'macos', scenario: 'takes' }, globals: dark, play: openTakes };
-export const MacStuckTake: Story = { args: { platform: 'macos', scenario: 'stuck-take' }, play: openStuckTake };
-export const MacStuckTakeDark: Story = { args: { platform: 'macos', scenario: 'stuck-take' }, globals: dark, play: openStuckTake };
-export const MacSourceGone: Story = { args: { platform: 'macos', scenario: 'source-gone' }, play: refuseRecordMore };
-export const MacSourceGoneDark: Story = { args: { platform: 'macos', scenario: 'source-gone' }, globals: dark, play: refuseRecordMore };
+export const MacWindowClosed: Story = { args: { platform: 'macos', scenario: 'window-closed' }, play: refuseRecordMore };
+export const MacWindowClosedDark: Story = { args: { platform: 'macos', scenario: 'window-closed' }, globals: dark, play: refuseRecordMore };
 export const MacUnavailable: Story = { args: { platform: 'macos', scenario: 'unavailable' } };
 export const MacUnavailableDark: Story = { args: { platform: 'macos', scenario: 'unavailable' }, globals: dark };
 export const MacSetup: Story = { args: { platform: 'macos', scenario: 'setup' } };
@@ -141,10 +132,8 @@ export const LinuxProcessing: Story = { args: { platform: 'linux', scenario: 'pr
 export const LinuxProcessingDark: Story = { args: { platform: 'linux', scenario: 'processing' }, globals: dark };
 export const LinuxReviewTakes: Story = { args: { platform: 'linux', scenario: 'takes' }, play: openTakes };
 export const LinuxReviewTakesDark: Story = { args: { platform: 'linux', scenario: 'takes' }, globals: dark, play: openTakes };
-export const LinuxStuckTake: Story = { args: { platform: 'linux', scenario: 'stuck-take' }, play: openStuckTake };
-export const LinuxStuckTakeDark: Story = { args: { platform: 'linux', scenario: 'stuck-take' }, globals: dark, play: openStuckTake };
-export const LinuxSourceGone: Story = { args: { platform: 'linux', scenario: 'source-gone' }, play: refuseRecordMore };
-export const LinuxSourceGoneDark: Story = { args: { platform: 'linux', scenario: 'source-gone' }, globals: dark, play: refuseRecordMore };
+export const LinuxWindowClosed: Story = { args: { platform: 'linux', scenario: 'window-closed' }, play: refuseRecordMore };
+export const LinuxWindowClosedDark: Story = { args: { platform: 'linux', scenario: 'window-closed' }, globals: dark, play: refuseRecordMore };
 export const LinuxUnavailable: Story = { args: { platform: 'linux', scenario: 'unavailable' } };
 export const LinuxUnavailableDark: Story = { args: { platform: 'linux', scenario: 'unavailable' }, globals: dark };
 export const LinuxSetup: Story = { args: { platform: 'linux', scenario: 'setup' } };
@@ -183,27 +172,8 @@ export const RecordMoreThenStop: Story = {
     await waitFor(() => expect(canvas.getByRole('button', { name: 'Record more' })).toBeEnabled());
   },
 };
-export const DiscardStuckTake: Story = {
-  args: { scenario: 'stuck-take' },
-  play: async context => {
-    await openStuckTake(context);
-    const canvas = within(context.canvasElement);
-    const body = within(context.canvasElement.ownerDocument.body);
-    await userEvent.click(canvas.getByRole('button', { name: 'Discard take 2' }));
-    const dialog = await body.findByRole('alertdialog', { name: 'Discard take 2?' });
-    await expect(dialog).toHaveTextContent('Its recording stays in the session folder but is removed from the timeline.');
-    await expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Discard take 2' }));
-    // The toast fades in, so its live region is checked rather than its opacity.
-    await waitFor(() => expect(context.canvasElement.querySelector('.app-toast-region')).toHaveTextContent('Take 2 discarded'));
-    await waitFor(() => expect(canvas.getByRole('button', { name: 'Record more' })).toBeEnabled());
-    await expect(canvas.queryByRole('button', { name: 'Discard take 2' })).not.toBeInTheDocument();
-    // video.mp4 loads again, under a version that counts the discarded take.
-    await waitFor(() => expect(context.canvasElement.querySelector('video')?.getAttribute('src')).toContain('?v=2-80000'));
-  },
-};
-export const SourceGoneNewRecording: Story = {
-  args: { scenario: 'source-gone' },
+export const WindowClosedNewRecording: Story = {
+  args: { scenario: 'window-closed' },
   play: async context => {
     await refuseRecordMore(context);
     const canvas = within(context.canvasElement);
@@ -212,6 +182,18 @@ export const SourceGoneNewRecording: Story = {
     await expect(canvas.getByRole('heading', { level: 1 })).toHaveTextContent('New recording');
     await expect(canvas.queryByRole('alert')).not.toBeInTheDocument();
     await expect(canvas.getByRole('button', { name: 'Record' })).toBeEnabled();
+  },
+};
+export const WindowClosedAnotherSource: Story = {
+  args: { scenario: 'window-closed' },
+  play: async context => {
+    await refuseRecordMore(context);
+    const canvas = within(context.canvasElement);
+    const bar = within(canvas.getByRole('group', { name: 'Recording bar' }));
+    await userEvent.click(bar.getByRole('button', { name: 'Design review — Figma' }));
+    await userEvent.click(within(await canvas.findByRole('group', { name: 'Capture sources' })).getByRole('button', { name: 'Display 1' }));
+    await userEvent.click(bar.getByRole('button', { name: 'Record more' }));
+    await expect(await canvas.findByRole('timer', { name: 'Take 3 elapsed time' })).toBeVisible();
   },
 };
 export const DeleteConfirmation: Story = {

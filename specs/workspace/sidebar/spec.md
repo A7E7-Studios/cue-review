@@ -68,7 +68,7 @@ menu key reaches it from the keyboard.
 - **THEN** the sidebar's menu opens with "New session" and "New section" disabled, and "New
   session" in the sidebar is dimmed
 - **PROOF** test: src/Sidebar.test.tsx::the sidebar menu opens the sidebar menu with both items disabled while recording
-- **PROOF** test: src/App.test.tsx::record more unloads the video before recording a take, shows it live, and reloads the video with a cache-buster once processing ends
+- **PROOF** test: src/App.test.tsx::record more pauses the video before recording a take, shows it live, and plays the new take once processing ends
 - **PROOF** desk: open
 
 ### Requirement: Move to section is a submenu

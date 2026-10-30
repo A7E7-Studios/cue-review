@@ -29,33 +29,6 @@ export function NameDialog({ state, busy, error, fallbackFocusRef, onChange, onC
   </Dialog>;
 }
 
-/**
- * Confirms dropping a take that cannot be added to video.mp4. Its files stay in takes/<N>/, but
- * the app offers no way to put it back on the timeline, so Cancel takes the initial focus as in
- * the delete confirmation.
- */
-export function DiscardTakeDialog({ take, busy, error, fallbackFocusRef, onClose, onDiscard }: {
-  /** The take to discard, or null when closed. */
-  take: number | null;
-  busy: boolean;
-  error: string;
-  /** Where focus goes when the Discard take button is gone after closing. */
-  fallbackFocusRef: RefObject<HTMLElement | null>;
-  onClose: () => void;
-  onDiscard: () => void;
-}) {
-  const cancel = useRef<HTMLButtonElement>(null);
-  return <Dialog open={take !== null} onClose={onClose} title={take === null ? '' : NAMES.discardTakeDialog(take)} role="alertdialog" className="app-dialog discard-dialog"
-    description="Its recording stays in the session folder but is removed from the timeline."
-    busy={busy} initialFocusRef={cancel} fallbackFocusRef={fallbackFocusRef}>
-    {error && <p className="dialog-error" role="alert">{error}</p>}
-    <div className="dialog-actions">
-      <button ref={cancel} type="button" className="dialog-button" disabled={busy} onClick={onClose}>{NAMES.cancel}</button>
-      <button type="button" className="dialog-button danger-button" disabled={busy} onClick={onDiscard}>{busy ? 'Discarding…' : NAMES.discardTake(take ?? 0)}</button>
-    </div>
-  </Dialog>;
-}
-
 /** The permanent-delete confirmation. It names only what the recording folder holds. */
 export function DeleteRecordingDialog({ target, busy, error, restoreFocusRef, fallbackFocusRef, onClose, onDelete }: {
   target: { id: string; name: string } | null;

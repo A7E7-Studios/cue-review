@@ -158,11 +158,6 @@ export interface CaptureControlsProps {
   onRefreshMicrophones: () => void;
   /** Disables the source picker (recording or busy). */
   locked: boolean;
-  /**
-   * Review: the picker shows the session's own source, because a take records the session's source.
-   * It stays focusable but inert (aria-disabled), titled and described by SOURCE_LOCKED.
-   */
-  sourceLocked?: boolean;
   /** Disables the microphone picker. */
   busy: boolean;
   /** Review: Record continues the session as a new take, and its tooltip says so. */
@@ -175,7 +170,7 @@ export interface CaptureControlsProps {
   onRecord: () => void;
   /** Why Record more failed, shown under the bar as an alert, with NAMES.newRecording and NAMES.dismissError. */
   recordMoreError?: string;
-  /** Starts a new recording instead, for a source that is gone. */
+  /** Starts a new recording instead of another take. */
   onNewRecording?: () => void;
   onDismissRecordMoreError?: () => void;
 }
@@ -225,11 +220,8 @@ export interface TranscriptPaneProps {
   error?: string;
   onRetry?: () => void;
   retryDisabled?: boolean;
-  /** Another action is under way: Retry and Discard take stay focusable but inert (aria-disabled). */
+  /** Another action is under way: Retry stays focusable but inert (aria-disabled). */
   retryBusy?: boolean;
-  /** A take stuck being added to video.mp4: the error also offers NAMES.discardTake(discardTake). */
-  discardTake?: number;
-  onDiscardTake?: () => void;
 }
 
 /** Settings → Appearance, capability statuses, technical details and the vocabulary (decision 14, C5). */
@@ -346,7 +338,6 @@ export const NAMES = {
   returnToPlayback: 'Return to playback',
   backToLive: 'Back to live',
   retryTranscription: 'Retry transcription',
-  discardTake: (take: number) => `Discard take ${take}`,
 
   // Dialogs and notices
   settingsDialog: 'Settings',
@@ -364,7 +355,6 @@ export const NAMES = {
   recordingNameDialog: 'Recording name',
   deleteRecordingDialog: 'Delete recording?',
   deleteRecording: 'Delete recording',
-  discardTakeDialog: (take: number) => `Discard take ${take}?`,
   dismissError: 'Dismiss error',
 } as const;
 

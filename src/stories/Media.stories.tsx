@@ -9,7 +9,7 @@ import { RecordingDock } from '../workspace/RecordingDock';
 import { SessionHeader } from '../workspace/SessionHeader';
 import { TranscriptPane } from '../workspace/TranscriptPane';
 import type { CaptureMenu, TranscriptPaneProps } from '../workspace/types';
-import { SOURCE_GONE, takeTwoLiveTranscript, takeTwoStartMs, transcript as firstTakeTranscript, twoTakeSession, twoTakeTranscript } from './fixtures';
+import { takeTwoLiveTranscript, takeTwoStartMs, transcript as firstTakeTranscript, twoTakeSession, twoTakeTranscript, WINDOW_CLOSED } from './fixtures';
 
 // The recorded screen from the Float v2 mocks. The review video is a still: the
 // <video> shows it as its poster and never loads media.
@@ -21,19 +21,17 @@ const sources: CaptureSource[] = [
   { id: 'quest', name: 'Quest 3', kind: 'quest', available: true },
   { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false, detail: 'Reconnect this camera and refresh, or choose another source.' },
 ];
-/** The session's window in 'source-gone': it has closed, so it is no longer listed and the bar names it the original source. */
-const closedWindow: CaptureSource = { id: 'window:closed', name: 'Original source', kind: 'window', available: false };
 const microphones = [{ id: 'microphone', name: 'Studio microphone' }, { id: 'headset', name: 'Headset microphone' }];
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const recordingTakeTwo: Transcript = { takes: [{ index: 1, startMs: 0 }], segments: [...takeOneSegments, ...takeTwoLiveTranscript.segments] };
 
-// 'source-gone': Record more was refused because the session's window has closed.
-type Scenario = 'review' | 'recording-take-2' | 'recording-first' | 'processing' | 'error' | 'no-speech' | 'no-video' | 'source-gone' | 'draft' | 'draft-unavailable';
+// 'window-closed': Record more was refused because the window chosen in the bar has closed since it was listed.
+type Scenario = 'review' | 'recording-take-2' | 'recording-first' | 'processing' | 'error' | 'no-speech' | 'no-video' | 'window-closed' | 'draft' | 'draft-unavailable';
 interface Args { scenario: Scenario; compact: boolean; focused: boolean }
 
 function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
-  const review = ['review', 'processing', 'error', 'no-speech', 'no-video', 'source-gone'].includes(scenario);
-  const [recordMoreError, setRecordMoreError] = useState(scenario === 'source-gone' ? SOURCE_GONE : '');
+  const review = ['review', 'processing', 'error', 'no-speech', 'no-video', 'window-closed'].includes(scenario);
+  const [recordMoreError, setRecordMoreError] = useState(scenario === 'window-closed' ? WINDOW_CLOSED : '');
   const recording = scenario.startsWith('recording');
   const draft = scenario.startsWith('draft');
   const take = scenario === 'recording-take-2' ? 2 : 1;
@@ -44,7 +42,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const [muted, setMuted] = useState(false);
   const [compactMode, setCompactMode] = useState(compact);
   const [menu, setMenu] = useState<CaptureMenu | null>(null);
-  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : 'monitor:1');
+  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : scenario === 'window-closed' ? 'window' : 'monitor:1');
   const [microphoneId, setMicrophoneId] = useState('microphone');
   const [systemAudio, setSystemAudio] = useState(false);
   const [notice, setNotice] = useState('');
@@ -75,23 +73,23 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const showTranscript = !draft && !focused && !compactMode;
 
   const bar = {
-    sources, microphones, microphoneId, microphoneUnavailable: false, muted, menu, onMenu: setMenu, onSelectMicrophone: setMicrophoneId, onMuted: setMuted,
+    sources, source, systemAudio, onSelectSource: setSourceId, onSystemAudio: setSystemAudio,
+    microphones, microphoneId, microphoneUnavailable: false, muted, menu, onMenu: setMenu, onSelectMicrophone: setMicrophoneId, onMuted: setMuted,
     onRefreshSources: () => setNotice('Refresh selected.'), onRefreshMicrophones: () => setNotice('Refresh selected.'), locked: false, busy: false,
   };
   const controls = recording
     ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={0.0126} sourceName="Display 1" hasMicrophone microphoneName="Microphone (HD Pro Webcam C920)" muted={muted} onMuted={setMuted}
         compact={compactMode} onToggleCompact={() => setCompactMode(value => !value)} stopDisabled={false} onStop={() => setNotice('Stop selected.')}/>
     : draft
-      ? <CaptureControls {...bar} source={source} systemAudio={systemAudio} onSelectSource={setSourceId} onSystemAudio={setSystemAudio}
+      ? <CaptureControls {...bar}
           recordLabel="Record" recordDisabled={!source?.available} onRecord={() => setNotice('Record selected.')}/>
       : <>
         <PlaybackBar timeMs={time} durationMs={duration} segments={segments} takes={twoTakeTranscript.takes} onSeek={seek}
           playing={playing} canPlay={playable} onTogglePlay={() => setPlaying(value => !value)} speed={speed}
           onCycleSpeed={() => setSpeed(value => SPEEDS[(SPEEDS.indexOf(value) + 1) % SPEEDS.length])} focused={focused}
           onToggleFocus={() => setFocused(value => !value)}/>
-        <CaptureControls {...bar} review sourceLocked source={scenario === 'source-gone' ? closedWindow : sources[0]} systemAudio={false} onSelectSource={() => {}} onSystemAudio={() => {}}
-          recordLabel="Record more" recordDisabled={scenario === 'processing'}
-          onRecord={() => scenario === 'source-gone' ? setRecordMoreError(SOURCE_GONE) : setNotice('Record more selected.')}
+        <CaptureControls {...bar} review recordLabel="Record more" recordDisabled={scenario === 'processing' || !source?.available}
+          onRecord={() => scenario === 'window-closed' && sourceId === 'window' ? setRecordMoreError(WINDOW_CLOSED) : setNotice('Record more selected.')}
           recordMoreError={recordMoreError || undefined} onNewRecording={() => setNotice('New recording selected.')} onDismissRecordMoreError={() => setRecordMoreError('')}/>
       </>;
 
@@ -115,7 +113,7 @@ const meta = {
   title: 'Workspace/Media',
   component: Workspace,
   args: { scenario: 'review', compact: false, focused: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-first', 'processing', 'error', 'no-speech', 'no-video', 'source-gone', 'draft', 'draft-unavailable'] } },
+  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-first', 'processing', 'error', 'no-speech', 'no-video', 'window-closed', 'draft', 'draft-unavailable'] } },
   render: args => <Workspace key={`${args.scenario}-${args.compact}-${args.focused}`} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Workspace>;
@@ -137,9 +135,9 @@ export const Processing: Story = { args: { scenario: 'processing' } };
 export const TranscriptError: Story = { args: { scenario: 'error' } };
 export const NoSpeech: Story = { args: { scenario: 'no-speech' } };
 export const NoVideo: Story = { args: { scenario: 'no-video' } };
-export const RecordMoreSourceGone: Story = { args: { scenario: 'source-gone' } };
-export const RecordMoreSourceGoneDark: Story = { args: { scenario: 'source-gone' }, globals: { theme: 'dark' } };
-export const RecordMoreSourceGoneSmallWindow: Story = { args: { scenario: 'source-gone' }, globals: { viewport: { value: 'small', isRotated: false } } };
+export const RecordMoreWindowClosed: Story = { args: { scenario: 'window-closed' } };
+export const RecordMoreWindowClosedDark: Story = { args: { scenario: 'window-closed' }, globals: { theme: 'dark' } };
+export const RecordMoreWindowClosedSmallWindow: Story = { args: { scenario: 'window-closed' }, globals: { viewport: { value: 'small', isRotated: false } } };
 export const Draft: Story = { args: { scenario: 'draft' } };
 export const DraftSourceUnavailable: Story = { args: { scenario: 'draft-unavailable' } };
 export const DraftCompactSize: Story = { args: { scenario: 'draft' }, globals: { viewport: { value: 'compact', isRotated: false } } };
