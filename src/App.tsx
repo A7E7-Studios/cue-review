@@ -626,23 +626,31 @@ export default function App({ platform: requested }: AppProps = {}) {
   const reportFromSettings = (problem: unknown) => (dialogOpen.current ? reportInDialog : report)(problem);
   const install = async () => {
     setInstalling(true); setDialogError('');
-    try { await backend.installTranscription(); await readSetup(backend.setup, setSetup); setNotice('Transcription tools installed'); }
+    try { await backend.installTranscription(); await readSetup(); setNotice('Transcription tools installed'); }
     catch (problem) { reportFromSettings(problem); }
     finally { setInstalling(false); }
   };
-  /** Shows a setup reply unless a reply to a later read, full or the language model alone, is already shown. */
-  const readSetup = async <T,>(read: () => Promise<T>, show: (value: T) => void, wanted = () => true) => {
+  /**
+   * A full setup reply always shows the tools; its language model only when no later read has shown the
+   * model already. The light poll shows only the model, and only while Settings is open.
+   */
+  const readSetup = async () => {
     const ticket = ++setupReads.current.sent;
-    const value = await read();
-    if (ticket < setupReads.current.shown || !wanted()) return;
-    setupReads.current.shown = ticket;
-    show(value);
+    const value = await backend.setup();
+    const stale = ticket < setupReads.current.shown;
+    if (!stale) setupReads.current.shown = ticket;
+    setSetup(current => stale && current ? { ...value, languageModel: current.languageModel } : value);
   };
   /** Settings reads it on opening and on Check again. */
-  const refreshSetup = () => void readSetup(backend.setup, setSetup).catch(reportFromSettings);
-  /** The light read Settings polls while the language model downloads: only the model changes, and only while Settings is open. */
-  const pollLanguageModel = () => readSetup(backend.languageModel,
-    model => setSetup(current => current && { ...current, languageModel: model ?? undefined }), () => settingsShown.current);
+  const refreshSetup = () => void readSetup().catch(reportFromSettings);
+  /** The light read Settings polls while the language model downloads. */
+  const pollLanguageModel = async () => {
+    const ticket = ++setupReads.current.sent;
+    const model = await backend.languageModel();
+    if (ticket < setupReads.current.shown || !settingsShown.current) return;
+    setupReads.current.shown = ticket;
+    setSetup(current => current && { ...current, languageModel: model ?? undefined });
+  };
   const openSettings = () => {
     setDialogError(''); setSettingsOpen(true);
     backend.settings().then(setSettings).catch(reportFromSettings);
