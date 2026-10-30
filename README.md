@@ -2,7 +2,7 @@
   <img src="src-tauri/icons/128x128.png" width="80" height="80" alt="CueReview app icon">
 </p>
 
-<h1 align="center">CueReview</h1>
+<h1 align="center">FasterReview</h1>
 
 <p align="center">
   <strong>Show it. Say it. Fix it.</strong><br>
@@ -10,22 +10,25 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/A7E7-Studios/cue-review/releases/latest"><strong>Download CueReview</strong></a> ·
+  <a href="https://github.com/A7E7-Studios/cue-review/releases/latest"><strong>Download the desktop app</strong></a> ·
+  <a href="#review-with-faster-spec">faster-spec workflow</a> ·
   <a href="#install">Get started</a> ·
   <a href="#workflow">Workflow</a> ·
   <a href="#agent-cli">Agent CLI</a>
 </p>
 
-CueReview turns a spoken walkthrough into feedback your coding agent can inspect. Record what you see and explain what needs to change, then review the video beside a searchable transcript. **Copy for agent** gives your agent the local session reference and CLI instructions to retrieve the words, frames and clips it needs.
+FasterReview turns a spoken walkthrough into feedback your coding agent can inspect. Show a bug on your desktop, walk through an Android app or review a Quest experience, and say what should change. The recording, transcript and supported pointer or touch data give your agent the evidence behind your words.
+
+The desktop app and release packages are named **CueReview**, with **`cue`** as the agent CLI. The installation guide and commands below use those names.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/cuereview-dark.png">
-  <img src="docs/images/cuereview-light.png" width="1280" alt="CueReview in a rounded macOS app window with recordings in the sidebar, video playback, a word-highlighted transcript, Record more and Copy for agent.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/faster-review-hero-dark.svg">
+  <img src="docs/images/faster-review-hero-light.svg" width="1280" alt="Illustrated Android phone with a touch indicator and spoken feedback: This button doesn’t respond when I tap here. Android capture connects to the desktop over USB.">
 </picture>
 
-<p align="center"><sub>The CueReview macOS workspace in light and dark themes, shown with a sample review from the UI workshop.</sub></p>
+<p align="center"><sub>Illustration of an Android review captured over USB.</sub></p>
 
-## Why CueReview
+## Why FasterReview
 
 - **Show the issue as you explain it.** Capture a display, window or supported Android/Quest device with spoken commentary. Useful for bug reports, design feedback and testing walkthroughs; see [platform support and setup](#install).
 - **Revisit a moment by its words.** Click transcript words to seek, search recordings by what was said, and add another take with **Record more**.
@@ -33,6 +36,28 @@ CueReview turns a spoken walkthrough into feedback your coding agent can inspect
 - **Keep your review local.** No account or hosted transcription service. Recordings stay on your computer, and transcription works offline after the initial speech setup.
 
 **Record → Review → Hand off.** Open a fresh session, talk through the changes, then click **Copy for agent** and paste the result into your agent's chat. Follow the [workflow](#workflow) for recording and playback controls.
+
+## Review with faster-spec
+
+[faster-spec](https://github.com/A7E7-Studios/faster-spec) gives agent-built software living specs, tests and an owner review. FasterReview supplies the visual and spoken evidence for that review:
+
+1. **Build with faster-spec.** Its spec, design and ship workflow takes a request through to a built change.
+2. **Show and tell.** Open CueReview and record your walkthrough. Say what you approve, point out bugs and explain what needs to change.
+3. **Hand the evidence to triage.** Paste **Copy for agent** into your agent's chat and ask it to use [faster-spec's triage skill](https://github.com/A7E7-Studios/faster-spec/blob/main/.agents/skills/triage/SKILL.md). It turns your review into recorded decisions and follow-up changes.
+
+The Solution map in faster-spec also offers **Start review** to open the recorder. FasterReview works on its own with any coding agent that can run the local `cue` CLI.
+
+<details>
+<summary><strong>See the desktop review workspace</strong></summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/cuereview-dark.png">
+  <img src="docs/images/cuereview-light.png" width="1280" alt="CueReview in a rounded macOS app window with recordings in the sidebar, video playback, a word-highlighted transcript, Record more and Copy for agent.">
+</picture>
+
+The CueReview macOS workspace in light and dark themes, shown with a sample review from the UI workshop.
+
+</details>
 
 ## Install
 
