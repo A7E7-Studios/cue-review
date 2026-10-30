@@ -23,10 +23,12 @@ accurate as transcribing the whole take.
 ### Requirement: Speech is transcribed while recording, so Stop leaves little to do
 The app SHALL cut a take's speech into stretches while the recording goes on, transcribe each
 finished stretch once with the language's model, and make the take's transcript from them at Stop,
-because the person should not wait after Stop for the whole take to be transcribed. A stretch is
-cut once 28 s of audio wait: at the last pause of at least 0.6 s between 10 and 30 s in; without
-one, past 30 s, in the middle of the longest gap of at least 0.2 s, the silence before the first
-word included; else at 30 s. Audio without speech is skipped, all but its last second.
+because the person should not wait after Stop for the whole take to be transcribed. A stretch is cut
+once 28 s of audio wait: at the last pause of at least 0.6 s between 10 and 30 s in; without one,
+past 30 s, in the middle of the longest gap of at least 0.2 s, the silence before the first word
+included; else at 30 s. Stretches without speech are skipped untranscribed: a cut in the silence
+before the first word, one at 30 s before any speech, and 28 s without speech, of which the last
+second is kept.
 
 #### Scenario: The transcript is ready seconds after Stop
 - **GIVEN** a take recorded with a PC microphone or system audio, of any length
