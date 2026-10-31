@@ -26,6 +26,10 @@ identity for team 2RZUB2TKD6 is already available on the owner's Mac.
 - **Q5 Scope and design**: The owner approved "Local builds + releases (Recommended)" for the
   linked design: existing Developer ID, unchanged app identifier and privacy protections, an actual
   update test without resetting permission, and separate review before any CI credential transfer.
+- **Credential decision**: After reviewing the concrete transfer and access policy, the owner
+  chose "Keep release credentials local for now". Deliver the verified local fix and prepared CI
+  implementation without exporting the key or configuring GitHub access. CI credential provisioning
+  and a trusted signed release run are deferred; macOS CI packaging fails closed until configured.
 - The transition from ad-hoc signing may need one final permission refresh. Capture permissions
   remain controlled by macOS; the fix does not bypass consent or promise to override revocation.
 
@@ -36,8 +40,8 @@ identity for team 2RZUB2TKD6 is already available on the owner's Mac.
 - Store CI signing material in a protected macos-signing environment rather than repository-wide
   secrets. Restrict deployments to main and release tags; do not expose it to PR code.
 - Workflow paths are protected under AGENTS.md, so the owner merges the finished PR.
-- No private signing key has been exported. Credential transfer and environment setup need the
-  owner's final approval of their concrete destination and access policy.
+- No private signing key is exported or uploaded. Credential transfer and environment setup are
+  deferred by the owner; a later transfer needs fresh explicit approval.
 
 ## Out of scope
 

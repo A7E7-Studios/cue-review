@@ -10,11 +10,11 @@
 
 - [x] 2.1 Isolate trusted signing jobs from PR code and use temporary keychains; test: scripts/macos-ci-signing.node-test.mjs
 - [x] 2.2 Document exact protected environment and credential setup without exporting keys; test: node tools/gate/gate.mjs --local
-- [ ] 2.3 Obtain final owner approval before configuring environment access or transferring signing credentials; test: read back the protected environment and secret names without exposing their values
+- [x] 2.3 Record the owner's decision to keep credentials local and defer CI provisioning; test: read-only GitHub environment and secret-name checks confirm no setup or upload
 
 ## 3. Verification and delivery (after 1 and 2)
 
 - [x] 3.1 Verify two different signed artifacts satisfy each other's designated requirement; test: codesign --verify --strict -R
 - [x] 3.2 Install successive Developer ID builds and record without resetting permission on update; check: Screen recording remains available after an update
-- [ ] 3.3 Run required suites, strict gate and independent review; test: docs/VERIFICATION.md
-- [ ] 3.4 Hand over the protected workflow PR for owner merge and leave owner proof open; check: Screen recording remains available after an update
+- [x] 3.3 Run required suites, strict gate and independent review; test: docs/VERIFICATION.md
+- [x] 3.4 Hand over the protected workflow PR for owner merge and leave owner proof open; check: Screen recording remains available after an update
