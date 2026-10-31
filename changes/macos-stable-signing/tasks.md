@@ -2,15 +2,15 @@
 
 ## 1. Stable package signing
 
-- [x] 1.1 Test identity selection and refusal of missing, ambiguous or wrong-team credentials; test: scripts/macos-signing.test.mjs
+- [x] 1.1 Test identity selection and refusal of missing, ambiguous or wrong-team credentials; test: scripts/macos-signing.node-test.mjs
 - [ ] 1.2 Sign all shipped executables and app consistently while retaining hardened runtime and entitlements; test: scripts/verify-bundle.mjs
 - [x] 1.3 Update the root README and architecture for stable signing; test: node tools/gate/gate.mjs --local
 
 ## 2. Trusted release CI (independent of 1)
 
-- [x] 2.1 Isolate trusted signing jobs from PR code and use temporary keychains; test: scripts/macos-ci-signing.test.mjs
+- [x] 2.1 Isolate trusted signing jobs from PR code and use temporary keychains; test: scripts/macos-ci-signing.node-test.mjs
 - [x] 2.2 Document exact protected environment and credential setup without exporting keys; test: node tools/gate/gate.mjs --local
-- [ ] 2.3 Obtain final owner approval before configuring environment access or transferring signing credentials; check: Signed releases retain the approved identity
+- [ ] 2.3 Obtain final owner approval before configuring environment access or transferring signing credentials; test: read back the protected environment and secret names without exposing their values
 
 ## 3. Verification and delivery (after 1 and 2)
 

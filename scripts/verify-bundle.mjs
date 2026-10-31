@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MACOS_APP_IDENTIFIER, assertDeveloperIdSignature, developerIdRequirement } from './macos-signing.mjs';
+import { MACOS_APP_IDENTIFIER, assertCaptureEntitlements, assertDeveloperIdSignature, developerIdRequirement, needsCaptureEntitlements } from './macos-signing.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 if (process.platform === 'win32' && process.env.CI !== 'true') throw new Error('The Windows installer smoke check is restricted to disposable CI runners because installation changes the per-user app registration.');
@@ -19,6 +19,10 @@ function run(command, argv, capture = false, input) {
 }
 function filesIn(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? filesIn(join(dir, entry.name)) : [join(dir, entry.name)]);
+}
+function verifyCaptureEntitlements(binary) {
+  assertCaptureEntitlements(JSON.parse(run('plutil', ['-convert', 'json', '-o', '-', '-'], true,
+    run('codesign', ['--display', '--entitlements', '-', '--xml', binary], true))));
 }
 let mountedDmg;
 try {
@@ -50,17 +54,14 @@ try {
     run('codesign', ['--verify', '--deep', '--strict', app]);
     run('codesign', ['--verify', '--strict', '-R', developerIdRequirement(MACOS_APP_IDENTIFIER), app]);
     assertDeveloperIdSignature(run('codesign', ['--display', '--verbose=4', app], 'stderr'), MACOS_APP_IDENTIFIER);
-    const entitlements = JSON.parse(run('plutil', ['-convert', 'json', '-o', '-', '-'], true,
-      run('codesign', ['--display', '--entitlements', '-', '--xml', app], true)));
-    for (const entitlement of ['com.apple.security.device.camera', 'com.apple.security.device.audio-input']) {
-      if (entitlements[entitlement] !== true) throw new Error(`Packaged macOS app is missing enabled entitlement ${entitlement}.`);
-    }
+    verifyCaptureEntitlements(app);
     resourceDir = join(app, 'Contents/Resources');
     cli = join(resourceDir, 'cue');
     for (const binary of [join(app, 'Contents/MacOS/cuereview'), join(app, 'Contents/MacOS/cue'), cli, ...['whisper-cli', 'whisper-vad-speech-segments'].map(name => join(resourceDir, 'tools/whisper-b5454', name))]) {
       const identifier = basename(binary) === 'cuereview' ? MACOS_APP_IDENTIFIER : basename(binary);
       run('codesign', ['--verify', '--strict', '-R', developerIdRequirement(identifier), binary]);
       assertDeveloperIdSignature(run('codesign', ['--display', '--verbose=4', binary], 'stderr'), identifier);
+      if (needsCaptureEntitlements(binary)) verifyCaptureEntitlements(binary);
     }
   } else throw new Error(`Unsupported host: ${process.platform}`);
   if (!existsSync(cli)) throw new Error(`Bundled CLI is missing: ${cli}`);

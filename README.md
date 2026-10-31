@@ -212,7 +212,10 @@ Pull requests run `.github/workflows/ci.yml` on Windows x64, Linux x64 and macOS
 
 `node scripts/package.mjs` requires a valid Developer ID Application identity for team
 `2RZUB2TKD6`. It selects the unique matching identity in the local Keychain, or the exact certificate
-name/SHA-1 in `APPLE_SIGNING_IDENTITY`. `APPLE_KEYCHAIN` selects an explicit keychain. Missing,
+name/SHA-1 in `APPLE_SIGNING_IDENTITY`. `APPLE_KEYCHAIN` selects an explicit keychain, which must
+already appear in `security list-keychains -d user` so Tauri can sign the final bundle. Add a custom
+keychain to the user search list before packaging, preserving the existing entries; packaging
+checks this prerequisite without changing the list. Missing,
 ambiguous, wrong-team and ad-hoc identities fail before the expensive build. The app retains bundle
 identifier `studio.a7e7.cuereview`, hardened runtime and camera/microphone entitlements. Both the
 app and bundled executables are signed with the selected identity and secure timestamps.
@@ -238,8 +241,9 @@ explicit owner authorization. Trusted macOS jobs import it into a temporary keyc
 signing and remove the keychain and certificate afterward; missing credentials fail packaging.
 
 The installer smoke check validates the final app's Apple Developer ID chain, team, identifier,
-hardened runtime and capture entitlements, plus each bundled executable's signing identity. Run
-`node --test scripts/macos-signing.test.mjs scripts/macos-ci-signing.test.mjs` for signing-policy
+hardened runtime and capture entitlements, plus each bundled executable's signing identity and
+the camera/microphone entitlements on both packaged CLI copies. Run
+`node --test scripts/macos-signing.node-test.mjs scripts/macos-ci-signing.node-test.mjs` for signing-policy
 regressions.
 
 

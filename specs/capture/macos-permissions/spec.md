@@ -34,7 +34,7 @@ because macOS identifies authorized apps by their designated code requirement ac
 - **WHEN** a macOS distribution package is requested
 - **THEN** packaging fails with actionable signing guidance
 - **AND** it does not silently substitute an ad-hoc signature
-- **PROOF** test: scripts/macos-signing.test.mjs
+- **PROOF** test: scripts/macos-signing.node-test.mjs
 
 ### Requirement: Signed releases retain the approved identity
 The installer verification SHALL require the approved signing identity, hardened runtime and
@@ -43,7 +43,7 @@ capture entitlements, because a valid but incompatible signature can discard exi
 #### Scenario: A signed release artifact is checked
 - **WHEN** the macOS installer smoke check inspects the final app and bundled executables
 - **THEN** it rejects ad-hoc signatures or an unexpected signing team or app identifier
-- **AND** it requires hardened runtime and the app's camera and audio-input entitlements
+- **AND** it requires hardened runtime and camera and audio-input entitlements on the app and both packaged CLI copies
 - **PROOF** test: scripts/verify-bundle.mjs
 
 ### Requirement: Pull requests cannot use release signing credentials
@@ -54,4 +54,4 @@ temporary signing material after use, because untrusted changes must not sign as
 - **WHEN** an ordinary pull request runs installer checks
 - **THEN** its code receives no release signing credentials
 - **AND** it does not publish an ad-hoc macOS release as a substitute
-- **PROOF** test: scripts/macos-ci-signing.test.mjs
+- **PROOF** test: scripts/macos-ci-signing.node-test.mjs

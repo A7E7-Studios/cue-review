@@ -29,8 +29,8 @@ ID Application certificate belongs to team 2RZUB2TKD6. The owner approved local 
 
 | Scenario or logic | Test |
 |---|---|
-| Identity selection and rejected signing configurations | scripts/macos-signing.test.mjs |
-| CI trust and credential handling | scripts/macos-ci-signing.test.mjs |
+| Identity selection and rejected signing configurations | scripts/macos-signing.node-test.mjs |
+| CI trust and credential handling | scripts/macos-ci-signing.node-test.mjs |
 | Final signed bundle | scripts/verify-bundle.mjs |
 | Identity compatibility across updates | Compare different code hashes, matching team/identifier and designated requirements, then cross-verify both signatures |
 | Native update | Authorize Developer ID build A once, install build B, and preview/record a screen without editing privacy settings |

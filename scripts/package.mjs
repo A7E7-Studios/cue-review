@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MACOS_APP_IDENTIFIER, selectSigningIdentity } from './macos-signing.mjs';
+import { MACOS_APP_IDENTIFIER, assertKeychainInSearchList, needsCaptureEntitlements, selectSigningIdentity } from './macos-signing.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
@@ -40,6 +40,10 @@ let signingIdentity;
 const signingKeychain = process.env.APPLE_KEYCHAIN;
 if (process.platform === 'darwin') {
   if (tauriConfig.identifier !== MACOS_APP_IDENTIFIER) throw new Error(`macOS packages must retain bundle identifier ${MACOS_APP_IDENTIFIER}.`);
+  if (signingKeychain) {
+    const searchList = run('security', ['list-keychains', '-d', 'user'], { encoding: 'utf8', stdio: 'pipe' }).stdout;
+    assertKeychainInSearchList(searchList, signingKeychain, realpathSync);
+  }
   const identityArgs = ['find-identity', '-v', '-p', 'codesigning'];
   if (signingKeychain) identityArgs.push(signingKeychain);
   const available = run('security', identityArgs, { encoding: 'utf8', stdio: 'pipe' }).stdout;
@@ -82,7 +86,7 @@ if (process.platform === 'darwin') {
     const identifier = basename(binary) === 'cuereview' ? MACOS_APP_IDENTIFIER : basename(binary);
     const signingArgs = ['--force', '--sign', signingIdentity.hash, '--identifier', identifier, '--options', 'runtime', '--timestamp'];
     if (signingKeychain) signingArgs.push('--keychain', signingKeychain);
-    if (binary === join(releaseDir, 'cuereview')) signingArgs.push('--entitlements', join(root, 'src-tauri/Entitlements.plist'));
+    if (needsCaptureEntitlements(binary)) signingArgs.push('--entitlements', join(root, 'src-tauri/Entitlements.plist'));
     run('codesign', [...signingArgs, binary]);
     run('codesign', ['--verify', '--strict', binary]);
   }

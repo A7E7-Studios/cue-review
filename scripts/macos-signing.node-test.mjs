@@ -1,6 +1,33 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MACOS_TEAM_ID, MACOS_APP_IDENTIFIER, selectSigningIdentity, developerIdRequirement, assertDeveloperIdSignature } from './macos-signing.mjs';
+import { MACOS_TEAM_ID, MACOS_APP_IDENTIFIER, selectSigningIdentity, developerIdRequirement, assertDeveloperIdSignature, assertKeychainInSearchList, assertCaptureEntitlements, needsCaptureEntitlements } from './macos-signing.mjs';
+
+test('requires the selected keychain in the user search list and handles spaces and normalized paths', () => {
+  const output = '    "/Users/Example/Library/Keychains/login.keychain-db"\n    "/private/tmp/CueReview signing.keychain-db"\n';
+  assertKeychainInSearchList(output, '/private/tmp/unused/../CueReview signing.keychain-db');
+  assert.throws(() => assertKeychainInSearchList(output, '/private/tmp/other signing.keychain-db'), /APPLE_KEYCHAIN.*user keychain search list/);
+  assert.throws(() => assertKeychainInSearchList('', '/private/tmp/CueReview signing.keychain-db'), /before packaging/);
+});
+test('compares canonical keychain paths and decodes escaped path characters', () => {
+  const aliases = new Map([['/tmp/signing.keychain-db', '/private/tmp/signing.keychain-db']]);
+  assertKeychainInSearchList('    "/private/tmp/signing.keychain-db"', '/tmp/signing.keychain-db', path => aliases.get(path) ?? path);
+  assertKeychainInSearchList('    "/private/tmp/CueReview \\"test\\".keychain-db"', '/private/tmp/CueReview "test".keychain-db');
+});
+test('GUI and both packaged CLI locations require camera and microphone entitlements', () => {
+  for (const binary of ['Contents/MacOS/cuereview', 'Contents/MacOS/cue', 'Contents/Resources/cue']) {
+    assert.equal(needsCaptureEntitlements(binary), true);
+  }
+  for (const binary of ['tools/whisper-b5454/whisper-cli', 'tools/whisper-b5454/whisper-vad-speech-segments']) {
+    assert.equal(needsCaptureEntitlements(binary), false);
+  }
+  const enabled = { 'com.apple.security.device.camera': true, 'com.apple.security.device.audio-input': true };
+  assertCaptureEntitlements(enabled);
+  for (const entitlement of Object.keys(enabled)) {
+    for (const value of [undefined, false, 'true']) {
+      assert.throws(() => assertCaptureEntitlements({ ...enabled, [entitlement]: value }), /missing enabled entitlement/);
+    }
+  }
+});
 
 const first = { hash: 'A'.repeat(40), name: `Developer ID Application: Example (${MACOS_TEAM_ID})` };
 const second = { hash: 'B'.repeat(40), name: `Developer ID Application: Renewed (${MACOS_TEAM_ID})` };

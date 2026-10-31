@@ -1,6 +1,27 @@
+import { basename, resolve } from 'node:path';
+
 // This team and bundle identifier define the distribution identity across updates.
 export const MACOS_TEAM_ID = '2RZUB2TKD6';
 export const MACOS_APP_IDENTIFIER = 'studio.a7e7.cuereview';
+
+export function assertKeychainInSearchList(output, keychain, canonicalize = resolve) {
+  const paths = [...output.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+    .map(([, path]) => path.replace(/\\(["\\])/g, '$1'));
+  const selected = canonicalize(keychain);
+  if (!paths.some(path => canonicalize(path) === selected)) {
+    throw new Error('APPLE_KEYCHAIN must already be in the user keychain search list (security list-keychains -d user) so Tauri can sign the final bundle. Add it to that list before packaging.');
+  }
+}
+
+export function needsCaptureEntitlements(binary) {
+  return ['cuereview', 'cue'].includes(basename(binary));
+}
+
+export function assertCaptureEntitlements(entitlements) {
+  for (const entitlement of ['com.apple.security.device.camera', 'com.apple.security.device.audio-input']) {
+    if (entitlements[entitlement] !== true) throw new Error(`Packaged macOS capture executable is missing enabled entitlement ${entitlement}.`);
+  }
+}
 
 export function selectSigningIdentity(output, requestedIdentity = '') {
   const identities = [...new Map([...output.matchAll(/^\s*\d+\) ([A-Fa-f0-9]{40}) "([^"\r\n]+)"\s*$/gm)]
