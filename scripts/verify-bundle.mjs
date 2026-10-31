@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MACOS_APP_IDENTIFIER, assertDeveloperIdSignature, developerIdRequirement } from './macos-signing.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 if (process.platform === 'win32' && process.env.CI !== 'true') throw new Error('The Windows installer smoke check is restricted to disposable CI runners because installation changes the per-user app registration.');
@@ -47,8 +48,8 @@ try {
     mountedDmg = mountpoint;
     const app = join(mountpoint, 'CueReview.app');
     run('codesign', ['--verify', '--deep', '--strict', app]);
-    const signature = run('codesign', ['--display', '--verbose=4', app], 'stderr');
-    if (!/\bflags=[^\n]*\bruntime\b/.test(signature)) throw new Error('Packaged macOS app must retain the hardened runtime.');
+    run('codesign', ['--verify', '--strict', '-R', developerIdRequirement(MACOS_APP_IDENTIFIER), app]);
+    assertDeveloperIdSignature(run('codesign', ['--display', '--verbose=4', app], 'stderr'), MACOS_APP_IDENTIFIER);
     const entitlements = JSON.parse(run('plutil', ['-convert', 'json', '-o', '-', '-'], true,
       run('codesign', ['--display', '--entitlements', '-', '--xml', app], true)));
     for (const entitlement of ['com.apple.security.device.camera', 'com.apple.security.device.audio-input']) {
@@ -57,7 +58,9 @@ try {
     resourceDir = join(app, 'Contents/Resources');
     cli = join(resourceDir, 'cue');
     for (const binary of [join(app, 'Contents/MacOS/cuereview'), join(app, 'Contents/MacOS/cue'), cli, ...['whisper-cli', 'whisper-vad-speech-segments'].map(name => join(resourceDir, 'tools/whisper-b5454', name))]) {
-      run('codesign', ['--verify', '--strict', binary]);
+      const identifier = basename(binary) === 'cuereview' ? MACOS_APP_IDENTIFIER : basename(binary);
+      run('codesign', ['--verify', '--strict', '-R', developerIdRequirement(identifier), binary]);
+      assertDeveloperIdSignature(run('codesign', ['--display', '--verbose=4', binary], 'stderr'), identifier);
     }
   } else throw new Error(`Unsupported host: ${process.platform}`);
   if (!existsSync(cli)) throw new Error(`Bundled CLI is missing: ${cli}`);

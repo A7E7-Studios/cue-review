@@ -8,6 +8,11 @@ on:
         type: string
         required: false
         default: ''
+      signed-macos:
+        description: Build Developer ID macOS installers from a trusted main/release context
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -27,12 +32,6 @@ jobs:
           - name: linux-x64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - name: macos-arm64
-            runner: macos-15
-            target: aarch64-apple-darwin
-          - name: macos-x64
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
     env:
       CARGO_INCREMENTAL: '0'
       APPIMAGE_EXTRACT_AND_RUN: '1'
@@ -66,6 +65,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
           cache-on-failure: true
       - run: npm ci
+      - run: node --test scripts/macos-signing.test.mjs scripts/macos-ci-signing.test.mjs
       - run: npm test
       - run: npm run build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -77,6 +77,87 @@ jobs:
         run: node scripts/package.mjs --target ${{ matrix.target }} --require-speech-runtime
       - name: Verify bundled executables
         run: node scripts/verify-bundle.mjs --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: installer-${{ matrix.name }}
+          path: .local/release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  # Environment secrets are intentionally not reusable-workflow inputs. Configure
+  # macos-signing with main/v* deployment restrictions and required approval for
+  # signing deployments; never store the signing key as a repository-level secret.
+  build-macos:
+    name: ${{ matrix.name }}
+    if: inputs.signed-macos && github.repository == 'A7E7-Studios/cue-review' && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    environment: macos-signing
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    env:
+      CARGO_INCREMENTAL: '0'
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      # Validate before executing any code from the checkout or exposing secrets
+      # to a process. A workflow_dispatch ref override must not sign a PR commit.
+      - name: Require a revision contained in main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Require protected signing credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: node scripts/macos-ci-signing.mjs check
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - run: npm ci
+      - run: node --test scripts/macos-signing.test.mjs scripts/macos-ci-signing.test.mjs
+      - run: npm test
+      - run: npm run build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }} --lib
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }} --all-targets -- -D warnings
+      - name: Build bundled speech runtime
+        run: node scripts/build-speech-runtime.mjs
+      - name: Import Developer ID into an ephemeral keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: node scripts/macos-ci-signing.mjs import
+      - name: Package signed desktop installers
+        run: node scripts/package.mjs --target ${{ matrix.target }} --require-speech-runtime
+      - name: Verify signed bundled executables
+        run: node scripts/verify-bundle.mjs --target ${{ matrix.target }}
+      - name: Remove signing material
+        if: always()
+        run: node scripts/macos-ci-signing.mjs cleanup
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installer-${{ matrix.name }}

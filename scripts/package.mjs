@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MACOS_APP_IDENTIFIER, selectSigningIdentity } from './macos-signing.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
@@ -31,9 +32,21 @@ const platform = platforms[triple];
 if (!platform || triple !== host) throw new Error(`Build installers on a matching native host. Host: ${host}; target: ${triple}`);
 if (process.env.CARGO_TARGET_DIR) throw new Error('Unset CARGO_TARGET_DIR before packaging so bundle paths are unambiguous.');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
-const configVersion = JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8')).version;
+const tauriConfig = JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
+const configVersion = tauriConfig.version;
 const cargoVersion = readFileSync(join(root, 'src-tauri/Cargo.toml'), 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 if (version !== configVersion || version !== cargoVersion) throw new Error('package.json, Cargo.toml and tauri.conf.json versions must match.');
+let signingIdentity;
+const signingKeychain = process.env.APPLE_KEYCHAIN;
+if (process.platform === 'darwin') {
+  if (tauriConfig.identifier !== MACOS_APP_IDENTIFIER) throw new Error(`macOS packages must retain bundle identifier ${MACOS_APP_IDENTIFIER}.`);
+  const identityArgs = ['find-identity', '-v', '-p', 'codesigning'];
+  if (signingKeychain) identityArgs.push(signingKeychain);
+  const available = run('security', identityArgs, { encoding: 'utf8', stdio: 'pipe' }).stdout;
+  signingIdentity = selectSigningIdentity(available, process.env.APPLE_SIGNING_IDENTITY ?? tauriConfig.bundle?.macOS?.signingIdentity);
+  // Keep direct codesign calls and Tauri's bundler on the same selected identity.
+  process.env.APPLE_SIGNING_IDENTITY = signingIdentity.hash;
+}
 const cargoArgs = ['build', '--manifest-path', 'src-tauri/Cargo.toml', '--release', '--bin', 'cue', '--features', 'custom-protocol', '--locked'];
 if (target) cargoArgs.push('--target', target);
 // generate_context! needs the frontend present when the CLI builds the shared library.
@@ -52,7 +65,7 @@ if (speechReady) {
   if (manifest.target !== triple) throw new Error(`Speech runtime target ${manifest.target} does not match ${triple}.`);
   resources[speechDir.replaceAll('\\', '/') + '/'] = 'tools/whisper-b5454/';
 }
-const config = { bundle: { targets: platform.bundles, resources } };
+const config = { bundle: { targets: platform.bundles, resources, ...(signingIdentity ? { macOS: { signingIdentity: signingIdentity.hash, hardenedRuntime: true } } : {}) } };
 const configPath = join(root, '.local', `bundle-${triple}.json`);
 mkdirSync(dirname(configPath), { recursive: true });
 writeFileSync(configPath, JSON.stringify(config, null, 2));
@@ -66,7 +79,11 @@ if (process.platform === 'darwin') {
   const binaries = [join(releaseDir, 'cuereview'), cli];
   if (speechReady) binaries.push(...['whisper-cli', 'whisper-vad-speech-segments'].map(name => join(speechDir, name)));
   for (const binary of binaries) {
-    run('codesign', ['--force', '--sign', '-', binary]);
+    const identifier = basename(binary) === 'cuereview' ? MACOS_APP_IDENTIFIER : basename(binary);
+    const signingArgs = ['--force', '--sign', signingIdentity.hash, '--identifier', identifier, '--options', 'runtime', '--timestamp'];
+    if (signingKeychain) signingArgs.push('--keychain', signingKeychain);
+    if (binary === join(releaseDir, 'cuereview')) signingArgs.push('--entitlements', join(root, 'src-tauri/Entitlements.plist'));
+    run('codesign', [...signingArgs, binary]);
     run('codesign', ['--verify', '--strict', binary]);
   }
   // Binary patching would invalidate the signatures above. This app ships only
