@@ -174,7 +174,7 @@ Protect release tags against untrusted creation or updates, and restrict workflo
 the repository's protected-path review. The environment
 must be configured before adding credentials. Ordinary PR jobs cannot enter this environment.
 
-Store `APPLE_CERTIFICATE` (base64 PKCS#12 containing the approved certificate/private key) and
+Store `APPLE_CERTIFICATE` (base64 PKCS12 containing the approved certificate/private key) and
 `APPLE_CERTIFICATE_PASSWORD` as environment secrets. The import step discovers the unique
 approved-team Developer ID and exports `APPLE_SIGNING_IDENTITY` plus `APPLE_KEYCHAIN` for later
 steps; no separate identity secret is needed. Never put private keys or passwords in the repository, logs, PR text, or
