@@ -28,13 +28,13 @@ CueReview records visual feedback, transcribes it locally, and makes recordings 
 - When an Android recording turns between portrait and landscape, the turned part keeps the first part's frame size, with black bars, so it plays smaller.
 - On Windows, hovering the custom maximize button does not show the Snap Layouts menu.
 - The vocabulary takes at most 20 terms (200 characters) of plain ASCII. It makes those spellings more likely, not certain, and only affects transcriptions made after you save it.
-- Builds are unsigned on Windows and ad-hoc signed, without notarization, on macOS. Windows SmartScreen or macOS Gatekeeper may ask for approval; on macOS, use System Settings → Privacy & Security → Open Anyway. macOS/Linux per-window recording, desktop system audio and Linux Wayland capture are not supported yet, and macOS/Linux hardware capture still needs real-device validation.
+- Builds are unsigned on Windows and Developer ID signed, without notarization, on macOS. Windows SmartScreen or macOS Gatekeeper may ask for approval; on macOS, use System Settings → Privacy & Security → Open Anyway. macOS/Linux per-window recording, desktop system audio and Linux Wayland capture are not supported yet, and macOS/Linux hardware capture still needs real-device validation.
 
 ## Install
 
 - Windows x64: run the `_setup.exe` installer (per-user installation). Close CueReview first; recordings in `%LOCALAPPDATA%\CueReview` are kept.
 - Linux x64: install the `.deb` on Ubuntu 24.04 or newer, or mark the `.AppImage` executable and run it. The AppImage requires a compatible WebKitGTK/Linux desktop.
-- macOS 12+: open the DMG matching Apple Silicon (`arm64`) or Intel (`x64`) and drag CueReview into Applications. Grant screen, microphone or camera permissions when asked.
+- macOS 12+: open the DMG matching Apple Silicon (`arm64`) or Intel (`x64`) and drag CueReview into Applications. Grant screen, microphone or camera permissions when asked. Switching from an ad-hoc build may require one permission refresh; subsequent updates retain the same Developer ID identity.
 
 The `cue` command and local speech runtime are included. On first use, install transcription through Settings: the runtime and the base model (about 148 MB), then the chosen language's model in the background (about 488 MB). FFmpeg and ffprobe must be installed separately and available on PATH:
 - Windows (PowerShell): `winget install --id Gyan.FFmpeg --exact`

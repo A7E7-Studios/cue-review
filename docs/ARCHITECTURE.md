@@ -28,6 +28,12 @@ FFmpeg process recordings flush output packets so the startup check can see enco
 waiting for buffered Matroska data. Startup rejects an exited process or output that remains below
 the readiness threshold; scrcpy uses its decoded-frame signal independently of file buffering.
 
+macOS distribution packages use one approved Developer ID team and the fixed app identifier,
+so their normal Apple designated requirement remains compatible across updates. Packaging signs
+bundled executables before the enclosing app, retains hardened runtime and verifies the final
+signature. CI imports credentials only in the restricted signing environment and removes its
+transient keychain after use. Signing configuration belongs in the [build instructions](../README.md#macos-signing).
+
 The hardened macOS bundle signs with camera and audio-input entitlements from
 `src-tauri/Entitlements.plist`. Its camera and microphone usage descriptions explain the requests;
 the entitlements permit macOS to present them, and the person's Camera and Microphone privacy

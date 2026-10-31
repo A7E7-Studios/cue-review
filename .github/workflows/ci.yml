@@ -62,6 +62,7 @@ jobs:
           save-if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           cache-on-failure: true
       - run: npm ci
+      - run: node --test scripts/macos-signing.node-test.mjs scripts/macos-ci-signing.node-test.mjs
       - run: npm test
       - run: npm run build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
