@@ -65,7 +65,7 @@ Download the Windows installer, Linux Debian package/AppImage, or macOS Apple Si
 
 The Windows installer installs per user into `%LOCALAPPDATA%\Programs\CueReview` (`cuereview.exe`, `cue.exe` and `tools\whisper-b5454`). Recordings stay in `%LOCALAPPDATA%\CueReview`, so upgrading keeps them. Close CueReview before upgrading, and never upgrade during a recording.
 
-Windows is the hardware-verified platform. macOS uses AVFoundation; Linux uses X11/V4L2. Linux Wayland desktop capture, macOS/Linux per-window capture, macOS/Linux desktop system audio and macOS/Linux cursor tracking are not supported yet. Native macOS/Linux hardware validation remains outstanding. Windows builds are unsigned; macOS builds are ad-hoc signed without notarization. See each release's installation notes and SHA256SUMS.
+Windows is the hardware-verified platform. macOS uses AVFoundation; Linux uses X11/V4L2. Linux Wayland desktop capture, macOS/Linux per-window capture, macOS/Linux desktop system audio and macOS/Linux cursor tracking are not supported yet. Native macOS/Linux hardware validation remains outstanding. Windows builds are unsigned; macOS distribution packages require Developer ID signing and are not notarized. See each release's installation notes and SHA256SUMS.
 
 ## Workflow
 
@@ -206,7 +206,46 @@ powershell -File scripts/package.ps1
 
 The portable packaging command is `node scripts/package.mjs`. Release builds first run `node scripts/build-speech-runtime.mjs` (requires CMake and a C++ compiler), then package with `--require-speech-runtime`; on Windows and Linux x64 the speech runtime folder also holds a faster build for AVX2 processors in `avx2/`. Installers are produced under `src-tauri/target/release/bundle`; named release copies go to `.local/release-assets`. Explicit `--target` builds use `target/<triple>/release` and require a matching native host.
 
-Pull requests run `.github/workflows/ci.yml` on Windows x64, Linux x64 and macOS ARM64: frontend tests and build, `cargo fmt`, Rust library tests and Clippy. Pull requests that change only Markdown, `docs/`, `specs/` or `changes/` run no CI. Pushes to main, a manual run, and a pull request labeled `build-installers` run `.github/workflows/installers.yml`, which builds on Windows x64, Linux x64, macOS ARM64 and macOS x64: the same checks, then the speech runtime, packaging, a check of the bundled executables, and the installers as run artifacts. A `v<version>` tag contained in main triggers `.github/workflows/release.yml`; it publishes only after all five installers and their checksums are available, with `.github/RELEASE_NOTES.md` as the release text. Package, Cargo and Tauri versions must match the tag. Workflow dispatch can retry an existing tag; published releases are never overwritten.
+Pull requests run `.github/workflows/ci.yml` on Windows x64, Linux x64 and macOS ARM64: frontend tests and build, `cargo fmt`, Rust library tests and Clippy. Pull requests that change only Markdown, `docs/`, `specs/` or `changes/` run no CI. Installer checks on labeled pull requests build Windows and Linux without signing credentials. Trusted main/release builds also produce Developer ID signed macOS ARM64 and x64 installers. Release publication requires all five installer files and their checksums. A `v<version>` tag contained in main triggers `.github/workflows/release.yml`; package, Cargo and Tauri versions must match the tag. Workflow dispatch can retry an existing tag; published releases are never overwritten.
+
+### macOS signing
+
+`node scripts/package.mjs` requires a valid Developer ID Application identity for team
+`2RZUB2TKD6`. It selects the unique matching identity in the local Keychain, or the exact certificate
+name/SHA-1 in `APPLE_SIGNING_IDENTITY`. `APPLE_KEYCHAIN` selects an explicit keychain, which must
+already appear in `security list-keychains -d user` so Tauri can sign the final bundle. Add a custom
+keychain to the user search list before packaging, preserving the existing entries; packaging
+checks this prerequisite without changing the list. Missing,
+ambiguous, wrong-team and ad-hoc identities fail before the expensive build. The app retains bundle
+identifier `studio.a7e7.cuereview`, hardened runtime and camera/microphone entitlements. Both the
+app and bundled executables are signed with the selected identity and secure timestamps.
+
+Keeping that signing identity lets macOS recognize updates as the same authorized app. Moving from
+an ad-hoc installation can require one permission refresh; later Developer ID updates preserve the
+same designated requirement. macOS still controls consent and can require its own reauthorization.
+Do not replace a signed installation with an ad-hoc package. Signing does not itself notarize an app.
+
+CI signing uses environment secrets in **macos-signing**, not repository-wide secrets. Configure
+that environment with **Selected branches and tags**: branch `main` and tag `v*` only. Exclude
+`refs/pull/*/merge` and all other branches. Require the owner as an environment reviewer for every signing deployment, including main.
+Protect release tags against untrusted creation or updates, and restrict workflow edits through
+the repository's protected-path review. The environment
+must be configured before adding credentials. Ordinary PR jobs cannot enter this environment.
+
+Store `APPLE_CERTIFICATE` (base64 PKCS12 containing the approved certificate/private key) and
+`APPLE_CERTIFICATE_PASSWORD` as environment secrets. The import step discovers the unique
+approved-team Developer ID and exports `APPLE_SIGNING_IDENTITY` plus `APPLE_KEYCHAIN` for later
+steps; no separate identity secret is needed. Never put private keys or passwords in the repository, logs, PR text, or
+chat. Local signing does not require exporting the key. Transferring an existing key into CI needs
+explicit owner authorization. Trusted macOS jobs import it into a temporary keychain before helper
+signing and remove the keychain and certificate afterward; missing credentials fail packaging.
+
+The installer smoke check validates the final app's Apple Developer ID chain, team, identifier,
+hardened runtime and capture entitlements, plus each bundled executable's signing identity and
+the camera/microphone entitlements on both packaged CLI copies. Run
+`node --test scripts/macos-signing.node-test.mjs scripts/macos-ci-signing.node-test.mjs` for signing-policy
+regressions.
+
 
 Integration tests that need FFmpeg, Whisper or hardware are `#[ignore]`d and run explicitly. Real capture checks record the screen and microphone and play two quiet tones, so run them attended:
 

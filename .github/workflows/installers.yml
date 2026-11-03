@@ -24,7 +24,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  installers:
-    name: build
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'build-installers') && (github.event.action != 'labeled' || github.event.label.name == 'build-installers'))
+  pull-request-installers:
+    name: build without signing credentials
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'build-installers') && (github.event.action != 'labeled' || github.event.label.name == 'build-installers')
     uses: ./.github/workflows/build.yml
+    with:
+      signed-macos: false
+  trusted-installers:
+    name: build signed installers
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    uses: ./.github/workflows/build.yml
+    with:
+      signed-macos: true
+  reject-untrusted-dispatch:
+    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo 'Run installer dispatch from main; PR installer checks do not receive signing credentials.'
+          exit 1
