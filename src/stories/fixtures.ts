@@ -1,9 +1,32 @@
-import type { Project, Session, Transcript } from '../backend';
+import type { Project, Session, SpeechLanguage, Transcript } from '../backend';
 
 export const date = '2026-10-28T09:00:00.000Z';
 export const sections: Project[] = [
   { id: 'interface', name: 'Interface', createdAt: date },
   { id: 'headset', name: 'Headset testing', createdAt: date },
+];
+/** The speech model's 99 languages as `get_languages` serves them: whisper.cpp's order, English names. */
+export const SPEECH_LANGUAGES: SpeechLanguage[] = [
+  { code: 'en', name: 'English' }, { code: 'zh', name: 'Chinese' }, { code: 'de', name: 'German' }, { code: 'es', name: 'Spanish' }, { code: 'ru', name: 'Russian' },
+  { code: 'ko', name: 'Korean' }, { code: 'fr', name: 'French' }, { code: 'ja', name: 'Japanese' }, { code: 'pt', name: 'Portuguese' }, { code: 'tr', name: 'Turkish' },
+  { code: 'pl', name: 'Polish' }, { code: 'ca', name: 'Catalan' }, { code: 'nl', name: 'Dutch' }, { code: 'ar', name: 'Arabic' }, { code: 'sv', name: 'Swedish' },
+  { code: 'it', name: 'Italian' }, { code: 'id', name: 'Indonesian' }, { code: 'hi', name: 'Hindi' }, { code: 'fi', name: 'Finnish' }, { code: 'vi', name: 'Vietnamese' },
+  { code: 'he', name: 'Hebrew' }, { code: 'uk', name: 'Ukrainian' }, { code: 'el', name: 'Greek' }, { code: 'ms', name: 'Malay' }, { code: 'cs', name: 'Czech' },
+  { code: 'ro', name: 'Romanian' }, { code: 'da', name: 'Danish' }, { code: 'hu', name: 'Hungarian' }, { code: 'ta', name: 'Tamil' }, { code: 'no', name: 'Norwegian' },
+  { code: 'th', name: 'Thai' }, { code: 'ur', name: 'Urdu' }, { code: 'hr', name: 'Croatian' }, { code: 'bg', name: 'Bulgarian' }, { code: 'lt', name: 'Lithuanian' },
+  { code: 'la', name: 'Latin' }, { code: 'mi', name: 'Maori' }, { code: 'ml', name: 'Malayalam' }, { code: 'cy', name: 'Welsh' }, { code: 'sk', name: 'Slovak' },
+  { code: 'te', name: 'Telugu' }, { code: 'fa', name: 'Persian' }, { code: 'lv', name: 'Latvian' }, { code: 'bn', name: 'Bengali' }, { code: 'sr', name: 'Serbian' },
+  { code: 'az', name: 'Azerbaijani' }, { code: 'sl', name: 'Slovenian' }, { code: 'kn', name: 'Kannada' }, { code: 'et', name: 'Estonian' }, { code: 'mk', name: 'Macedonian' },
+  { code: 'br', name: 'Breton' }, { code: 'eu', name: 'Basque' }, { code: 'is', name: 'Icelandic' }, { code: 'hy', name: 'Armenian' }, { code: 'ne', name: 'Nepali' },
+  { code: 'mn', name: 'Mongolian' }, { code: 'bs', name: 'Bosnian' }, { code: 'kk', name: 'Kazakh' }, { code: 'sq', name: 'Albanian' }, { code: 'sw', name: 'Swahili' },
+  { code: 'gl', name: 'Galician' }, { code: 'mr', name: 'Marathi' }, { code: 'pa', name: 'Punjabi' }, { code: 'si', name: 'Sinhala' }, { code: 'km', name: 'Khmer' },
+  { code: 'sn', name: 'Shona' }, { code: 'yo', name: 'Yoruba' }, { code: 'so', name: 'Somali' }, { code: 'af', name: 'Afrikaans' }, { code: 'oc', name: 'Occitan' },
+  { code: 'ka', name: 'Georgian' }, { code: 'be', name: 'Belarusian' }, { code: 'tg', name: 'Tajik' }, { code: 'sd', name: 'Sindhi' }, { code: 'gu', name: 'Gujarati' },
+  { code: 'am', name: 'Amharic' }, { code: 'yi', name: 'Yiddish' }, { code: 'lo', name: 'Lao' }, { code: 'uz', name: 'Uzbek' }, { code: 'fo', name: 'Faroese' },
+  { code: 'ht', name: 'Haitian Creole' }, { code: 'ps', name: 'Pashto' }, { code: 'tk', name: 'Turkmen' }, { code: 'nn', name: 'Nynorsk' }, { code: 'mt', name: 'Maltese' },
+  { code: 'sa', name: 'Sanskrit' }, { code: 'lb', name: 'Luxembourgish' }, { code: 'my', name: 'Myanmar' }, { code: 'bo', name: 'Tibetan' }, { code: 'tl', name: 'Tagalog' },
+  { code: 'mg', name: 'Malagasy' }, { code: 'as', name: 'Assamese' }, { code: 'tt', name: 'Tatar' }, { code: 'haw', name: 'Hawaiian' }, { code: 'ln', name: 'Lingala' },
+  { code: 'ha', name: 'Hausa' }, { code: 'ba', name: 'Bashkir' }, { code: 'jw', name: 'Javanese' }, { code: 'su', name: 'Sundanese' },
 ];
 export const sessions: Session[] = [
   { id: 'library', projectId: 'interface', name: 'Library selection and details', createdAt: date, durationMs: 134000, status: 'ready' },
@@ -74,4 +97,33 @@ export const takeTwoLiveTranscript: Transcript = {
     line('stretch-81000', 81000, 86000, 'Picking this up again: the export dialog needs a default folder.'),
     line('live-87000', 87000, 90000, 'Right now it always opens in Documents, and'),
   ],
+};
+
+// The same review spoken in German, then continued in English, as Auto transcribed it (the look's
+// sample): each take carries the language it was detected in.
+const GERMAN = [
+  [0, 4000, 'Die Bibliothek wirkt klar und leicht zu bedienen.'],
+  [5000, 11000, 'Wenn ich dieses Modell auswähle, sollten sich die Details daneben aktualisieren.'],
+  [12000, 17000, 'Der Import könnte näher am Suchfeld sein.'],
+  [19000, 23000, 'Alles andere funktioniert wie erwartet.'],
+  [24000, 30000, 'Wenn ich jetzt die Filter öffne, verdeckt das Panel die erste Ergebniszeile.'],
+  [31000, 36500, 'Ich würde erwarten, dass es das Raster nach unten schiebt, statt es zu überdecken.'],
+  [38000, 45000, 'Der leere Zustand sagt nur „Keine Einträge“. Er sollte sagen, wie man einen anlegt.'],
+  [46000, 53000, 'Das Scrollen ist flüssig, aber die Kopfzeile verliert beim Zurückscrollen ihren Schatten.'],
+  [54000, 60000, 'Beim Überfahren einer Karte erscheint die Vorschau, das ist super.'],
+  [62000, 69000, 'Die Vorschau braucht eine Sekunde, ein Platzhalter würde helfen.'],
+  [70000, 78000, 'Letzter Punkt: Der Importdialog merkt sich den Ordner nicht.'],
+] as const;
+const germanTakeOne = GERMAN.map(([startMs, endMs, text], index) => line(`de-segment-${index}`, startMs, endMs, text));
+export const germanTwoTakeTranscript: Transcript = {
+  status: 'complete',
+  takes: [{ index: 1, startMs: 0, language: 'de', languageDetected: true }, { index: 2, startMs: takeTwoStartMs, language: 'en', languageDetected: true }],
+  segments: [...germanTakeOne, ...twoTakeTranscript.segments.filter(segment => segment.startMs >= takeTwoStartMs)],
+};
+/** One take transcribed as German because German was chosen in Settings. */
+export const germanChosenTranscript: Transcript = { status: 'complete', language: 'de', segments: germanTakeOne };
+/** Take 2 of the German session while it records under Auto, its language not decided yet. */
+export const germanRecordingTranscript: Transcript = {
+  takes: [{ index: 1, startMs: 0, language: 'de', languageDetected: true }],
+  segments: [...germanTakeOne, ...takeTwoLiveTranscript.segments],
 };

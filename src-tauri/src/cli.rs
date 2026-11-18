@@ -339,7 +339,7 @@ const SPECS: &[Spec] = &[
         required: 0,
         options: &[switch(
             "--install",
-            "Download and install the transcription tools, the base model and the chosen language's model (the only network access); takes the recording lock",
+            "Download and install the transcription tools, the base model and every model the chosen language needs, both small models for Auto (the only network access); takes the recording lock",
         )],
         notes: "",
     },
@@ -1348,18 +1348,22 @@ mod tests {
                 TakeMark {
                     index: 1,
                     start_ms: 0,
+                    ..Default::default()
                 },
                 TakeMark {
                     index: 2,
                     start_ms: 134_000,
+                    ..Default::default()
                 },
                 TakeMark {
                     index: 3,
                     start_ms: 3_723_000,
+                    ..Default::default()
                 },
                 TakeMark {
                     index: 4,
                     start_ms: 3_730_000,
+                    ..Default::default()
                 },
             ],
             ..Default::default()

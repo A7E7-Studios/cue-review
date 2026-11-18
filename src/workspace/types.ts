@@ -2,7 +2,7 @@
 // Each component is built and tested alone against these props, then mounted by WP G.
 // Request changes through the coordinator.
 import type { ReactNode, Ref, RefObject, VideoHTMLAttributes } from 'react';
-import type { CaptureSource, Microphone, Project, Segment, Session, Settings, SetupStatus, TakeMark, Transcript } from '../backend';
+import type { CaptureSource, Microphone, Project, Segment, Session, Settings, SetupStatus, SpeechLanguage, TakeMark, Transcript } from '../backend';
 import type { Platform, WindowTheme } from '../chrome/windowApi';
 
 /** What the media slot and the controls under it show (decision 6). */
@@ -209,8 +209,13 @@ export interface TranscriptPaneProps {
   onSeek: (ms: number) => void;
   /** The only status chip: shown while recording or processing, never once ready. */
   status?: 'recording' | 'processing';
-  /** The take being recorded: its divider, its finished stretches as rows, and its words still being heard in the live box with its note. */
+  /**
+   * The take being recorded: its divider, its finished stretches as rows, and its words still being heard in the live box with its note.
+   * Its language is its mark's, else the transcript's own `language`.
+   */
   liveTake?: TakeMark;
+  /** Names for the language codes on the take dividers ("German, detected"); a code without a name shows the code. */
+  languages?: SpeechLanguage[];
   /** Live transcription problem, shown as a status note. */
   liveError?: string;
   /** Shown in the body when there are no segments. */
@@ -223,7 +228,7 @@ export interface TranscriptPaneProps {
   retryBusy?: boolean;
 }
 
-/** Settings → Appearance, capability statuses, technical details, the transcription language and its model, and the vocabulary (decision 14, C5). */
+/** Settings → Appearance, capability statuses, technical details, the transcription language and its models, and the vocabulary (decision 14, C5). */
 export interface SettingsDialogProps {
   open: boolean;
   onClose: () => void;
@@ -236,13 +241,15 @@ export interface SettingsDialogProps {
   onInstall: () => void;
   onCheckAgain: () => void;
   /**
-   * Reads the language model's state alone and puts it into `setup`: right after the language
-   * changes or a download starts, then about each second while it downloads, the next read only
+   * Reads the language models' states alone and puts them into `setup`: right after the language
+   * changes or a download starts, then about each second while one downloads, the next read only
    * after the last reply. Settles once the reply is applied or ignored.
    */
-  onPollLanguageModel: () => Promise<void>;
-  /** Starts the language model's download, or starts it again after a failure; rejects with a message to show (e.g. while transcription is not installed). */
-  onDownloadLanguageModel: () => Promise<void>;
+  onPollLanguageModels: () => Promise<void>;
+  /** Starts the language models' downloads, or starts them again after a failure; rejects with a message to show (e.g. while transcription is not installed). */
+  onDownloadLanguageModels: () => Promise<void>;
+  /** Every language the speech model knows, offered after Auto; empty until loaded. */
+  languages: SpeechLanguage[];
   /** null until loaded. */
   settings: Settings | null;
   onSaveSettings: (settings: Settings) => Promise<void>;

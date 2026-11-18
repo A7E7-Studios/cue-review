@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { backend, videoUrl } from './backend';
-import type { Project, RecordingStatus, Session, Settings, SetupStatus, Transcript } from './backend';
+import type { Project, RecordingStatus, Session, Settings, SetupStatus, SpeechLanguage, Transcript } from './backend';
 import { CompactDragStrip, TitleBar } from './chrome/TitleBar';
 import { platform as detectPlatform } from './chrome/windowApi';
 import type { Platform } from './chrome/windowApi';
@@ -84,6 +84,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const [status, setStatus] = useState<RecordingStatus>({ state: 'idle' });
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
+  /** The speech model's languages, which name the transcript's take languages and fill the Language select. */
+  const [languages, setLanguages] = useState<SpeechLanguage[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [captureMenu, setCaptureMenu] = useState<CaptureMenu | null>(null);
   const [previewRevision, setPreviewRevision] = useState(0);
@@ -206,6 +208,9 @@ export default function App({ platform: requested }: AppProps = {}) {
     } catch (problem) { if (request === selection.current) report(problem); return false; }
     finally { if (request === selection.current) setLoading(false); }
   }, [report, dismissOverlay, setSourceId, setMicrophoneId, setSystemAudio]);
+
+  // Read once: a failed read leaves the codes to name themselves and Settings to offer English and German.
+  useEffect(() => { backend.languages().then(setLanguages, () => {}); }, []);
 
   useEffect(() => {
     let alive = true;
@@ -641,29 +646,30 @@ export default function App({ platform: requested }: AppProps = {}) {
     finally { setInstalling(false); }
   };
   /**
-   * A full setup reply always shows the tools; its language model only when no later read has shown the
-   * model already. The light poll shows only the model, and only while Settings is open.
+   * A full setup reply always shows the tools; its language models only when no later read has shown the
+   * models already. The light poll shows only the models, and only while Settings is open.
    */
   const readSetup = async () => {
     const ticket = ++setupReads.current.sent;
     const value = await backend.setup();
     const stale = ticket < setupReads.current.shown;
     if (!stale) setupReads.current.shown = ticket;
-    setSetup(current => stale && current ? { ...value, languageModel: current.languageModel } : value);
+    setSetup(current => stale && current ? { ...value, languageModels: current.languageModels } : value);
   };
   /** Settings reads it on opening and on Check again. */
   const refreshSetup = () => void readSetup().catch(reportFromSettings);
-  /** The light read Settings polls while the language model downloads. */
-  const pollLanguageModel = async () => {
+  /** The light read Settings polls while a language model downloads. */
+  const pollLanguageModels = async () => {
     const ticket = ++setupReads.current.sent;
-    const model = await backend.languageModel();
+    const models = await backend.languageModels();
     if (ticket < setupReads.current.shown || !settingsShown.current) return;
     setupReads.current.shown = ticket;
-    setSetup(current => current && { ...current, languageModel: model ?? undefined });
+    setSetup(current => current && { ...current, languageModels: models });
   };
   const openSettings = () => {
     setDialogError(''); setSettingsOpen(true);
     backend.settings().then(setSettings).catch(reportFromSettings);
+    if (!languages.length) backend.languages().then(setLanguages, () => {});
     refreshSetup();
   };
   const saveSettings = async (next: Settings) => { setSettings(await backend.saveSettings(next)); };
@@ -798,7 +804,7 @@ export default function App({ platform: requested }: AppProps = {}) {
     </div>
     {!(focusVideo && mode === 'review') && <div className="cr-transcript-column">
       <TranscriptPane mode={mode} transcript={shownTranscript} timeMs={recording ? (status.takeOffsetMs ?? 0) + (status.elapsedMs || 0) : time} onSeek={seek}
-        status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)}
+        status={recording ? 'recording' : processing ? 'processing' : undefined} liveTake={liveTake(status)} languages={languages}
         liveError={recording ? status.liveTranscript?.error : undefined} emptyMessage={emptyMessage}
         error={transcriptError} onRetry={() => void retry()} retryDisabled={captureBlocked} retryBusy={busy}
         findRequest={findRequest}/>
@@ -837,7 +843,7 @@ export default function App({ platform: requested }: AppProps = {}) {
       onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={refreshSetup}
-      onPollLanguageModel={pollLanguageModel} onDownloadLanguageModel={backend.downloadLanguageModel}
+      onPollLanguageModels={pollLanguageModels} onDownloadLanguageModels={backend.downloadLanguageModels} languages={languages}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
     <NameDialog state={dialog} busy={busy} error={dialog ? dialogError : ''} fallbackFocusRef={sheet}
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>

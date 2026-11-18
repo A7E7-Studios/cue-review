@@ -1,8 +1,9 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FocusEvent, KeyboardEvent, ReactNode } from 'react';
-import type { Segment } from '../backend';
+import type { Segment, SpeechLanguage } from '../backend';
 import { Icon } from '../icons';
-import { activeSegment, activeWord, findMatches, formatTime, playheadSegment, segmentSeekMs, transcriptItems, wordSeekMs } from '../review';
+import { activeSegment, activeWord, findMatches, formatTime, playheadSegment, segmentSeekMs, takeLanguageLabel, transcriptItems, wordSeekMs } from '../review';
+import type { TranscriptItem } from '../review';
 import { prefersReducedMotion, usePresence } from '../ui/usePresence';
 import { NAMES } from './types';
 import type { TranscriptPaneProps } from './types';
@@ -100,8 +101,14 @@ const Row = memo(function Row({ segment, index, live, tail, inert, current, past
   </div>;
 });
 
-function Divider({ take, startMs, live }: { take: number; startMs: number; live: boolean }) {
-  return <p className="cr-take-divider" data-live={live || undefined}><span aria-hidden="true"/>{live ? `Take ${take} · recording` : `Take ${take} · ${formatTime(startMs)}`}<span aria-hidden="true"/></p>;
+/** "Take 2 · 1:20 · German, detected", "Take 1 · 0:00 · German", "Take 2 · recording · detecting language". */
+function dividerText(item: Extract<TranscriptItem, { kind: 'divider' }>, languages?: SpeechLanguage[]): string {
+  const language = takeLanguageLabel(item, languages) ?? (item.detecting ? 'detecting language' : undefined);
+  return [`Take ${item.take}`, item.live ? 'recording' : formatTime(item.startMs), language].filter(Boolean).join(' · ');
+}
+
+function Divider({ text, live }: { text: string; live: boolean }) {
+  return <p className="cr-take-divider" data-live={live || undefined}><span aria-hidden="true"/>{text}<span aria-hidden="true"/></p>;
 }
 
 function visibleIn(element: Element, box: Element) {
@@ -111,12 +118,17 @@ function visibleIn(element: Element, box: Element) {
 }
 
 /** The transcript column (decisions 4, 10 and 12). */
-export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false, findRequest = 0 }: TranscriptPaneProps) {
+export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveTake, languages, liveError, emptyMessage, error, onRetry, retryDisabled = false, retryBusy = false, findRequest = 0 }: TranscriptPaneProps) {
   const recording = mode === 'recording';
   const segments = transcript.segments;
   const liveIndex = recording ? liveTake?.index ?? 1 : undefined;
   const liveStart = recording ? liveTake?.startMs ?? 0 : undefined;
-  const items = useMemo(() => transcriptItems(segments, transcript.takes, liveIndex === undefined ? undefined : { index: liveIndex, startMs: liveStart ?? 0 }), [segments, transcript.takes, liveIndex, liveStart]);
+  const liveLanguage = recording ? liveTake?.language : undefined;
+  const liveDetected = recording ? liveTake?.languageDetected : undefined;
+  const items = useMemo(() => transcriptItems(segments, transcript.takes,
+    liveIndex === undefined ? undefined : { index: liveIndex, startMs: liveStart ?? 0, language: liveLanguage, languageDetected: liveDetected },
+    { language: transcript.language, languageDetected: transcript.languageDetected }),
+  [segments, transcript.takes, transcript.language, transcript.languageDetected, liveIndex, liveStart, liveLanguage, liveDetected]);
   const current = activeSegment(segments, timeMs);
   const spoken = current >= 0 ? activeWord(segments[current].words, timeMs) : -1;
   const hasLiveRows = items.some(item => item.kind === 'segment' && item.live);
@@ -267,7 +279,7 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
     </div></div></div>}
     <div ref={scroller} className="cr-transcript-scroll" onScroll={scrolled} onWheel={reading} onTouchMove={reading} onKeyDown={keyDown} onFocus={focused} onBlur={blurred}>
       {items.length ? items.map(item => item.kind === 'divider'
-        ? <Divider key={`take-${item.take}`} take={item.take} startMs={item.startMs} live={item.live}/>
+        ? <Divider key={`take-${item.take}`} text={dividerText(item, languages)} live={item.live}/>
         : <Row key={segments[item.index].id ?? item.index} segment={segments[item.index]} index={item.index} live={item.live} tail={item.tail} inert={recording}
             current={current === item.index} past={current !== item.index && segments[item.index].endMs <= timeMs} spoken={current === item.index ? spoken : -1}
             entry={entryRow === String(item.index) ? entryItem : null} needle={needle} match={matchSet.has(item.index)} matchCurrent={matchRow === item.index} seek={seek}/>)

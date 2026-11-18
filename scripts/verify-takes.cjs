@@ -107,7 +107,7 @@ async function recordTake(take, button) {
     assert(status.takeIndex === take, `Recording status reports take ${status.takeIndex}, not ${take}`);
     assert(!/Take \d|Adding to this session/.test(dockText), `The dock repeats the take: ${dockText}`);
     assert(await page.getByText(/Adding to this session/).count() === 0, 'A caption under the dock repeats the take');
-    observed.liveDivider = await transcriptPane().getByText(`Take ${take} · recording`, { exact: true }).count() > 0;
+    observed.liveDivider = await transcriptPane().getByText(new RegExp(`^Take ${take} · recording( · .+)?$`)).count() > 0;
     observed.copyForAgentDisabled = await page.getByRole('button', { name: 'Copy for agent', exact: true }).evaluateAll(buttons => buttons.every(button => button.disabled));
   }
   await delay(Math.max(0, TAKE_MS - (Date.now() - started)));
@@ -232,9 +232,10 @@ async function main() {
 
   // The saved transcript marks both takes, and the review shows the Take 2 divider.
   const transcript = await invoke('get_transcript', { id: sessionId });
-  assert(JSON.stringify(transcript.takes) === JSON.stringify([{ index: 1, startMs: 0 }, { index: 2, startMs: takes[1].offsetMs }]), `Transcript takes: ${JSON.stringify(transcript.takes)}`);
+  assert(JSON.stringify(transcript.takes.map(({ index, startMs }) => ({ index, startMs }))) === JSON.stringify([{ index: 1, startMs: 0 }, { index: 2, startMs: takes[1].offsetMs }]), `Transcript takes: ${JSON.stringify(transcript.takes)}`);
+  // The divider ends in the take's language when the take has speech.
   const divider = `Take 2 · ${clock(takes[1].offsetMs)}`;
-  await transcriptPane().getByText(divider, { exact: true }).waitFor();
+  await transcriptPane().getByText(new RegExp(`^${divider}( · .+)?$`)).waitFor();
   // The player opens on take 1's video; seeking into take 2 loads take 2's, and back again.
   const take1Video = await until(async () => { const video = await loadedVideo(); return video?.durationMs && video; }, 20000, 'The review video did not load');
   assert(!TAKE_2_VIDEO.test(take1Video.src) && Math.abs(take1Video.durationMs - ownMs[0]) <= 250, `The review opened ${JSON.stringify(take1Video)}, not take 1's video`);

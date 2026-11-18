@@ -5,8 +5,17 @@
 //! model and saves the words here, beside the take's audio. After Stop,
 //! [`crate::transcribe::transcribe_media`] reuses them and transcribes only
 //! the rest, so Stop no longer waits for the whole take. Saved stretches are
-//! used only for the audio file, model and language they were made with;
-//! Retry and `cue transcribe` forget them first.
+//! used only for the audio file, the language choice and the models they
+//! were made with; Retry and `cue transcribe` forget them first.
+//!
+//! Under Auto the take's language is decided here. Each stretch's language
+//! is detected until one guess is confident ([`CONFIDENT`]); that language
+//! then holds for the rest of the take. Stretches before the decision are
+//! transcribed in their own guess and kept as provisional; those made in
+//! another language than the decided one are transcribed again
+//! ([`Stretches::to_redo`], [`Stretches::replace`]): while the take records
+//! by [`Redo`], else by Stop. A take that stops undecided takes the likeliest
+//! language heard ([`Stretches::settle`]).
 use crate::{
     models::{Segment, Transcript},
     store::{atomic_write, read_json, Store},
@@ -102,6 +111,76 @@ pub fn cut(regions: &[(u64, u64)], pending_ms: u64) -> Option<Cut> {
     })
 }
 
+/// A guess decides a take's language at this probability or above. Measured
+/// on every stretch of a German recording as if a take started there: 0 of
+/// 436 wrong on the microphone at 0.9, 2.3 % wrong at 0.8.
+pub const CONFIDENT: f32 = 0.9;
+/// What a take is transcribed in when detection gave no guess at all.
+pub const FALLBACK_LANGUAGE: &str = "en";
+
+/// What detection heard in some speech: its top language and how sure it is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Guess {
+    /// A code of the speech model, for example `de`.
+    pub language: String,
+    /// The probability of that language, 0 to 1.
+    pub p: f32,
+}
+
+/// The language of the first guess that is confident, which decides a take.
+pub fn decided(guesses: &[Guess]) -> Option<&str> {
+    guesses
+        .iter()
+        .find(|guess| guess.p >= CONFIDENT)
+        .map(|guess| guess.language.as_str())
+}
+/// The language with the largest summed probability over `guesses`, for a
+/// take no guess decided; of equals, the one heard first.
+pub fn likeliest(guesses: &[Guess]) -> Option<&str> {
+    let mut sums: Vec<(&str, f32)> = Vec::new();
+    for guess in guesses {
+        match sums
+            .iter_mut()
+            .find(|(language, _)| *language == guess.language)
+        {
+            Some((_, sum)) => *sum += guess.p,
+            None => sums.push((guess.language.as_str(), guess.p)),
+        }
+    }
+    let mut best: Option<(&str, f32)> = None;
+    for (language, sum) in sums {
+        if best.is_none_or(|(_, most)| sum > most) {
+            best = Some((language, sum));
+        }
+    }
+    best.map(|(language, _)| language)
+}
+
+/// One finished stretch with speech: where it lies in the take and what its
+/// words were made with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Part {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// The language its words were transcribed in.
+    pub language: String,
+    /// The model file that transcribed them, for example `ggml-small.bin`.
+    pub model: String,
+    /// What detection heard in it, under Auto before the take was decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guess: Option<Guess>,
+    /// Made before the take's language was decided, in its own guess. Once
+    /// the take is decided, only stretches in another language keep this,
+    /// until they are transcribed again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provisional: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// The words of a take's finished stretches, take-relative, and what they
 /// were made from. Saved as `stretches/stretches.json` in the take folder.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -110,16 +189,24 @@ pub struct Stretches {
     pub version: u32,
     /// The live audio file the stretches were cut from, for example `mic.wav`.
     pub source: String,
-    /// The model file that transcribed them, for example `ggml-small.en.bin`.
-    pub model: String,
-    /// `en` or `de`.
-    pub language: String,
+    /// The language the take is held to: the one chosen in Settings, or the
+    /// one detection decided. `None` while Auto has not decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Whether detection decided `language`; false when it was chosen.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub language_detected: bool,
     /// Where the last finished stretch ends.
     pub until_ms: u64,
     pub segments: Vec<Segment>,
+    /// The finished stretches with speech, in order.
+    #[serde(default)]
+    pub parts: Vec<Part>,
 }
 
-const VERSION: u32 = 1;
+/// Version 1 held a take to one language and one model, named at the top
+/// level; it is not reused.
+const VERSION: u32 = 2;
 
 pub fn folder(take: &Path) -> PathBuf {
     take.join("stretches")
@@ -129,23 +216,140 @@ fn file(take: &Path) -> PathBuf {
 }
 
 impl Stretches {
-    pub fn new(source: &str, model: &str, language: &str) -> Self {
+    /// The stretches of a take cut from `source`, held to `chosen`, the
+    /// language chosen in Settings, or undecided under Auto (`None`).
+    pub fn new(source: &str, chosen: Option<&str>) -> Self {
         Self {
             version: VERSION,
             source: source.into(),
-            model: model.into(),
-            language: language.into(),
+            language: chosen.map(str::to_owned),
             ..Default::default()
         }
     }
+    /// Whether the next stretch's language still has to be detected: only
+    /// under Auto, until a guess has decided the take.
+    pub fn detects(&self) -> bool {
+        self.language.is_none()
+    }
+    /// The language to transcribe the next stretch in, given what detection
+    /// heard in it: the take's once it is held to one, whatever the stretch
+    /// sounds like; before that the stretch's own guess, or without one the
+    /// likeliest language heard so far.
+    pub fn language_for(&self, guess: Option<&Guess>) -> String {
+        match (&self.language, guess) {
+            (Some(language), _) => language.clone(),
+            (None, Some(guess)) => guess.language.clone(),
+            (None, None) => self.likeliest().unwrap_or_else(|| FALLBACK_LANGUAGE.into()),
+        }
+    }
+    fn guesses(&self) -> Vec<Guess> {
+        self.parts
+            .iter()
+            .filter_map(|part| part.guess.clone())
+            .collect()
+    }
+    /// The likeliest language over the guesses of the stretches so far.
+    fn likeliest(&self) -> Option<String> {
+        likeliest(&self.guesses()).map(str::to_owned)
+    }
+    /// Adds the stretch without speech from `until_ms` to `end_ms`.
+    pub fn skip(&mut self, end_ms: u64) {
+        self.until_ms = end_ms;
+    }
     /// Adds the words of the stretch from `until_ms` to `end_ms`, timed from
-    /// its own start, and moves `until_ms` to `end_ms`.
-    pub fn push(&mut self, stretch: Transcript, end_ms: u64) {
+    /// its own start, and moves `until_ms` to `end_ms`. `language` and
+    /// `model` made the words; `guess` is what detection heard in the
+    /// stretch, and decides the take when it is confident. Returns whether
+    /// this stretch decided the take and left earlier stretches in another
+    /// language, which are then transcribed again before newer ones.
+    pub fn push(
+        &mut self,
+        stretch: Transcript,
+        end_ms: u64,
+        language: &str,
+        model: &str,
+        guess: Option<Guess>,
+    ) -> bool {
         let start = self.until_ms;
         let index = self.segments.len();
         self.segments
             .extend(shift(stretch, start, end_ms - start, "stretch", index));
         self.until_ms = end_ms;
+        let undecided = self.language.is_none();
+        let confident = guess
+            .as_ref()
+            .filter(|guess| undecided && guess.p >= CONFIDENT)
+            .map(|guess| guess.language.clone());
+        self.parts.push(Part {
+            start_ms: start,
+            end_ms,
+            language: language.into(),
+            model: model.into(),
+            guess: guess.filter(|_| undecided),
+            provisional: undecided,
+        });
+        match confident {
+            Some(language) => {
+                self.hold(language);
+                !self.to_redo().is_empty()
+            }
+            None => false,
+        }
+    }
+    /// Holds the take to the detected `language`: stretches already in it
+    /// are final, the others wait to be transcribed again.
+    fn hold(&mut self, language: String) {
+        for part in &mut self.parts {
+            part.provisional = part.language != language;
+        }
+        self.language = Some(language);
+        self.language_detected = true;
+    }
+    /// Settles an undecided take when it stops: it takes the language with
+    /// the largest summed probability over its stretches' guesses, or the
+    /// language of its first stretch when nothing was guessed. Returns the
+    /// take's language; `None` when it has no stretch with speech.
+    pub fn settle(&mut self) -> Option<String> {
+        if self.language.is_none() {
+            let language = self
+                .likeliest()
+                .or_else(|| self.parts.first().map(|part| part.language.clone()))?;
+            self.hold(language);
+        }
+        self.language.clone()
+    }
+    /// The stretches to transcribe again: those made before the decision in
+    /// another language than the take's. None while the take is undecided.
+    pub fn to_redo(&self) -> Vec<Part> {
+        match &self.language {
+            Some(language) => self
+                .parts
+                .iter()
+                .filter(|part| part.language != *language)
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+    /// Replaces the words of the stretch starting at `start_ms` with
+    /// `stretch`, timed from the stretch's start and made in `language` with
+    /// `model`.
+    pub fn replace(&mut self, start_ms: u64, stretch: Transcript, language: &str, model: &str) {
+        let Some(part) = self.parts.iter_mut().find(|part| part.start_ms == start_ms) else {
+            return;
+        };
+        part.language = language.into();
+        part.model = model.into();
+        part.provisional = false;
+        let (start, end) = (part.start_ms, part.end_ms);
+        // A stretch's segments start inside it: `shift` keeps only such words.
+        self.segments
+            .retain(|segment| !(start..end).contains(&segment.start_ms));
+        let at = self
+            .segments
+            .partition_point(|segment| segment.start_ms < start);
+        let fresh = shift(stretch, start, end - start, "stretch", 0);
+        self.segments.splice(at..at, fresh);
     }
     /// The take's transcript: the stretches, then `rest`, the words after
     /// `until_ms` timed from there, `rest_ms` long.
@@ -164,7 +368,8 @@ impl Stretches {
         }
         Transcript {
             segments,
-            language: language.or_else(|| Some(self.language.clone())),
+            language: self.language.clone().or(language),
+            language_detected: self.language_detected,
             status: Some("complete".into()),
             error: None,
             takes: Vec::new(),
@@ -172,7 +377,8 @@ impl Stretches {
     }
     /// The live transcript: the stretches, then the words still being heard
     /// (`guess`, timed from `until_ms`) as one segment whose id starts with
-    /// `live-`, all moved by `offset_ms` onto the session timeline.
+    /// `live-`, all moved by `offset_ms` onto the session timeline. It names
+    /// the take's language once the take is held to one.
     pub fn live(&self, guess: Transcript, guess_ms: u64, offset_ms: u64) -> Transcript {
         let mut segments: Vec<Segment> = self
             .segments
@@ -202,9 +408,67 @@ impl Stretches {
         }
         Transcript {
             segments,
+            language: self.language.clone(),
+            language_detected: self.language_detected,
             status: Some("provisional".into()),
             ..Default::default()
         }
+    }
+}
+
+/// What became of one attempt to transcribe again, while the take records,
+/// the stretches made in another language before the take was decided.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Redone {
+    /// No stretch waits to be transcribed again.
+    Done,
+    /// The take's audio could not be copied just now, for example because
+    /// its writer was busy: the next update tries again.
+    Later(String),
+    /// A stretch could not be transcribed: what is left waits for Stop.
+    LeftToStop(String),
+}
+/// Transcribing provisional stretches again across the updates of one take.
+#[derive(Debug, Default)]
+pub struct Redo {
+    /// Set once a transcription failed: Stop does the rest.
+    left_to_stop: bool,
+}
+impl Redo {
+    /// Whether stretches of `stretches` wait to be transcribed again while
+    /// the take records.
+    pub fn pending(&self, stretches: &Stretches) -> bool {
+        !self.left_to_stop && !stretches.to_redo().is_empty()
+    }
+    /// Transcribes again each waiting stretch, oldest first: `copy` copies
+    /// the take's audio from that stretch's start, then `again` transcribes
+    /// the copy in the take's language and replaces the stretch's words
+    /// ([`Stretches::replace`]). A copy that fails ends this attempt and the
+    /// next one starts at the same stretch; a transcription that fails
+    /// leaves that stretch and those after it to Stop for the rest of the
+    /// take.
+    pub fn run(
+        &mut self,
+        stretches: &mut Stretches,
+        copy: &mut dyn FnMut(&Part) -> Result<(), String>,
+        again: &mut dyn FnMut(&Part, &str, &mut Stretches) -> Result<(), String>,
+    ) -> Redone {
+        if !self.pending(stretches) {
+            return Redone::Done;
+        }
+        let Some(language) = stretches.language.clone() else {
+            return Redone::Done;
+        };
+        for part in stretches.to_redo() {
+            if let Err(error) = copy(&part) {
+                return Redone::Later(error);
+            }
+            if let Err(error) = again(&part, &language, stretches) {
+                self.left_to_stop = true;
+                return Redone::LeftToStop(error);
+            }
+        }
+        Redone::Done
     }
 }
 
@@ -284,15 +548,49 @@ pub fn save(take: &Path, stretches: &Stretches) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(stretches).map_err(|e| e.to_string())?;
     atomic_write(&file(take), &bytes)
 }
-/// The take's saved stretches when they were cut from `source` and made by
-/// `model` in `language`; `None` otherwise, or when there are none.
-pub fn usable(take: &Path, source: &str, model: &str, language: &str) -> Option<Stretches> {
+/// The take's saved stretches for Stop, settled on the take's language,
+/// when they can be reused: cut from `source`, made under the language
+/// choice that holds now (`chosen`, `None` for Auto), and every stretch in
+/// the take's language made by the model that language uses now
+/// (`model_of` gives its file name). `None` otherwise, or when there are
+/// none. Stretches in another language are still to be transcribed again
+/// ([`Stretches::to_redo`]).
+pub fn usable(
+    take: &Path,
+    source: &str,
+    chosen: Option<&str>,
+    model_of: &dyn Fn(&str) -> String,
+) -> Option<Stretches> {
+    let mut saved: Stretches = read_json(&file(take)).ok()?;
+    if saved.version != VERSION || saved.source != source {
+        return None;
+    }
+    let same_choice = match chosen {
+        Some(language) => saved.language.as_deref() == Some(language) && !saved.language_detected,
+        None => saved.language.is_none() || saved.language_detected,
+    };
+    if !same_choice {
+        return None;
+    }
+    if let Some(language) = saved.settle() {
+        let model = model_of(&language);
+        let stale = |part: &Part| part.language == language && part.model != model;
+        if saved.parts.iter().any(stale) {
+            return None;
+        }
+    }
+    Some(saved)
+}
+/// The language the take's saved stretches hold it to, and whether
+/// detection decided it, for the pass that refines them.
+pub fn language(take: &Path) -> Option<(String, bool)> {
     let saved: Stretches = read_json(&file(take)).ok()?;
-    (saved.version == VERSION
-        && saved.source == source
-        && saved.model == model
-        && saved.language == language)
-        .then_some(saved)
+    if saved.version != VERSION {
+        return None;
+    }
+    saved
+        .language
+        .map(|language| (language, saved.language_detected))
 }
 /// Forgets the take's stretches, so its next transcription covers the whole
 /// take. Their raw Whisper output stays.
@@ -406,12 +704,356 @@ mod tests {
         );
     }
 
+    const SMALL_EN: &str = "ggml-small.en.bin";
+    const SMALL: &str = "ggml-small.bin";
+    fn guess(language: &str, p: f32) -> Guess {
+        Guess {
+            language: language.into(),
+            p,
+        }
+    }
+    /// The model file of a language, as `deps::final_model` names it once
+    /// both small models are installed.
+    fn model_of(language: &str) -> String {
+        if language == "en" { SMALL_EN } else { SMALL }.into()
+    }
+    /// A take under Auto whose stretches of 10 s each were heard as
+    /// `guesses`, each transcribed as the live worker does: in the language
+    /// [`Stretches::language_for`] gives, its one word naming that language.
+    fn heard(guesses: &[Option<(&str, f32)>]) -> Stretches {
+        let mut stretches = Stretches::new("mic.wav", None);
+        for heard in guesses {
+            hear(
+                &mut stretches,
+                heard.map(|(language, p)| guess(language, p)),
+            );
+        }
+        stretches
+    }
+    fn hear(stretches: &mut Stretches, heard: Option<Guess>) {
+        let heard = heard.filter(|_| stretches.detects());
+        let language = stretches.language_for(heard.as_ref());
+        let end = stretches.until_ms + 10_000;
+        stretches.push(
+            spoken(&[(&format!("{language}-words"), 100, 400)]),
+            end,
+            &language,
+            &model_of(&language),
+            heard,
+        );
+    }
+    /// The language each stretch's words are in, from the words themselves.
+    fn word_languages(stretches: &Stretches) -> Vec<String> {
+        stretches
+            .segments
+            .iter()
+            .map(|segment| segment.text.trim_end_matches("-words").to_owned())
+            .collect()
+    }
+    /// Transcribes again what the take marked for it, as the live worker
+    /// and Stop do.
+    fn redo(stretches: &mut Stretches) -> Vec<u64> {
+        let language = stretches.language.clone().unwrap();
+        let again = stretches.to_redo();
+        for part in &again {
+            stretches.replace(
+                part.start_ms,
+                spoken(&[(&format!("{language}-words"), 100, 400)]),
+                &language,
+                &model_of(&language),
+            );
+        }
+        again.iter().map(|part| part.start_ms).collect()
+    }
+
+    #[test]
+    fn the_first_confident_guess_decides_and_the_sum_settles_the_rest() {
+        let guesses = |heard: &[(&str, f32)]| -> Vec<Guess> {
+            heard
+                .iter()
+                .map(|&(language, p)| guess(language, p))
+                .collect()
+        };
+        // Nothing heard, nothing decided.
+        assert_eq!(decided(&[]), None);
+        assert_eq!(likeliest(&[]), None);
+        // 0.9 decides; just under it does not, however often it is heard.
+        assert_eq!(decided(&guesses(&[("de", 0.9)])), Some("de"));
+        assert_eq!(decided(&guesses(&[("de", 0.89), ("de", 0.89)])), None);
+        // The first confident guess wins, not the surest one.
+        assert_eq!(
+            decided(&guesses(&[("en", 0.5), ("de", 0.93), ("en", 0.99)])),
+            Some("de")
+        );
+        // Undecided: the largest sum, which several weak guesses can reach.
+        assert_eq!(
+            likeliest(&guesses(&[("en", 0.6), ("de", 0.5), ("de", 0.45)])),
+            Some("de")
+        );
+        assert_eq!(
+            likeliest(&guesses(&[("en", 0.8), ("de", 0.4), ("fr", 0.3)])),
+            Some("en")
+        );
+        // Of equals, the one heard first.
+        assert_eq!(likeliest(&guesses(&[("de", 0.5), ("en", 0.5)])), Some("de"));
+    }
+
+    #[test]
+    fn an_unconfident_guess_waits_for_more_speech() {
+        // Noise, then a few unclear words: no guess is confident.
+        let mut take = heard(&[Some(("en", 0.55)), Some(("nl", 0.4))]);
+        assert_eq!(take.language, None);
+        assert!(take.detects(), "the next stretch is detected too");
+        assert!(
+            take.to_redo().is_empty(),
+            "nothing to redo before a decision"
+        );
+        assert_eq!(word_languages(&take), ["en", "nl"]);
+        assert!(take.parts.iter().all(|part| part.provisional));
+        assert_eq!(take.parts[0].guess, Some(guess("en", 0.55)));
+        // While undecided the live transcript names no language.
+        let live = take.live(Transcript::default(), 0, 0);
+        assert_eq!((live.language, live.language_detected), (None, false));
+
+        // Clear German follows: its stretch decides the take.
+        hear(&mut take, Some(guess("de", 0.97)));
+        assert_eq!(
+            (take.language.as_deref(), take.language_detected),
+            (Some("de"), true)
+        );
+        assert!(!take.detects());
+        let live = take.live(Transcript::default(), 0, 0);
+        assert_eq!(
+            (live.language.as_deref(), live.language_detected),
+            (Some("de"), true)
+        );
+        // The stretches before it, made in other languages, are done again:
+        // the whole take is German, the words before the clear speech included.
+        assert_eq!(redo(&mut take), [0, 10_000]);
+        assert_eq!(word_languages(&take), ["de", "de", "de"]);
+        assert!(take.to_redo().is_empty());
+        assert!(take
+            .parts
+            .iter()
+            .all(|part| !part.provisional && part.language == "de" && part.model == SMALL));
+        // The words stay in their stretches, in order, with ids of their own.
+        let starts: Vec<_> = take.segments.iter().map(|s| s.start_ms).collect();
+        assert_eq!(starts, [100, 10_100, 20_100]);
+        let ids: std::collections::HashSet<_> = take.segments.iter().map(|s| &s.id).collect();
+        assert_eq!(ids.len(), 3);
+        let joined = take.join(Transcript::default(), 0);
+        assert_eq!(
+            (joined.language.as_deref(), joined.language_detected),
+            (Some("de"), true)
+        );
+    }
+
+    #[test]
+    fn a_take_without_a_confident_guess_uses_the_likeliest_language() {
+        // The take ends before any guess is confident.
+        let mut take = heard(&[
+            Some(("en", 0.6)),
+            Some(("de", 0.5)),
+            None,
+            Some(("de", 0.45)),
+        ]);
+        assert_eq!(take.language, None);
+        // A stretch without a guess is transcribed in the likeliest so far:
+        // English led with 0.6 against 0.5 when it came.
+        assert_eq!(word_languages(&take), ["en", "de", "en", "de"]);
+        // Stop settles it on the largest sum: German, 0.95 against 0.6.
+        assert_eq!(take.settle().as_deref(), Some("de"));
+        assert_eq!(
+            (take.language.as_deref(), take.language_detected),
+            (Some("de"), true)
+        );
+        assert_eq!(redo(&mut take), [0, 20_000]);
+        assert_eq!(word_languages(&take), ["de", "de", "de", "de"]);
+        // Settling again changes nothing.
+        assert_eq!(take.settle().as_deref(), Some("de"));
+        assert!(take.to_redo().is_empty());
+
+        // Nothing was ever guessed: the take stays in what it was made in.
+        let mut unheard = heard(&[None, None]);
+        assert_eq!(unheard.settle().as_deref(), Some("en"));
+        assert!(unheard.to_redo().is_empty());
+        // A take without speech has no language to settle on.
+        let mut silent = Stretches::new("mic.wav", None);
+        silent.skip(28_000);
+        assert_eq!(silent.settle(), None);
+        assert_eq!(silent.until_ms, 28_000);
+    }
+
+    #[test]
+    fn a_detected_language_is_kept_for_the_rest_of_the_take() {
+        let mut take = heard(&[Some(("de", 0.99))]);
+        assert_eq!(take.language.as_deref(), Some("de"));
+        // The deciding stretch is already in German: nothing to redo.
+        assert!(take.to_redo().is_empty());
+        assert!(!take.parts[0].provisional);
+        // Later speech is short, noisy or in another language: nothing is
+        // detected any more, and whatever a guess would say, it is German.
+        assert!(!take.detects());
+        assert_eq!(take.language_for(None), "de");
+        assert_eq!(take.language_for(Some(&guess("en", 0.99))), "de");
+        take.push(
+            spoken(&[("ja", 100, 400)]),
+            20_000,
+            "de",
+            SMALL,
+            Some(guess("en", 0.99)),
+        );
+        hear(&mut take, Some(guess("en", 0.99)));
+        assert_eq!(take.language.as_deref(), Some("de"));
+        assert!(take.parts.iter().all(|part| part.language == "de"));
+        assert!(take.to_redo().is_empty());
+        // Guesses after the decision are not kept.
+        assert_eq!(take.guesses(), [guess("de", 0.99)]);
+
+        // A language chosen in Settings holds from the start, undetected.
+        let mut fixed = Stretches::new("mic.wav", Some("fr"));
+        assert!(!fixed.detects());
+        assert_eq!(fixed.language_for(Some(&guess("en", 0.99))), "fr");
+        fixed.push(spoken(&[("oui", 100, 400)]), 10_000, "fr", SMALL, None);
+        assert_eq!(
+            (fixed.language.as_deref(), fixed.language_detected),
+            (Some("fr"), false)
+        );
+        assert!(!fixed.parts[0].provisional && fixed.to_redo().is_empty());
+        let live = fixed.live(Transcript::default(), 0, 0);
+        assert_eq!(
+            (live.language.as_deref(), live.language_detected),
+            (Some("fr"), false)
+        );
+    }
+
+    #[test]
+    fn provisional_stretches_are_redone_in_order_and_a_busy_copy_is_tried_again() {
+        // Three stretches before the decision, two of them in other languages.
+        let decided = || {
+            let mut take = heard(&[Some(("en", 0.6)), Some(("de", 0.7)), Some(("nl", 0.5))]);
+            hear(&mut take, Some(guess("de", 0.95)));
+            take
+        };
+        let mut take = decided();
+        let waiting =
+            |take: &Stretches| -> Vec<u64> { take.to_redo().iter().map(|p| p.start_ms).collect() };
+        assert_eq!(waiting(&take), [0, 20_000]);
+        let german = |part: &Part, language: &str, take: &mut Stretches| {
+            take.replace(
+                part.start_ms,
+                spoken(&[(&format!("{language}-words"), 100, 400)]),
+                language,
+                &model_of(language),
+            );
+            Ok(())
+        };
+        // What was asked for, in order: a copy from a stretch's start, then
+        // that stretch's transcription in the take's language.
+        let steps = std::cell::RefCell::new(Vec::new());
+        let copied = |part: &Part| {
+            steps.borrow_mut().push(format!("copy {}", part.start_ms));
+            Ok(())
+        };
+        let transcribed = |part: &Part, language: &str, take: &mut Stretches| {
+            steps
+                .borrow_mut()
+                .push(format!("{language} {}", part.start_ms));
+            german(part, language, take)
+        };
+        let mut redo = Redo::default();
+        assert!(redo.pending(&take));
+
+        // The live track's writer is busy at the second stretch: the first is
+        // done, the attempt ends, nothing is given up.
+        let busy = "Audio snapshot is busy; retry next update";
+        let outcome = redo.run(
+            &mut take,
+            &mut |part| {
+                if part.start_ms == 20_000 {
+                    return Err(busy.to_string());
+                }
+                copied(part)
+            },
+            &mut |part, language, take| transcribed(part, language, take),
+        );
+        assert_eq!(outcome, Redone::Later(busy.into()));
+        assert_eq!(*steps.borrow(), ["copy 0", "de 0"]);
+        assert_eq!(waiting(&take), [20_000]);
+        assert!(redo.pending(&take), "the next update tries again");
+        // The next update starts at the stretch that was left, and finishes.
+        steps.borrow_mut().clear();
+        let outcome = redo.run(
+            &mut take,
+            &mut |part| copied(part),
+            &mut |part, language, take| transcribed(part, language, take),
+        );
+        assert_eq!(outcome, Redone::Done);
+        assert_eq!(*steps.borrow(), ["copy 20000", "de 20000"]);
+        assert_eq!(word_languages(&take), ["de", "de", "de", "de"]);
+        assert!(!redo.pending(&take) && take.to_redo().is_empty());
+        let never_copy = &mut |_: &Part| -> Result<(), String> { panic!("nothing waits") };
+        let never = &mut |_: &Part, _: &str, _: &mut Stretches| -> Result<(), String> {
+            panic!("nothing waits")
+        };
+        assert_eq!(redo.run(&mut take, never_copy, never), Redone::Done);
+
+        // A transcription that fails is not tried again while recording:
+        // that stretch and the one after it wait for Stop.
+        let mut take = decided();
+        let mut redo = Redo::default();
+        steps.borrow_mut().clear();
+        let outcome = redo.run(&mut take, &mut |part| copied(part), &mut |_, _, _| {
+            Err("Local speech processing failed.".to_string())
+        });
+        assert_eq!(
+            outcome,
+            Redone::LeftToStop("Local speech processing failed.".into())
+        );
+        assert_eq!(*steps.borrow(), ["copy 0"]);
+        assert!(!redo.pending(&take));
+        assert_eq!(waiting(&take), [0, 20_000], "still marked for Stop");
+        assert_eq!(redo.run(&mut take, never_copy, never), Redone::Done);
+
+        // Only the stretch that decides the take reports stretches to redo,
+        // so later stretches are finished as usual while some still wait.
+        let mut take = heard(&[Some(("en", 0.6))]);
+        let german_words = || spoken(&[("de-words", 100, 400)]);
+        let decides = take.push(german_words(), 20_000, "de", SMALL, Some(guess("de", 0.95)));
+        assert!(decides);
+        assert!(!take.push(german_words(), 30_000, "de", SMALL, None));
+        assert_eq!(waiting(&take), [0]);
+        // A deciding stretch with nothing before it in another language, and
+        // an undecided one, report nothing.
+        let mut clear = Stretches::new("mic.wav", None);
+        assert!(!clear.push(german_words(), 10_000, "de", SMALL, Some(guess("de", 0.5))));
+        assert!(!clear.push(german_words(), 20_000, "de", SMALL, Some(guess("de", 0.99))));
+        // Nothing is redone before the take is decided.
+        let mut undecided = heard(&[Some(("en", 0.6)), Some(("de", 0.7))]);
+        assert!(!Redo::default().pending(&undecided));
+        assert_eq!(
+            Redo::default().run(&mut undecided, never_copy, never),
+            Redone::Done
+        );
+    }
+
     #[test]
     fn stretches_join_without_gaps_or_overlaps() {
-        let mut stretches = Stretches::new("mic.wav", "ggml-small.en.bin", "en");
-        stretches.push(spoken(&[("one", 100, 400), ("two", 500, 800)]), 1100);
+        let mut stretches = Stretches::new("mic.wav", Some("en"));
+        let english = |stretches: &mut Stretches, words: Transcript, end_ms| {
+            stretches.push(words, end_ms, "en", SMALL_EN, None)
+        };
+        english(
+            &mut stretches,
+            spoken(&[("one", 100, 400), ("two", 500, 800)]),
+            1100,
+        );
         // A word the model placed past the cut is dropped, never doubled.
-        stretches.push(spoken(&[("three", 50, 300), ("ghost", 3500, 3600)]), 4100);
+        english(
+            &mut stretches,
+            spoken(&[("three", 50, 300), ("ghost", 3500, 3600)]),
+            4100,
+        );
         assert_eq!(stretches.until_ms, 4100);
         let joined = stretches.join(spoken(&[("four", 0, 200)]), 900);
         assert_eq!(
@@ -465,30 +1107,98 @@ mod tests {
     #[test]
     fn saved_stretches_are_used_only_when_they_match() {
         let take = tempfile::tempdir().unwrap();
-        assert!(usable(take.path(), "mic.wav", "ggml-small.en.bin", "en").is_none());
-        let mut stretches = Stretches::new("mic.wav", "ggml-small.en.bin", "en");
-        stretches.push(spoken(&[("one", 100, 400)]), 1000);
+        let english = Some("en");
+        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
+        let mut stretches = Stretches::new("mic.wav", english);
+        stretches.push(spoken(&[("one", 100, 400)]), 1000, "en", SMALL_EN, None);
         save(take.path(), &stretches).unwrap();
         assert_eq!(
-            usable(take.path(), "mic.wav", "ggml-small.en.bin", "en")
+            usable(take.path(), "mic.wav", english, &model_of)
                 .map(|saved| (saved.until_ms, saved.segments.len())),
             Some((1000, 1))
         );
-        for (source, model, language) in [
-            ("audio.wav", "ggml-small.en.bin", "en"),
-            ("mic.wav", "ggml-base.bin", "en"),
-            ("mic.wav", "ggml-small.en.bin", "de"),
-        ] {
-            assert!(usable(take.path(), source, model, language).is_none());
-        }
+        assert_eq!(language(take.path()), Some(("en".into(), false)));
+        // Another audio file, another language choice (German, or Auto,
+        // which never chose English), or a model that arrived meanwhile.
+        let base = |_: &str| "ggml-base.bin".to_owned();
+        assert!(usable(take.path(), "audio.wav", english, &model_of).is_none());
+        assert!(usable(take.path(), "mic.wav", Some("de"), &model_of).is_none());
+        assert!(usable(take.path(), "mic.wav", None, &model_of).is_none());
+        assert!(usable(take.path(), "mic.wav", english, &base).is_none());
         // Retry forgets them; the raw output in the folder stays.
         fs::write(folder(take.path()).join("0.json"), b"{}").unwrap();
         forget(take.path());
-        assert!(usable(take.path(), "mic.wav", "ggml-small.en.bin", "en").is_none());
+        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
+        assert_eq!(language(take.path()), None);
         assert!(folder(take.path()).join("0.json").is_file());
         // A damaged file is not used.
         fs::write(file(take.path()), b"{broken").unwrap();
-        assert!(usable(take.path(), "mic.wav", "ggml-small.en.bin", "en").is_none());
+        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
+        // Nor is a file of version 1, which knew one language per take.
+        fs::write(
+            file(take.path()),
+            br#"{"version":1,"source":"mic.wav","model":"ggml-small.en.bin","language":"en","untilMs":1000,"segments":[]}"#,
+        )
+        .unwrap();
+        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
+        assert_eq!(language(take.path()), None);
+    }
+
+    #[test]
+    fn stretches_made_under_auto_are_settled_and_reused_under_auto() {
+        let take = tempfile::tempdir().unwrap();
+        // Stopped undecided: Stop settles it on the likeliest language and
+        // finds the stretch to transcribe again.
+        let undecided = heard(&[Some(("en", 0.6)), Some(("de", 0.8))]);
+        save(take.path(), &undecided).unwrap();
+        assert_eq!(
+            language(take.path()),
+            None,
+            "nothing decided while it recorded"
+        );
+        let settled = usable(take.path(), "mic.wav", None, &model_of).unwrap();
+        assert_eq!(
+            (settled.language.as_deref(), settled.language_detected),
+            (Some("de"), true)
+        );
+        let again: Vec<_> = settled.to_redo().iter().map(|part| part.start_ms).collect();
+        assert_eq!(again, [0]);
+        // A language chosen before Stop is used instead: the whole take again.
+        assert!(usable(take.path(), "mic.wav", Some("de"), &model_of).is_none());
+        // The German model arrived during the take: its stretches were made
+        // with base, so the whole take is transcribed again.
+        let mut early = Stretches::new("mic.wav", None);
+        early.push(
+            spoken(&[("eins", 100, 400)]),
+            10_000,
+            "de",
+            "ggml-base.bin",
+            Some(guess("de", 0.95)),
+        );
+        save(take.path(), &early).unwrap();
+        assert_eq!(language(take.path()), Some(("de".into(), true)));
+        assert!(usable(take.path(), "mic.wav", None, &model_of).is_none());
+        let base = |_: &str| "ggml-base.bin".to_owned();
+        assert!(usable(take.path(), "mic.wav", None, &base).is_some());
+        // Only silence so far: reused, with the language still to detect.
+        let mut silent = Stretches::new("mic.wav", None);
+        silent.skip(28_000);
+        save(take.path(), &silent).unwrap();
+        let reused = usable(take.path(), "mic.wav", None, &model_of).unwrap();
+        assert_eq!((reused.language, reused.until_ms), (None, 28_000));
+        // What is saved: the decision and each stretch's guess.
+        let saved: serde_json::Value = serde_json::to_value(&settled).unwrap();
+        assert_eq!(saved["version"], 2);
+        assert_eq!(
+            (&saved["language"], &saved["languageDetected"]),
+            (&serde_json::json!("de"), &serde_json::json!(true))
+        );
+        assert_eq!(
+            saved["parts"][0],
+            serde_json::json!({"startMs":0,"endMs":10_000,"language":"en","model":SMALL_EN,
+                "guess":{"language":"en","p":0.6f32},"provisional":true})
+        );
+        assert!(saved["parts"][1].get("provisional").is_none());
     }
 
     /// What a real-time replay of a recorded take through the live worker
@@ -556,9 +1266,15 @@ mod tests {
             let take = root.path().join("take");
             let live = take.join("live");
             fs::create_dir_all(&live).unwrap();
-            let model = crate::deps::final_model("en");
-            let model_file = model.path.file_name().unwrap().to_string_lossy().into_owned();
-            let mut stretches = Stretches::new("mic.wav", &model_file, "en");
+            // The recorded take is English and its numbers were measured
+            // held to English, so this replay is too.
+            let english = crate::models::Settings {
+                language: Some("en".into()),
+                ..Default::default()
+            };
+            crate::settings::save(root.path(), &english).unwrap();
+            let models = crate::deps::TakeModels::now();
+            let mut stretches = Stretches::new("mic.wav", Some("en"));
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let snapshot = live.join("snapshot.wav");
             // When the shown words first reached each point of the audio.
@@ -584,9 +1300,15 @@ mod tests {
                 }
                 writer.finalize().unwrap();
                 let length = now_ms - from;
-                let (guess, audio) =
-                    crate::transcribe::live_guess(root.path(), &live, &snapshot, length, &cancel)
-                        .unwrap();
+                let (guess, audio) = crate::transcribe::live_guess(
+                    root.path(),
+                    &live,
+                    &snapshot,
+                    length,
+                    stretches.language.as_deref(),
+                    &cancel,
+                )
+                .unwrap();
                 seen(&stretches.live(guess.clone(), length, 0), started.elapsed().as_secs_f64());
                 let before = stretches.until_ms;
                 let (guess, guess_ms) = match audio {
@@ -594,7 +1316,7 @@ mod tests {
                         root.path(),
                         &take,
                         &live,
-                        &model,
+                        &models,
                         &mut stretches,
                         &audio,
                         guess,
