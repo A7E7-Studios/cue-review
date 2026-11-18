@@ -14,7 +14,7 @@ nearest the code it changes.
 ## 2. Two tracks through the passes (after 1)
 
 - [x] 2.1 `track` on a segment and `trackLanguages` on the transcript and take marks, read and written; test: src-tauri/src/transcribe.rs::tests::rows_of_two_tracks_are_merged_by_time
-- [x] 2.2 Whole-take passes per track, the system track first, the microphone through the echo gate, merged by time; test: src-tauri/src/transcribe.rs::tests::a_take_with_two_tracks_is_transcribed_from_both
+- [x] 2.2 Whole-take passes per track, the two at the same time, the microphone through the echo gate, merged by time; test: src-tauri/src/transcribe.rs::tests::a_take_with_two_tracks_is_transcribed_from_both
 - [x] 2.3 Each track detected on its own; test: src-tauri/src/transcribe.rs::tests::each_track_is_detected_on_its_own
 - [x] 2.4 Echo left out and own speech kept through a pass; test: src-tauri/src/transcribe.rs::tests::microphone_speech_that_matches_the_system_audio_is_left_out
 - [x] 2.5 The ignored test with two installed voices; test: src-tauri/src/transcribe.rs::tests::actual_speaker_echo_is_transcribed_once

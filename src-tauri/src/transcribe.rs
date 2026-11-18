@@ -1254,8 +1254,8 @@ fn transcribe_take_with(
 /// settings choose the language and the decoding options.
 ///
 /// A folder with both `mic.wav` and `system.wav` is transcribed from each,
-/// the system track first, and the rows are merged by time
-/// ([`merge_tracks`]). What the microphone heard of the system audio from
+/// the two at the same time ([`Pass::run_both`]), and the rows are merged
+/// by time ([`merge_tracks`]). What the microphone heard of the system audio from
 /// the loudspeakers is silenced before its speech is looked for, detected
 /// or transcribed ([`echo`]). Any other folder is transcribed from one
 /// file: `mic.wav`, else `audio.wav`, else `video.mp4`.

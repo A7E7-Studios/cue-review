@@ -45,10 +45,16 @@ The app SHALL give a final transcription half the processor's logical threads, a
 at least four where the processor has them, and the transcription it does while recording a
 quarter, at most four and at least two where the processor has them, because more than eight
 threads barely speed it up, work done while recording runs beside the capture and its encoder, and
-a small processor must not get fewer threads than whisper's own defaults.
+a small processor must not get fewer threads than whisper's own defaults. The two tracks of a take
+recorded with a microphone and system audio are transcribed at the same time, each with a final
+transcription's threads where the processor has eight or more and with half the processor's threads
+below that, because one after the other they keep the person waiting after Stop, when nothing is
+captured any more, and together they must not ask for more threads than the processor has.
 
 #### Scenario: Thread counts follow the processor
 - **WHEN** a final or a live transcription starts on a processor with 2, 4, 8 or 32 logical threads
 - **THEN** a final transcription uses 2, 4, 4 or 8 threads
 - **AND** a live transcription uses 2, 2, 2 or 4 threads
+- **AND** each of the two tracks of a take with both uses 1, 2, 4 or 8 threads in its final
+  transcription
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::thread_counts_follow_the_processor

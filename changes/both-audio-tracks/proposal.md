@@ -2,6 +2,7 @@
 title: Transcribe the system audio beside the microphone
 capabilities:
   - transcription/transcribed-tracks
+  - transcription/speech-runtime
 review: unreviewed
 ---
 # Transcribe the system audio beside the microphone
@@ -50,6 +51,11 @@ and cannot tell who said what.
 
 ## Calls for the owner
 
+- The two tracks of a final transcription run at the same time, each with a final transcription's
+  threads from eight logical threads on and half the processor's below that, which the
+  speech-runtime spec now states ("Thread counts follow the processor"). The owner chose this over
+  capping the two together at the old limit, which would have kept Stop near 6.7 s where side by
+  side it took 3.7 s.
 - Built after `auto-language`: "The reviewer and the call speak different languages" needs its
   per-take detection, applied per track. Without it this change would hold both tracks to one
   language.
