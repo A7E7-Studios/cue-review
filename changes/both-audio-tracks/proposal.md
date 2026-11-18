@@ -27,7 +27,7 @@ and cannot tell who said what.
   both in the transcript", "A take with one track is transcribed as before".
 - Both tracks are transcribed while recording: "Both tracks are ready seconds after Stop".
 - Each row says where it was heard, in the app and for the agent: "Rows are marked as microphone
-  or computer audio", "An agent reads each row's track".
+  or computer audio", "A row names its track on demand", "An agent reads each row's track".
 - What the microphone heard from the speakers is left out: "A call played through speakers appears
   once", "The reviewer's own words are kept", "A reviewer on headphones loses nothing".
 - Each track has its own language: "The reviewer and the call speak different languages".
@@ -45,6 +45,8 @@ and cannot tell who said what.
 - **Q15 Live**: both tracks are transcribed while recording. Rejected: the system track after Stop,
   which brings back minutes of waiting on a long session.
 - **Q19 Summary**: confirmed as written here.
+- **Look**: F, chat sides with the track named on hover (`look.md`). Rejected: marks on every row or
+  run ("Both clutter the view unnecessarily"); the track on hover only; chat sides without the name.
 
 ## Calls for the owner
 

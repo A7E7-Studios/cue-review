@@ -67,16 +67,27 @@ transcript of one track loses the other half of the conversation.
 - **PROOF** desk: open
 
 ### Requirement: Each row says where it was heard
-The app SHALL mark each row of a take transcribed from two tracks as heard on the microphone or in
-the computer's audio, and `cue transcript` SHALL report the same, because the reviewer's remarks
+The app SHALL show each row of a take transcribed from two tracks as heard on the microphone or in
+the computer's audio, by the side it sits on and by name on demand, and `cue transcript` SHALL
+report the same, because the reviewer's remarks
 and what the call or the reviewed app said mean different things to the person reading and to the
 agent acting on the review.
 
 #### Scenario: Rows are marked as microphone or computer audio
 - **GIVEN** a take transcribed from two tracks
 - **WHEN** its transcript is shown
-- **THEN** every row shows whether it was heard on the microphone or in the computer's audio
+- **THEN** computer-audio rows sit on the left with their time on the left, and microphone rows
+  are set in from the left with their time on the right, with no other mark on a row
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::marks each row of a two-track take with its track
+- **PROOF** desk: open
+
+#### Scenario: A row names its track on demand
+- **GIVEN** a take transcribed from two tracks
+- **WHEN** the person hovers a row, or moves keyboard focus into it
+- **THEN** a tag above the row names its track, "Microphone" or "Computer audio", and its language
+  when the two tracks differ, without moving any text
+- **AND** a screen reader hears the track with the row's time
+- **PROOF** test: src/workspace/TranscriptPane.test.tsx::names a row's track on hover and focus and to a screen reader
 - **PROOF** desk: open
 
 #### Scenario: An agent reads each row's track
