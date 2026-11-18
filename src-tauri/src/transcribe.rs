@@ -806,9 +806,12 @@ fn redo_stretch(
 /// just held to, the stretches made before that in another language
 /// ([`stretches::Redo::run`]). `copy` copies a live track of the take from a
 /// point (ms into the take) into a file, as a live snapshot is made, so the
-/// copy starts where the stretch does and may run past its end. For the
-/// microphone of a take with two tracks it is asked for the system track
-/// too, by which the echo in the stretch is silenced again.
+/// copy starts where the stretch does and may run past its end; it returns
+/// the copy's bounds in the take (ms). For the microphone of a take with two
+/// tracks it is asked for the system track too, by which the echo in the
+/// stretch is silenced again; when that copy cannot be made, or does not
+/// start where the stretch does, nothing in the stretch counts as echo
+/// ([`stretches::is_reference`]).
 #[allow(clippy::too_many_arguments)]
 pub fn redo_provisional(
     root: &Path,
@@ -818,20 +821,22 @@ pub fn redo_provisional(
     stretches: &mut Stretches,
     redo: &mut stretches::Redo,
     cancel: &AtomicBool,
-    copy: &mut dyn FnMut(Track, u64, &Path) -> Result<(), String>,
+    copy: &mut dyn FnMut(Track, u64, &Path) -> stretches::Bounds,
 ) -> stretches::Redone {
     let audio = folder.join("redo.wav");
     let own = stretches.audio();
     let system =
         (stretches.track == Some(Track::Microphone)).then(|| folder.join("redo-system.wav"));
+    // Whether the system track was copied for the stretch in hand.
+    let compared = std::cell::Cell::new(false);
     redo.run(
         stretches,
         &mut |part| {
-            copy(own, part.start_ms, &audio)?;
-            match &system {
-                Some(system) => copy(Track::System, part.start_ms, system),
-                None => Ok(()),
-            }
+            let (start, _) = copy(own, part.start_ms, &audio)?;
+            compared.set(system.as_ref().is_some_and(|system| {
+                stretches::is_reference(start, &copy(Track::System, part.start_ms, system))
+            }));
+            Ok(())
         },
         &mut |part, language, stretches| {
             let model = models.of(language);
@@ -840,7 +845,7 @@ pub fn redo_provisional(
                 take,
                 folder,
                 &audio,
-                system.as_deref(),
+                system.as_deref().filter(|_| compared.get()),
                 part,
                 language,
                 model,
@@ -1212,6 +1217,10 @@ pub(crate) fn transcribe_media_in(
     }
     pass.run(None)
 }
+/// Whether `speech` is an audio file without a single sample.
+fn holds_no_audio(speech: &Path) -> bool {
+    hound::WavReader::open(speech).is_ok_and(|reader| reader.duration() == 0)
+}
 /// One whole-take pass over a take folder: what [`transcribe_media_in`] is
 /// given, for each track it transcribes.
 struct Pass<'a> {
@@ -1258,7 +1267,7 @@ impl Pass<'_> {
         let convert = |speech: &Path, from_ms: u64, length_ms: u64| -> Result<(), String> {
             let from = (from_ms > 0).then_some(from_ms);
             (tools.convert)(&source, speech, from, Some(length_ms))?;
-            if track == Some(Track::Microphone) {
+            if track == Some(Track::Microphone) && !holds_no_audio(speech) {
                 let reference = folder.join("echo-reference.wav");
                 let system = folder.join(Track::System.file());
                 (tools.convert)(&system, &reference, from, Some(length_ms))?;
@@ -1288,7 +1297,14 @@ impl Pass<'_> {
         } else {
             let speech = named("speech.wav");
             convert(&speech, from_ms, rest_ms)?;
-            let regions = (tools.regions)(&speech)?;
+            // A track of two that holds no audio there, as one that never
+            // got a sample and was not finished, has no speech; the
+            // detector refuses an empty file.
+            let regions = if track.is_some() && holds_no_audio(&speech) {
+                Vec::new()
+            } else {
+                (tools.regions)(&speech)?
+            };
             if regions.is_empty() {
                 empty_transcript()
             } else {
@@ -2794,6 +2810,116 @@ Speech segment 0: start = 1.0, end = 2.0
     }
 
     #[test]
+    fn a_track_without_audio_neither_fails_the_take_nor_costs_the_other_its_stretches() {
+        use echo::made_up::{quiet, read, voice, write};
+        // 35 s in which one track speaks from 1 to 4 s and from 31 to 33 s.
+        let speaking = [
+            quiet(1_000),
+            voice(3, 3_000, -30.0),
+            quiet(27_000),
+            voice(5, 2_000, -30.0),
+            quiet(2_000),
+        ]
+        .concat();
+        // The other track never got a sample: after Stop it is silence of
+        // the take's length; a take that was not finished leaves it empty.
+        for nothing in [quiet(35_000), Vec::new()] {
+            for speaker in [Track::Microphone, Track::System] {
+                let silent = match speaker {
+                    Track::Microphone => Track::System,
+                    Track::System => Track::Microphone,
+                };
+                let (root, folder) = take_folder();
+                write(&folder.join(speaker.file()), &speaking);
+                write(&folder.join(silent.file()), &nothing);
+                // While it recorded, the speaking track finished a stretch
+                // of 30 s; the other one had nothing to cut.
+                let mut live = Stretches::of_track(speaker, Some("en"));
+                live.push(spoken("live"), 30_000, "en", "ggml-small.en.bin", None);
+                stretches::save(&folder, &live).unwrap();
+                settings::save(root.path(), &chosen("en")).unwrap();
+                let converted = std::cell::RefCell::new(Vec::new());
+                // As the detector, which refuses a file without samples.
+                let detector = |speech: &Path| {
+                    if read(speech).is_empty() {
+                        return Err("failed to read audio data".to_string());
+                    }
+                    loud(speech)
+                };
+                let tools = Tools {
+                    convert: &|source, target, from_ms, length_ms| {
+                        converted.borrow_mut().push((file_name(source), from_ms));
+                        let from = from_ms.unwrap_or(0);
+                        wav_slice(source, target, from, from + length_ms.unwrap())
+                    },
+                    regions: &detector,
+                    detect: &|_, _| panic!("a language is chosen"),
+                    model: &|_| Ok("ggml-small.en.bin".into()),
+                    whisper: &|speech, _, _| {
+                        let mut said = empty_transcript();
+                        for (start_ms, end_ms) in loud(speech)? {
+                            said.segments
+                                .extend(sample_transcript(&[("words", start_ms, end_ms)]).segments);
+                        }
+                        Ok(said)
+                    },
+                    echo: &|microphone, system| {
+                        echo::silence_echo(microphone, system, &detector(microphone)?).map(|_| ())
+                    },
+                };
+                // Stop: the take is transcribed, the speaking track from its
+                // stretch and the 5 s after it, and nothing fails.
+                let transcript =
+                    transcribe_media_in(root.path(), &folder, 35_000, true, true, &tools)
+                        .unwrap_or_else(|error| panic!("{speaker:?} beside {silent:?}: {error}"));
+                assert_eq!(
+                    rows(&transcript),
+                    [
+                        (Some(speaker), "live", 100),
+                        (Some(speaker), "words", 31_000),
+                    ]
+                );
+                let whole = |track: Track| (track.file().to_owned(), None);
+                let rest = |track: Track| (track.file().to_owned(), Some(30_000));
+                let expected = match speaker {
+                    // The system track first, whole; then the microphone's
+                    // rest, compared with the system audio of the same span.
+                    Track::Microphone => {
+                        vec![whole(silent), rest(speaker), rest(silent)]
+                    }
+                    // A microphone without audio is compared with nothing.
+                    Track::System => match nothing.is_empty() {
+                        true => vec![rest(speaker), whole(silent)],
+                        false => vec![rest(speaker), whole(silent), whole(speaker)],
+                    },
+                };
+                assert_eq!(*converted.borrow(), expected);
+                assert!(
+                    stretches::language(&folder, Some(speaker)).is_some(),
+                    "the stretches were reused, and wait for the refining pass"
+                );
+                let languages = transcript.track_languages.clone().unwrap();
+                let (heard, unheard) = match speaker {
+                    Track::Microphone => (languages.microphone, languages.system),
+                    Track::System => (languages.system, languages.microphone),
+                };
+                assert_eq!(heard.unwrap().language, "en");
+                assert_eq!(unheard, None, "a track without words has no language");
+                // The refining pass, and Retry and `cue transcribe`, read
+                // both tracks whole and do not fail either.
+                let again =
+                    transcribe_media_in(root.path(), &folder, 35_000, true, false, &tools).unwrap();
+                let heard: Vec<_> = again
+                    .segments
+                    .iter()
+                    .map(|row| (row.track, row.start_ms / 1000))
+                    .collect();
+                assert_eq!(heard, [(Some(speaker), 1), (Some(speaker), 31)]);
+            }
+        }
+    }
+
+    #[test]
     fn a_session_with_takes_is_transcribed_take_by_take_on_its_timeline() {
         let (_temp, store, id) = take_session(vec![
             take(1, 0, 2000, TakeStatus::Ready, true),
@@ -3127,7 +3253,8 @@ Speech segment 0: start = 1.0, end = 2.0
             &cancel,
             &mut |track, from_ms, target| {
                 copies.borrow_mut().push((track, from_ms));
-                wav_slice(&mic, target, from_ms, from_ms + 60_000)
+                wav_slice(&mic, target, from_ms, from_ms + 60_000)?;
+                Ok((from_ms, length_ms.min(from_ms + 60_000)))
             },
         );
         assert_eq!(outcome, stretches::Redone::Done);

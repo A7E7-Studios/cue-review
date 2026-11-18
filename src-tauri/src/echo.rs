@@ -340,7 +340,11 @@ impl SpeechFile {
 
 /// Judges the speech `regions` (start and end in ms) of the file
 /// `microphone` against the file `system`, which holds the system audio of
-/// the same span; both are 16 kHz mono 16-bit.
+/// the same span; both are 16 kHz mono 16-bit. Where `system` ends before
+/// `microphone`, as a live copy of a track does that got no samples while
+/// nothing played, the system audio is silent from there, which is what the
+/// finished track holds: a region past its end is never echo, and one
+/// across it is judged whole, by what the audio before the end explains.
 pub fn judge(
     microphone: &Path,
     system: &Path,
@@ -672,6 +676,67 @@ mod tests {
             .map(|piece| (piece.start_ms, piece.end_ms, piece.is_echo()))
             .collect();
         assert_eq!(verdicts, [(0, 10_000, true), (10_000, 20_000, false)]);
+    }
+
+    #[test]
+    fn a_system_file_that_ends_early_is_silent_from_there() {
+        let folder = tempfile::tempdir().unwrap();
+        let (microphone_file, system_file) = (
+            folder.path().join("speech.wav"),
+            folder.path().join("system.wav"),
+        );
+        // The call talks for 6 s and the reviewer from 7 to 9 s; the copy
+        // of the system track ends at 4 s.
+        let call = [voice(1, 6_000, -20.0), quiet(4_000)].concat();
+        let reviewer = [quiet(7_000), voice(3, 2_000, -30.0), quiet(1_000)].concat();
+        write(
+            &microphone_file,
+            &mixed(&heard(&call, 130, 20.0), &reviewer),
+        );
+        write(&system_file, &call[..4_000 * PER_MS]);
+        let verdict = |region: (u64, u64)| {
+            let pieces = judge(&microphone_file, &system_file, &[region]).unwrap();
+            (pieces[0].is_echo(), pieces[0].score.unwrap())
+        };
+        // Before the end the two are compared as ever.
+        assert!(verdict((500, 3_500)).0);
+        // Past it there is no system audio: nothing there is echo, whether
+        // it is the reviewer or the rest of the call from the loudspeakers.
+        let (echo, score) = verdict((7_000, 9_000));
+        assert!(!echo && score.system_dbfs < -100.0, "{score:?}");
+        assert!(!verdict((4_500, 6_000)).0);
+        // A region across the end is judged whole: the tail of an echo
+        // goes with it, and a region that lies mostly past the end stays.
+        let (echo, score) = verdict((1_000, 4_500));
+        assert!(echo && score.share > 0.6, "{score:?}");
+        let (echo, score) = verdict((3_500, 6_000));
+        assert!(!echo && score.share < 0.3, "{score:?}");
+        assert_eq!(
+            silence_echo(
+                &microphone_file,
+                &system_file,
+                &[(500, 3_500), (4_500, 6_000), (7_000, 9_000)]
+            )
+            .unwrap(),
+            [(4_500, 6_000), (7_000, 9_000)]
+        );
+        // A system file without a sample makes nothing echo, and a longer
+        // one is compared over the microphone's span.
+        write(&microphone_file, &heard(&call, 130, 20.0));
+        write(&system_file, &[]);
+        assert_eq!(
+            silence_echo(&microphone_file, &system_file, &[(500, 3_500)]).unwrap(),
+            [(500, 3_500)]
+        );
+        write(
+            &system_file,
+            &[call.clone(), voice(4, 5_000, -20.0)].concat(),
+        );
+        assert!(
+            silence_echo(&microphone_file, &system_file, &[(500, 3_500)])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

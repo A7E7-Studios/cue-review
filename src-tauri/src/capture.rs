@@ -4736,6 +4736,116 @@ mod tests {
         assert!(snapshot_live_track(&[], Track::Microphone, 0, &copy).is_err());
     }
     #[test]
+    fn a_live_track_without_samples_is_silent_until_its_first_packet() {
+        use crate::stretches::{copy_for, cycle_error, turns, Copied, Turned};
+        let dir = tempfile::tempdir().unwrap();
+        // A track as the capture starts it: a file and no packet yet.
+        let live = |track: Track, name: &str| {
+            let path = dir.path().join(name);
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 1000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+            let wav = hound::WavWriter::create(&path, spec).unwrap();
+            LiveTrack {
+                track,
+                writer: Arc::new(Mutex::new(AudioWriter::new(wav, &path, 1000))),
+                path,
+            }
+        };
+        let tracks = [
+            live(Track::Microphone, "mic.wav"),
+            live(Track::System, "system.wav"),
+        ];
+        let packet = |track: &LiveTrack, value: f32, ms: usize, at: f64, start: f64| {
+            let mut writer = track.writer.lock().unwrap();
+            writer
+                .packet(&vec![value; ms], 1, at, start, false)
+                .unwrap();
+        };
+        let (snapshot, reference) = (dir.path().join("copy.wav"), dir.path().join("echo.wav"));
+        // One cycle of the live worker over these tracks, each from `from`.
+        let cycle = |from: u64| -> Vec<Copied> {
+            turns(&[Track::Microphone, Track::System], 0)
+                .into_iter()
+                .map(|turn| {
+                    copy_for(turn, true, &mut |track, echo| {
+                        let target = if echo { &reference } else { &snapshot };
+                        snapshot_live_track(&tracks, track, from, target)
+                    })
+                })
+                .collect()
+        };
+        let audio = |length_ms, reference| Copied::Audio {
+            length_ms,
+            reference,
+        };
+        let waiting = || Copied::Silent("Waiting for audio samples".into());
+        let shown = |copied: &[Copied]| {
+            let turned: Vec<_> = copied
+                .iter()
+                .map(|copied| match copied {
+                    Copied::Audio { .. } => Turned::Served,
+                    Copied::Silent(why) => Turned::Silent(why.clone()),
+                    Copied::Failed(error) => Turned::Failed(error.clone()),
+                })
+                .collect();
+            cycle_error(&turned)
+        };
+        // Neither device has delivered anything.
+        let copied = cycle(0);
+        assert_eq!(copied, [waiting(), waiting()]);
+        assert_eq!(shown(&copied), Some("Waiting for audio samples".into()));
+        // The microphone records from the start; nothing plays, so the
+        // loopback sends nothing: the system turn is silent, the microphone
+        // is heard without a reference, and no error is shown.
+        packet(&tracks[0], 0.25, 4_000, 0.0, 0.0);
+        let copied = cycle(0);
+        assert_eq!(copied, [waiting(), audio(4_000, false)]);
+        assert_eq!(shown(&copied), None);
+        // 6 s in the computer plays 2 s of sound: the track holds silence
+        // up to it, and both tracks are copied over the same span.
+        packet(&tracks[1], 0.5, 2_000, 0.0, 6.0);
+        packet(&tracks[0], 0.25, 4_000, 4.0, 0.0);
+        let copied = cycle(0);
+        assert_eq!(copied, [audio(8_000, false), audio(8_000, true)]);
+        assert_eq!(shown(&copied), None);
+        let played: Vec<f32> = hound::WavReader::open(&reference)
+            .unwrap()
+            .samples()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            (played.len(), played[0], played[5_999], played[6_000]),
+            (8_000, 0.0, 0.0, 0.5)
+        );
+        // Nothing plays again while the microphone goes on to 20 s: the
+        // system track stays at 8 s. From 5 s its copy ends early, and
+        // counts as silent from there; from 15 s there is none to compare.
+        packet(&tracks[0], 0.25, 12_000, 8.0, 0.0);
+        assert_eq!(cycle(5_000), [audio(3_000, false), audio(15_000, true)]);
+        assert_eq!(
+            hound::WavReader::open(&reference).unwrap().duration(),
+            3_000
+        );
+        assert_eq!(cycle(15_000)[1], audio(5_000, false));
+
+        // Stop: a track that never got a sample ends as silence of the
+        // take's length, as any other finished track.
+        let never = live(Track::System, "never.wav");
+        let mut writer = never.writer.lock().unwrap();
+        writer.finish(Duration::from_secs(9)).unwrap();
+        let finished: Vec<f32> = hound::WavReader::open(&never.path)
+            .unwrap()
+            .samples()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(finished.len(), 9_000);
+        assert!(finished.iter().all(|sample| *sample == 0.0));
+    }
+    #[test]
     #[ignore = "Records the actual Windows display, microphone and system audio for 3 seconds"]
     #[cfg(windows)]
     fn actual_windows_capture() {

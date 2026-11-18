@@ -628,6 +628,89 @@ pub fn turns(tracks: &[Track], cycle: u64) -> Vec<Turn> {
         .into_iter()
         .collect()
 }
+/// The bounds in the take (ms) of a copy of a live track, or why none could
+/// be made.
+pub type Bounds = Result<(u64, u64), String>;
+/// What a turn of the live worker has to work on: the copies of the take's
+/// live tracks it could make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Copied {
+    /// `length_ms` of the turn's track, from the end of its last finished
+    /// stretch. `reference`: the system track was copied from the same
+    /// point too, for the microphone's echo to be recognised by; without it
+    /// nothing of the microphone's audio counts as echo.
+    Audio { length_ms: u64, reference: bool },
+    /// Nothing of the track could be copied, for the reason given: a track
+    /// of two is silent for this cycle, and the other one goes on.
+    Silent(String),
+    /// Nothing of the take's only track could be copied.
+    Failed(String),
+}
+/// Whether a copy of the system track with these bounds (ms into the take)
+/// can be compared with a microphone copy that starts at `start_ms`: it was
+/// made, starts at the same point and holds audio. A system track that is
+/// shorter than `start_ms` gives an empty copy from its own end, and one
+/// without samples none at all: nothing has played there.
+pub fn is_reference(start_ms: u64, system: &Bounds) -> bool {
+    matches!(system, Ok((start, end)) if *start == start_ms && end > start)
+}
+/// Makes the copies for `turn` of a take recording two tracks (`two`) or
+/// one. `copy` copies a live track from the end of the turn's last finished
+/// stretch and returns the copy's bounds in the take (ms); its flag says
+/// whether the copy is the echo reference, the system track over the
+/// microphone's span, which goes to a file of its own.
+///
+/// A track of two that cannot be copied, because it has no samples yet (a
+/// loopback sends none until the computer first plays something, a device
+/// can start late) or for any other reason, is silent for this cycle; the
+/// take's only track failing is a failure, as it always was. The microphone
+/// of two is compared with the system track only when that copy was made
+/// and starts where the microphone's does; where the system copy ends
+/// before the microphone's, the system audio counts as silent from there
+/// ([`crate::echo`]).
+pub fn copy_for(turn: Turn, two: bool, copy: &mut dyn FnMut(Track, bool) -> Bounds) -> Copied {
+    let (start, end) = match copy(turn.track, false) {
+        Ok(bounds) => bounds,
+        Err(error) if two => return Copied::Silent(error),
+        Err(error) => return Copied::Failed(error),
+    };
+    let length_ms = end.saturating_sub(start);
+    let reference = two
+        && turn.track == Track::Microphone
+        && length_ms > 0
+        && is_reference(start, &copy(Track::System, true));
+    Copied::Audio {
+        length_ms,
+        reference,
+    }
+}
+/// How one turn of a cycle of the live worker ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Turned {
+    /// Its audio was heard.
+    Served,
+    /// Its track could not be copied and counted as silent ([`Copied::Silent`]).
+    Silent(String),
+    /// It failed: the copy of a take's only track, or the transcription.
+    Failed(String),
+}
+/// The error a cycle of the live worker shows in place of the live
+/// transcript: the first turn that failed, or, when not one track could be
+/// copied, why the first could not. A silent track beside one that was
+/// heard is no error.
+pub fn cycle_error(turned: &[Turned]) -> Option<String> {
+    let failed = turned.iter().find_map(|turn| match turn {
+        Turned::Failed(error) => Some(error.clone()),
+        _ => None,
+    });
+    let heard = turned.contains(&Turned::Served);
+    failed.or_else(|| {
+        turned.iter().find_map(|turn| match turn {
+            Turned::Silent(why) if !heard => Some(why.clone()),
+            _ => None,
+        })
+    })
+}
 /// The rows of two tracks in the order they were spoken: by the time the
 /// app shows for a row, its first word's alignment point when it has one
 /// and its start otherwise, the system row first where two share it.
@@ -1361,6 +1444,250 @@ mod tests {
             }
         }
         assert!(turns(&[], 0).is_empty());
+    }
+
+    /// The copies a cycle asked for: the track, and whether as the echo
+    /// reference.
+    type Asked = Vec<(Track, bool)>;
+    /// What the capture answers when a live track has no samples yet.
+    const WAITING: &str = "Waiting for audio samples";
+    const BUSY: &str = "Audio snapshot is busy; retry next update";
+    /// The copies one cycle makes of a take whose live tracks hold `lengths`
+    /// ms of audio (`Err` for a track that cannot be copied), each track
+    /// from `from` ms: what each turn has to work on, and which copies were
+    /// asked for, the echo reference marked.
+    fn cycle_copies(
+        lengths: &[(Track, Result<u64, &str>)],
+        from: &[(Track, u64)],
+    ) -> (Vec<(Track, Copied)>, Asked) {
+        let recorded: Vec<Track> = lengths.iter().map(|(track, _)| *track).collect();
+        let two = recorded.len() > 1;
+        let asked = std::cell::RefCell::new(Vec::new());
+        let copied = turns(&recorded, 0)
+            .into_iter()
+            .map(|turn| {
+                let from_ms = from
+                    .iter()
+                    .find(|(track, _)| *track == turn.track)
+                    .map_or(0, |(_, from_ms)| *from_ms);
+                // As the capture copies: from the point asked for, or from
+                // the track's end when it is shorter, up to 60 s.
+                let mut copy = |track: Track, reference: bool| {
+                    asked.borrow_mut().push((track, reference));
+                    let length = lengths
+                        .iter()
+                        .find(|(recorded, _)| *recorded == track)
+                        .map(|(_, length)| *length)
+                        .unwrap_or(Err("No live track"))
+                        .map_err(str::to_owned)?;
+                    if length == 0 {
+                        return Err(WAITING.to_owned());
+                    }
+                    let start = from_ms.min(length);
+                    Ok((start, length.min(start + 60_000)))
+                };
+                (turn.track, copy_for(turn, two, &mut copy))
+            })
+            .collect();
+        (copied, asked.into_inner())
+    }
+    fn audio(length_ms: u64, reference: bool) -> Copied {
+        Copied::Audio {
+            length_ms,
+            reference,
+        }
+    }
+    fn ends(copied: &[(Track, Copied)]) -> Vec<Turned> {
+        copied
+            .iter()
+            .map(|(_, copied)| match copied {
+                Copied::Audio { .. } => Turned::Served,
+                Copied::Silent(why) => Turned::Silent(why.clone()),
+                Copied::Failed(error) => Turned::Failed(error.clone()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_system_track_without_samples_is_silent_until_it_fills() {
+        use Track::{Microphone, System};
+        // Nothing has played yet: the loopback has sent no packet, so the
+        // system track has no samples, while the microphone has 4 s.
+        let (copied, asked) = cycle_copies(&[(Microphone, Ok(4_000)), (System, Ok(0))], &[]);
+        assert_eq!(
+            copied,
+            [
+                (System, Copied::Silent(WAITING.into())),
+                // The microphone goes on as in a take with one track:
+                // nothing of it is compared, nothing counts as echo.
+                (Microphone, audio(4_000, false)),
+            ]
+        );
+        assert_eq!(
+            asked,
+            [(System, false), (Microphone, false), (System, true)],
+            "the system track first, then the microphone and its reference"
+        );
+        assert_eq!(cycle_error(&ends(&copied)), None, "no error is shown");
+        // The computer plays its first sound at 6 s: the track then holds
+        // silence up to it. Both tracks are heard, and the microphone is
+        // compared with the system audio of the same span.
+        let both = [(Microphone, Ok(8_000)), (System, Ok(8_000))];
+        let (copied, _) = cycle_copies(&both, &[]);
+        assert_eq!(
+            copied,
+            [
+                (System, audio(8_000, false)),
+                (Microphone, audio(8_000, true))
+            ]
+        );
+        assert_eq!(cycle_error(&ends(&copied)), None);
+        // Each track from the end of its own last finished stretch.
+        let (copied, _) = cycle_copies(&both, &[(Microphone, 7_000), (System, 2_000)]);
+        assert_eq!(
+            copied,
+            [
+                (System, audio(6_000, false)),
+                (Microphone, audio(1_000, true))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_microphone_track_without_samples_does_not_stop_the_system_track() {
+        use Track::{Microphone, System};
+        // A device that starts late: the call is heard meanwhile.
+        let (copied, asked) = cycle_copies(&[(Microphone, Ok(0)), (System, Ok(5_000))], &[]);
+        assert_eq!(
+            copied,
+            [
+                (System, audio(5_000, false)),
+                (Microphone, Copied::Silent(WAITING.into())),
+            ]
+        );
+        assert_eq!(
+            asked,
+            [(System, false), (Microphone, false)],
+            "no reference is copied for a microphone without audio"
+        );
+        assert_eq!(cycle_error(&ends(&copied)), None);
+        // Neither track has a sample yet: that is shown, as for one track.
+        let (copied, _) = cycle_copies(&[(Microphone, Ok(0)), (System, Ok(0))], &[]);
+        assert_eq!(cycle_error(&ends(&copied)), Some(WAITING.into()));
+        // The microphone has caught up to where it was heard last: nothing
+        // new, nothing to compare.
+        let (copied, asked) = cycle_copies(
+            &[(Microphone, Ok(5_000)), (System, Ok(9_000))],
+            &[(Microphone, 5_000)],
+        );
+        assert_eq!(copied[1], (Microphone, audio(0, false)));
+        assert_eq!(asked.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_copy_of_one_track_leaves_the_other_its_turn() {
+        use Track::{Microphone, System};
+        // The system track's writer is busy, or the track has failed: the
+        // system turn is silent and the microphone's audio is not compared.
+        for error in [BUSY, "Audio writer failed", "Audio recording has stopped"] {
+            let (copied, _) = cycle_copies(&[(Microphone, Ok(4_000)), (System, Err(error))], &[]);
+            assert_eq!(
+                copied,
+                [
+                    (System, Copied::Silent(error.into())),
+                    (Microphone, audio(4_000, false)),
+                ]
+            );
+            assert_eq!(cycle_error(&ends(&copied)), None);
+            // And the other way round.
+            let (copied, _) = cycle_copies(&[(Microphone, Err(error)), (System, Ok(4_000))], &[]);
+            assert_eq!(
+                copied,
+                [
+                    (System, audio(4_000, false)),
+                    (Microphone, Copied::Silent(error.into())),
+                ]
+            );
+            assert_eq!(cycle_error(&ends(&copied)), None);
+        }
+        // The system turn was heard, but its reference copy for the
+        // microphone, made a moment later, fails: no echo, no error.
+        let calls = std::cell::Cell::new(0);
+        let microphone = Turn {
+            track: Microphone,
+            guess: true,
+        };
+        let copied = copy_for(microphone, true, &mut |track, reference| {
+            calls.set(calls.get() + 1);
+            match (track, reference) {
+                (Microphone, false) => Ok((3_000, 9_000)),
+                (System, true) => Err(BUSY.to_owned()),
+                other => panic!("{other:?} is not copied in the microphone's turn"),
+            }
+        });
+        assert_eq!((copied, calls.get()), (audio(6_000, false), 2));
+        // Both copies fail: the cycle shows why, the first reason.
+        let (copied, _) = cycle_copies(
+            &[
+                (Microphone, Err(BUSY)),
+                (System, Err("Audio writer failed")),
+            ],
+            &[],
+        );
+        assert_eq!(
+            cycle_error(&ends(&copied)),
+            Some("Audio writer failed".into())
+        );
+        // A transcription that fails is shown, whatever the other track did.
+        let failed = Turned::Failed("Local speech processing failed.".into());
+        for other in [Turned::Served, Turned::Silent(WAITING.into())] {
+            assert_eq!(
+                cycle_error(&[other, failed.clone()]),
+                Some("Local speech processing failed.".into())
+            );
+        }
+        assert_eq!(cycle_error(&[]), None);
+
+        // A take with one track is as it was: its copy failing is the
+        // cycle's error, and nothing else is copied.
+        for track in [Microphone, System] {
+            for error in [WAITING, BUSY] {
+                let length = if error == WAITING { Ok(0) } else { Err(error) };
+                let (copied, asked) = cycle_copies(&[(track, length)], &[]);
+                assert_eq!(copied, [(track, Copied::Failed(error.into()))]);
+                assert_eq!(asked, [(track, false)]);
+                assert_eq!(cycle_error(&ends(&copied)), Some(error.into()));
+            }
+            let (copied, asked) = cycle_copies(&[(track, Ok(4_000))], &[(track, 1_000)]);
+            assert_eq!(copied, [(track, audio(3_000, false))]);
+            assert_eq!(asked, [(track, false)]);
+        }
+    }
+
+    #[test]
+    fn copies_of_different_spans_are_compared_only_from_the_same_start() {
+        use Track::{Microphone, System};
+        let reference = |microphone: u64, system: u64, from: u64| {
+            let lengths = [(Microphone, Ok(microphone)), (System, Ok(system))];
+            cycle_copies(&lengths, &[(Microphone, from)]).0[1].1.clone()
+        };
+        // The system copy ends before the microphone's (nothing has played
+        // since 5 s) or after it: both start where the microphone's does,
+        // so they are compared, the system audio silent past its end.
+        assert_eq!(reference(8_000, 5_000, 0), audio(8_000, true));
+        assert_eq!(reference(8_000, 5_000, 3_000), audio(5_000, true));
+        assert_eq!(reference(8_000, 30_000, 3_000), audio(5_000, true));
+        // The system track ends at or before the point the microphone is
+        // heard from: its copy would start elsewhere, or is empty, so
+        // nothing is compared and nothing counts as echo.
+        assert_eq!(reference(20_000, 5_000, 5_000), audio(15_000, false));
+        assert_eq!(reference(20_000, 5_000, 15_000), audio(5_000, false));
+        // The rule itself: made, from the same point, with audio.
+        assert!(is_reference(3_000, &Ok((3_000, 3_001))));
+        assert!(!is_reference(3_000, &Ok((3_000, 3_000))));
+        assert!(!is_reference(3_000, &Ok((2_000, 9_000))));
+        assert!(!is_reference(3_000, &Ok((4_000, 9_000))));
+        assert!(!is_reference(3_000, &Err(WAITING.into())));
     }
 
     #[test]

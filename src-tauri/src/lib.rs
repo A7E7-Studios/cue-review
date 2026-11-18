@@ -203,7 +203,10 @@ fn live_transcript(tracks: &[LiveTrack], offset_ms: u64) -> Transcript {
 /// ([`stretches::turns`]), whose copy is compared with a copy of the system
 /// track over the same span, so what the microphone heard from the
 /// loudspeakers is silenced before it is guessed or cut into stretches
-/// ([`echo`]). The live transcript holds both tracks' rows.
+/// ([`echo`]). The live transcript holds both tracks' rows. A track that
+/// cannot be copied, as a system track is until the computer first plays
+/// something, is silent for that cycle and stops neither the other track
+/// nor the live transcript ([`stretches::copy_for`]).
 ///
 /// Each track is held to the language chosen in Settings. Under Auto each
 /// finished stretch's language is detected until one guess is confident,
@@ -270,12 +273,9 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             std::thread::sleep(Duration::from_millis(50));
         }
         next = Instant::now() + stretches::LIVE_CYCLE;
-        let mut failure = None;
+        let mut turned = Vec::new();
         for (at, turn) in stretches::turns(&recorded, cycle).into_iter().enumerate() {
             let from = tracks[at].stretches.until_ms;
-            // The microphone's echo is recognised by the system audio of
-            // the same span.
-            let echo = two && turn.track == Track::Microphone;
             // Copying is bounded to 60 s. Never hold runtime during inference.
             let copied = {
                 let runtime = match s.runtime.lock() {
@@ -286,23 +286,37 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
                     return;
                 }
                 let active = &runtime.active.as_ref().unwrap().1;
-                active
-                    .snapshot_audio_from(turn.track, from, &snapshot)
-                    .and_then(|bounds| {
-                        if echo {
-                            active.snapshot_audio_from(Track::System, from, &system_snapshot)?;
-                        }
-                        Ok(bounds)
-                    })
+                // The microphone's echo is recognised by the system audio
+                // of the same span, copied beside it.
+                stretches::copy_for(turn, two, &mut |track, reference| {
+                    let target = if reference {
+                        &system_snapshot
+                    } else {
+                        &snapshot
+                    };
+                    active.snapshot_audio_from(track, from, target)
+                })
             };
-            let result = copied.and_then(|(start, end)| {
+            let copied = match copied {
+                stretches::Copied::Audio {
+                    length_ms,
+                    reference,
+                } => Ok((length_ms, reference)),
+                // A track of two without audio to copy is silent for this
+                // cycle; the other one is served as usual.
+                stretches::Copied::Silent(why) => {
+                    turned.push(stretches::Turned::Silent(why));
+                    continue;
+                }
+                stretches::Copied::Failed(error) => Err(error),
+            };
+            let result = copied.and_then(|(length, echo)| {
                 {
                     let _inference = s.inference.lock().map_err(|e| e.to_string())?;
                     if cancel.load(Ordering::Acquire) {
                         return Err("Live transcription cancelled.".into());
                     }
                     // The guess shows at once; finishing stretches takes longer.
-                    let length = end - start;
                     let language = tracks[at].stretches.language.clone();
                     let (guess, audio) = transcribe::live_guess(
                         &root,
@@ -368,14 +382,15 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
                 }
                 Ok(())
             });
-            if let Err(error) = result {
-                failure.get_or_insert(error);
-            }
+            turned.push(match result {
+                Ok(()) => stretches::Turned::Served,
+                Err(error) => stretches::Turned::Failed(error),
+            });
             if cancel.load(Ordering::Acquire) {
                 return;
             }
         }
-        let shown = match failure {
+        let shown = match stretches::cycle_error(&turned) {
             Some(error) => Err(error),
             None => Ok(live_transcript(&tracks, offset)),
         };
@@ -420,9 +435,7 @@ fn redo_provisional(
                 return Err("Live transcription cancelled.".into());
             }
             let (_, active) = runtime.active.as_ref().ok_or("No recording is active.")?;
-            active
-                .snapshot_audio_from(track, from_ms, target)
-                .map(|_| ())
+            active.snapshot_audio_from(track, from_ms, target)
         },
     )
 }

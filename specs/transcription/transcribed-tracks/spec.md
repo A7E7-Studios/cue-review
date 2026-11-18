@@ -122,3 +122,4 @@ audio and once badly as the microphone heard it.
 - **WHEN** the reviewer and the call speak at the same time
 - **THEN** both are in the transcript, each on its own track
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::microphone_speech_without_a_match_is_kept
+- **PROOF** desk: open
