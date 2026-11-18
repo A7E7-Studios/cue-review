@@ -83,7 +83,7 @@ export const backend = {
   microphones: () => call<Microphone[]>('list_microphones'),
   setup: () => call<SetupStatus>('get_setup_status'),
   installTranscription: () => call<void>('install_transcription'),
-  /** Every language the speech model knows, in no particular order. */
+  /** Every language the speech model knows, in the speech model's order; Settings sorts them. */
   languages: () => call<SpeechLanguage[]>('get_languages'),
   /** The models the chosen language needs alone, as `setup().languageModels` reports them, without checking the tools: read each second while one downloads. */
   languageModels: () => call<LanguageModel[]>('get_language_models'),

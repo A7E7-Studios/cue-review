@@ -13,8 +13,9 @@
 //! then holds for the rest of the take. Stretches before the decision are
 //! transcribed in their own guess and kept as provisional; those made in
 //! another language than the decided one are transcribed again
-//! ([`Stretches::to_redo`], [`Stretches::replace`]). A take that stops
-//! undecided takes the likeliest language heard ([`Stretches::settle`]).
+//! ([`Stretches::to_redo`], [`Stretches::replace`]): while the take records
+//! by [`Redo`], else by Stop. A take that stops undecided takes the likeliest
+//! language heard ([`Stretches::settle`]).
 use crate::{
     models::{Segment, Transcript},
     store::{atomic_write, read_json, Store},
@@ -258,7 +259,9 @@ impl Stretches {
     /// Adds the words of the stretch from `until_ms` to `end_ms`, timed from
     /// its own start, and moves `until_ms` to `end_ms`. `language` and
     /// `model` made the words; `guess` is what detection heard in the
-    /// stretch, and decides the take when it is confident.
+    /// stretch, and decides the take when it is confident. Returns whether
+    /// this stretch decided the take and left earlier stretches in another
+    /// language, which are then transcribed again before newer ones.
     pub fn push(
         &mut self,
         stretch: Transcript,
@@ -266,7 +269,7 @@ impl Stretches {
         language: &str,
         model: &str,
         guess: Option<Guess>,
-    ) {
+    ) -> bool {
         let start = self.until_ms;
         let index = self.segments.len();
         self.segments
@@ -285,8 +288,12 @@ impl Stretches {
             guess: guess.filter(|_| undecided),
             provisional: undecided,
         });
-        if let Some(language) = confident {
-            self.hold(language);
+        match confident {
+            Some(language) => {
+                self.hold(language);
+                !self.to_redo().is_empty()
+            }
+            None => false,
         }
     }
     /// Holds the take to the detected `language`: stretches already in it
@@ -406,6 +413,62 @@ impl Stretches {
             status: Some("provisional".into()),
             ..Default::default()
         }
+    }
+}
+
+/// What became of one attempt to transcribe again, while the take records,
+/// the stretches made in another language before the take was decided.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Redone {
+    /// No stretch waits to be transcribed again.
+    Done,
+    /// The take's audio could not be copied just now, for example because
+    /// its writer was busy: the next update tries again.
+    Later(String),
+    /// A stretch could not be transcribed: what is left waits for Stop.
+    LeftToStop(String),
+}
+/// Transcribing provisional stretches again across the updates of one take.
+#[derive(Debug, Default)]
+pub struct Redo {
+    /// Set once a transcription failed: Stop does the rest.
+    left_to_stop: bool,
+}
+impl Redo {
+    /// Whether stretches of `stretches` wait to be transcribed again while
+    /// the take records.
+    pub fn pending(&self, stretches: &Stretches) -> bool {
+        !self.left_to_stop && !stretches.to_redo().is_empty()
+    }
+    /// Transcribes again each waiting stretch, oldest first: `copy` copies
+    /// the take's audio from that stretch's start, then `again` transcribes
+    /// the copy in the take's language and replaces the stretch's words
+    /// ([`Stretches::replace`]). A copy that fails ends this attempt and the
+    /// next one starts at the same stretch; a transcription that fails
+    /// leaves that stretch and those after it to Stop for the rest of the
+    /// take.
+    pub fn run(
+        &mut self,
+        stretches: &mut Stretches,
+        copy: &mut dyn FnMut(&Part) -> Result<(), String>,
+        again: &mut dyn FnMut(&Part, &str, &mut Stretches) -> Result<(), String>,
+    ) -> Redone {
+        if !self.pending(stretches) {
+            return Redone::Done;
+        }
+        let Some(language) = stretches.language.clone() else {
+            return Redone::Done;
+        };
+        for part in stretches.to_redo() {
+            if let Err(error) = copy(&part) {
+                return Redone::Later(error);
+            }
+            if let Err(error) = again(&part, &language, stretches) {
+                self.left_to_stop = true;
+                return Redone::LeftToStop(error);
+            }
+        }
+        Redone::Done
     }
 }
 
@@ -861,6 +924,116 @@ mod tests {
         assert_eq!(
             (live.language.as_deref(), live.language_detected),
             (Some("fr"), false)
+        );
+    }
+
+    #[test]
+    fn provisional_stretches_are_redone_in_order_and_a_busy_copy_is_tried_again() {
+        // Three stretches before the decision, two of them in other languages.
+        let decided = || {
+            let mut take = heard(&[Some(("en", 0.6)), Some(("de", 0.7)), Some(("nl", 0.5))]);
+            hear(&mut take, Some(guess("de", 0.95)));
+            take
+        };
+        let mut take = decided();
+        let waiting =
+            |take: &Stretches| -> Vec<u64> { take.to_redo().iter().map(|p| p.start_ms).collect() };
+        assert_eq!(waiting(&take), [0, 20_000]);
+        let german = |part: &Part, language: &str, take: &mut Stretches| {
+            take.replace(
+                part.start_ms,
+                spoken(&[(&format!("{language}-words"), 100, 400)]),
+                language,
+                &model_of(language),
+            );
+            Ok(())
+        };
+        // What was asked for, in order: a copy from a stretch's start, then
+        // that stretch's transcription in the take's language.
+        let steps = std::cell::RefCell::new(Vec::new());
+        let copied = |part: &Part| {
+            steps.borrow_mut().push(format!("copy {}", part.start_ms));
+            Ok(())
+        };
+        let transcribed = |part: &Part, language: &str, take: &mut Stretches| {
+            steps
+                .borrow_mut()
+                .push(format!("{language} {}", part.start_ms));
+            german(part, language, take)
+        };
+        let mut redo = Redo::default();
+        assert!(redo.pending(&take));
+
+        // The live track's writer is busy at the second stretch: the first is
+        // done, the attempt ends, nothing is given up.
+        let busy = "Audio snapshot is busy; retry next update";
+        let outcome = redo.run(
+            &mut take,
+            &mut |part| {
+                if part.start_ms == 20_000 {
+                    return Err(busy.to_string());
+                }
+                copied(part)
+            },
+            &mut |part, language, take| transcribed(part, language, take),
+        );
+        assert_eq!(outcome, Redone::Later(busy.into()));
+        assert_eq!(*steps.borrow(), ["copy 0", "de 0"]);
+        assert_eq!(waiting(&take), [20_000]);
+        assert!(redo.pending(&take), "the next update tries again");
+        // The next update starts at the stretch that was left, and finishes.
+        steps.borrow_mut().clear();
+        let outcome = redo.run(
+            &mut take,
+            &mut |part| copied(part),
+            &mut |part, language, take| transcribed(part, language, take),
+        );
+        assert_eq!(outcome, Redone::Done);
+        assert_eq!(*steps.borrow(), ["copy 20000", "de 20000"]);
+        assert_eq!(word_languages(&take), ["de", "de", "de", "de"]);
+        assert!(!redo.pending(&take) && take.to_redo().is_empty());
+        let never_copy = &mut |_: &Part| -> Result<(), String> { panic!("nothing waits") };
+        let never = &mut |_: &Part, _: &str, _: &mut Stretches| -> Result<(), String> {
+            panic!("nothing waits")
+        };
+        assert_eq!(redo.run(&mut take, never_copy, never), Redone::Done);
+
+        // A transcription that fails is not tried again while recording:
+        // that stretch and the one after it wait for Stop.
+        let mut take = decided();
+        let mut redo = Redo::default();
+        steps.borrow_mut().clear();
+        let outcome = redo.run(&mut take, &mut |part| copied(part), &mut |_, _, _| {
+            Err("Local speech processing failed.".to_string())
+        });
+        assert_eq!(
+            outcome,
+            Redone::LeftToStop("Local speech processing failed.".into())
+        );
+        assert_eq!(*steps.borrow(), ["copy 0"]);
+        assert!(!redo.pending(&take));
+        assert_eq!(waiting(&take), [0, 20_000], "still marked for Stop");
+        assert_eq!(redo.run(&mut take, never_copy, never), Redone::Done);
+
+        // Only the stretch that decides the take reports stretches to redo,
+        // so later stretches are finished as usual while some still wait.
+        let mut take = heard(&[Some(("en", 0.6))]);
+        let german_words = || spoken(&[("de-words", 100, 400)]);
+        let decides = take.push(german_words(), 20_000, "de", SMALL, Some(guess("de", 0.95)));
+        assert!(decides);
+        assert!(!take.push(german_words(), 30_000, "de", SMALL, None));
+        assert_eq!(waiting(&take), [0]);
+        // A deciding stretch with nothing before it in another language, and
+        // an undecided one, report nothing.
+        let mut clear = Stretches::new("mic.wav", None);
+        assert!(!clear.push(german_words(), 10_000, "de", SMALL, Some(guess("de", 0.5))));
+        assert!(!clear.push(german_words(), 20_000, "de", SMALL, Some(guess("de", 0.99))));
+        // Nothing is redone before the take is decided.
+        let mut undecided = heard(&[Some(("en", 0.6)), Some(("de", 0.7))]);
+        assert!(!Redo::default().pending(&undecided));
+        assert_eq!(
+            Redo::default().run(&mut undecided, never_copy, never),
+            Redone::Done
         );
     }
 

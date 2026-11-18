@@ -195,8 +195,7 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
     let snapshot = folder.join("snapshot.wav");
     stretches::forget(&take_folder);
     let mut saved: Option<stretches::Stretches> = None;
-    // Set when transcribing a stretch again failed: Stop does it instead.
-    let mut redo_left_to_stop = false;
+    let mut redo = stretches::Redo::default();
     let mut next = Instant::now() + stretches::LIVE_CYCLE;
     loop {
         while Instant::now() < next {
@@ -261,23 +260,36 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
                     None => (guess, length),
                 }
             };
-            if !redo_left_to_stop && !stretches.to_redo().is_empty() {
-                // The take was just decided: show that, then catch up.
+            if redo.pending(stretches) {
+                // The take is decided: show that, then catch up.
                 publish_live(
                     &s,
                     &id,
                     &cancel,
                     Ok(stretches.live(guess.clone(), guess_ms, offset)),
                 );
-                let redone =
-                    redo_provisional(&s, &id, &cancel, &take_folder, &folder, &models, stretches);
-                if let Err(error) = redone {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err(error);
+                let redone = redo_provisional(
+                    &s,
+                    &id,
+                    &cancel,
+                    &take_folder,
+                    &folder,
+                    &models,
+                    stretches,
+                    &mut redo,
+                );
+                if cancel.load(Ordering::Acquire) {
+                    return Err("Live transcription cancelled.".into());
+                }
+                match redone {
+                    stretches::Redone::Done => (),
+                    // The words stay as first heard meanwhile.
+                    stretches::Redone::Later(error) => {
+                        eprintln!("A stretch of {id} is transcribed again later: {error}")
                     }
-                    // The words stay as first heard until Stop redoes them.
-                    eprintln!("A stretch of {id} was not transcribed again: {error}");
-                    redo_left_to_stop = true;
+                    stretches::Redone::LeftToStop(error) => {
+                        eprintln!("A stretch of {id} is left for Stop to transcribe again: {error}")
+                    }
                 }
             }
             Ok(stretches.live(guess, guess_ms, offset))
@@ -290,7 +302,10 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
 }
 /// Transcribes again, in the language the take was just held to, the
 /// stretches made before that in another language, each from a fresh copy of
-/// the take's live audio. One that fails stays marked, for Stop.
+/// the take's live audio ([`transcribe::redo_provisional`]). A copy that
+/// cannot be made is tried again at the next update; a stretch whose
+/// transcription fails stays marked, for Stop.
+#[allow(clippy::too_many_arguments)]
 fn redo_provisional(
     s: &Shared,
     id: &str,
@@ -299,37 +314,29 @@ fn redo_provisional(
     folder: &std::path::Path,
     models: &deps::TakeModels,
     stretches: &mut stretches::Stretches,
-) -> Result<(), String> {
-    let Some(language) = stretches.language.clone() else {
-        return Ok(());
+    redo: &mut stretches::Redo,
+) -> stretches::Redone {
+    let Ok(_inference) = s.inference.lock() else {
+        return stretches::Redone::Later("The speech runtime is unavailable.".into());
     };
-    let copy = folder.join("redo.wav");
-    for part in stretches.to_redo() {
-        // As for a snapshot: copy under the runtime lock, infer outside it.
-        {
+    transcribe::redo_provisional(
+        &s.store.root,
+        take_folder,
+        folder,
+        models,
+        stretches,
+        redo,
+        cancel,
+        // As for a snapshot: the copy is made under the runtime lock.
+        &mut |from_ms, target| {
             let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
             if !accepts_live_update(&runtime, id, cancel) {
                 return Err("Live transcription cancelled.".into());
             }
             let (_, active) = runtime.active.as_ref().ok_or("No recording is active.")?;
-            active.snapshot_audio_from(part.start_ms, &copy)?;
-        }
-        let _inference = s.inference.lock().map_err(|e| e.to_string())?;
-        transcribe::redo_stretch(
-            &s.store.root,
-            take_folder,
-            folder,
-            &copy,
-            0,
-            &part,
-            &language,
-            models.of(&language),
-            transcribe::live_thread_count(),
-            Some(cancel),
-            stretches,
-        )?;
-    }
-    Ok(())
+            active.snapshot_audio_from(from_ms, target).map(|_| ())
+        },
+    )
 }
 #[tauri::command]
 fn list_projects(s: CmdState<'_>) -> Result<Vec<Project>, String> {

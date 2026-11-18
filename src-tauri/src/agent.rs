@@ -1333,13 +1333,14 @@ mod tests {
 
     #[test]
     fn transcribing_again_detects_the_language_again() {
-        use crate::{stretches, transcribe};
+        use crate::{stretches, transcribe::FakePass};
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
         // A German take whose transcript was made held to English, and whose
         // stretches, saved while it recorded, hold it to English too.
         let id = session_in(&store, Vec::new());
         let folder = store.session_dir(&id).unwrap();
+        fs::write(folder.join("mic.wav"), b"").unwrap();
         store
             .save_transcript(&id, &said("nonsense", "en", false))
             .unwrap();
@@ -1350,66 +1351,67 @@ mod tests {
         };
         english.push(
             said("nonsense", "en", true),
-            10_000,
+            1000,
             "en",
             "ggml-small.en.bin",
             Some(heard),
         );
         stretches::save(&folder, &english).unwrap();
         // No language was chosen: Auto.
-        let auto = crate::settings::load(dir.path());
-        assert_eq!(auto.language, None);
-        assert_eq!(transcribe::held_language(&auto, &folder, None), Some("en"));
+        assert_eq!(crate::settings::load(dir.path()).language, None);
+        // The whole-take pass itself runs, only FFmpeg, the speech detector
+        // and Whisper are faked: the take's audio is German. While the
+        // stretches are there, a pass is held to their English.
+        let stop = FakePass::hearing("de");
+        stop.run(dir.path(), &folder, 3500, true).unwrap();
+        assert_eq!(
+            (stop.detections.get(), stop.languages.take()),
+            (0, vec!["en".to_owned()])
+        );
 
-        // The whole-take pass as `transcribe_media` runs it: held to what
-        // Settings or the take's stretches say, else it detects the language
-        // from the take's audio, which is German.
-        let detections = std::cell::Cell::new(0);
-        let pass = |settings: crate::models::Settings| {
-            let detections = &detections;
-            move |take: &Path, _: u64, _: bool| {
-                Ok(match transcribe::held_language(&settings, take, None) {
-                    Some(language) => said("held", language, false),
-                    None => {
-                        detections.set(detections.get() + 1);
-                        said("Bibliothek", "de", true)
-                    }
-                })
-            }
-        };
-        let again = |settings: crate::models::Settings| {
+        let again = |pass: &FakePass| {
             transcribe_existing_with(
                 &store,
                 &id,
                 |_, _| Ok(()),
                 attached,
-                |store, id| transcribe::transcribe_with(store, id, &pass(settings)),
+                |store, id| {
+                    crate::transcribe::transcribe_with(store, id, &|take, duration_ms, _| {
+                        pass.run(&store.root, take, duration_ms, true)
+                    })
+                },
             )
             .unwrap()
         };
-        // `cue transcribe`, or Retry, which forgets the stretches the same way.
-        let transcript = again(auto.clone());
-        assert_eq!(detections.get(), 1, "the take's audio is heard again");
+        // `cue transcribe`, or Retry, which forgets the stretches the same
+        // way: the pass asks the detector and transcribes in what it heard.
+        let pass = FakePass::hearing("de");
+        let transcript = again(&pass);
+        assert_eq!(pass.detections.get(), 1, "the take's audio is heard again");
+        assert_eq!(*pass.languages.borrow(), ["de"]);
         assert_eq!(
             (transcript.language.as_deref(), transcript.language_detected),
             (Some("de"), true)
         );
         let saved = store.transcript(&id).unwrap();
-        assert_eq!(saved.segments[0].text, "Bibliothek");
+        assert_eq!(saved.segments[0].text, "de-words");
         assert_eq!(
             (saved.language.as_deref(), saved.language_detected),
             (Some("de"), true)
         );
         // And once more: nothing of the earlier pass holds the next one.
-        again(auto);
-        assert_eq!(detections.get(), 2);
+        again(&pass);
+        assert_eq!(pass.detections.get(), 2);
         // With a language chosen in Settings nothing is detected.
         let french = crate::models::Settings {
             language: Some("fr".into()),
             ..Default::default()
         };
-        let transcript = again(french);
-        assert_eq!(detections.get(), 2);
+        crate::settings::save(dir.path(), &french).unwrap();
+        let held = FakePass::hearing("de");
+        let transcript = again(&held);
+        assert_eq!(held.detections.get(), 0);
+        assert_eq!(*held.languages.borrow(), ["fr"]);
         assert_eq!(
             (transcript.language.as_deref(), transcript.language_detected),
             (Some("fr"), false)

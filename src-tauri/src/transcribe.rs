@@ -627,7 +627,7 @@ pub fn live_guess(
 /// language is detected first and the stretch transcribed in its own guess;
 /// a confident guess decides the take. When that leaves earlier stretches in
 /// another language, this returns before newer stretches are handled, so
-/// the caller transcribes those again first ([`redo_stretch`]).
+/// the caller transcribes those again first ([`redo_provisional`]).
 #[allow(clippy::too_many_arguments)]
 pub fn live_commit(
     root: &Path,
@@ -650,7 +650,7 @@ pub fn live_commit(
     let mut done = 0;
     while let Some(cut) = stretches::cut(&after(done), audio.length_ms.saturating_sub(done)) {
         let end_ms = stretches.until_ms + cut.at_ms;
-        if cut.speech {
+        let redo_first = if cut.speech {
             let part = folder.join("stretch.wav");
             wav_slice(&audio.speech, &part, done, done + cut.at_ms)?;
             let threads = live_threads(logical_threads());
@@ -673,56 +673,87 @@ pub fn live_commit(
                 Some(cancel),
                 &raw,
             )?;
-            stretches.push(words, end_ms, &language, &file_name(&model.path), heard);
+            stretches.push(words, end_ms, &language, &file_name(&model.path), heard)
         } else {
             stretches.skip(end_ms);
-        }
+            false
+        };
         stretches::save(take, stretches)?;
         done += cut.at_ms;
-        if !stretches.to_redo().is_empty() {
+        if redo_first {
             break;
         }
     }
     Ok((stretches::after(guess, done), audio.length_ms - done))
 }
 /// Transcribes the stretch `part` of a take again, held to `language` with
-/// `model`, and replaces its words in `stretches`, which it saves. The
-/// stretch starts `from_ms` into `audio`, the take's audio or a copy of it
-/// from the stretch's start; scratch files go to `folder`.
+/// `model`, and replaces its words in `stretches`, which it saves. `audio`
+/// is a copy of the take's audio from the stretch's start; scratch files go
+/// to `folder`.
 #[allow(clippy::too_many_arguments)]
-pub fn redo_stretch(
+fn redo_stretch(
     root: &Path,
     take: &Path,
     folder: &Path,
     audio: &Path,
-    from_ms: u64,
     part: &stretches::Part,
     language: &str,
     model: &deps::ModelChoice,
-    threads: usize,
-    cancel: Option<&AtomicBool>,
+    cancel: &AtomicBool,
     stretches: &mut Stretches,
 ) -> Result<(), String> {
     let speech = folder.join("stretch.wav");
     to_speech(
         audio,
         &speech,
-        (from_ms > 0).then_some(from_ms),
+        None,
         Some(part.end_ms - part.start_ms),
         &folder.join("transcode.log"),
-        cancel,
+        Some(cancel),
     )?;
     fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
     let raw = stretches::folder(take).join(format!("{}.json", part.start_ms));
+    let threads = live_threads(logical_threads());
     let words = run_whisper(
-        root, &speech, folder, model, language, threads, cancel, &raw,
+        root,
+        &speech,
+        folder,
+        model,
+        language,
+        threads,
+        Some(cancel),
+        &raw,
     )?;
     stretches.replace(part.start_ms, words, language, &file_name(&model.path));
     stretches::save(take, stretches)
 }
-/// The threads of a live update, for [`redo_stretch`] while recording.
-pub fn live_thread_count() -> usize {
-    live_threads(logical_threads())
+/// While the take records: transcribes again, in the language the take was
+/// just held to, the stretches made before that in another language
+/// ([`stretches::Redo::run`]). `copy` copies the take's live audio from a
+/// point (ms into the take) into a file, as a live snapshot is made, so the
+/// copy starts where the stretch does and may run past its end.
+#[allow(clippy::too_many_arguments)]
+pub fn redo_provisional(
+    root: &Path,
+    take: &Path,
+    folder: &Path,
+    models: &deps::TakeModels,
+    stretches: &mut Stretches,
+    redo: &mut stretches::Redo,
+    cancel: &AtomicBool,
+    copy: &mut dyn FnMut(u64, &Path) -> Result<(), String>,
+) -> stretches::Redone {
+    let audio = folder.join("redo.wav");
+    redo.run(
+        stretches,
+        &mut |part| copy(part.start_ms, &audio),
+        &mut |part, language, stretches| {
+            let model = models.of(language);
+            redo_stretch(
+                root, take, folder, &audio, part, language, model, cancel, stretches,
+            )
+        },
+    )
 }
 /// Only scratch files are written here; final session transcript files are untouched.
 /// `root` is the data root whose settings choose the decoding options; the
@@ -985,8 +1016,9 @@ pub fn transcribe_media(
 ) -> Result<Transcript, String> {
     transcribe_media_with(root, folder, duration_ms, has_audio, true, None)
 }
-/// [`transcribe_media`], reusing saved stretches only when `reuse`, and
-/// stopped by `cancel`.
+/// [`transcribe_media`], reusing saved stretches only when `reuse` (the
+/// pass that refines a take made from them does not), and stopped by
+/// `cancel`.
 fn transcribe_media_with(
     root: &Path,
     folder: &Path,
@@ -994,6 +1026,55 @@ fn transcribe_media_with(
     has_audio: bool,
     reuse: bool,
     cancel: Option<&AtomicBool>,
+) -> Result<Transcript, String> {
+    let never = AtomicBool::new(false);
+    let threads = final_threads(logical_threads());
+    let log = folder.join("transcode.log");
+    let tools = Tools {
+        convert: &|source, target, from_ms, length_ms| {
+            to_speech(source, target, from_ms, length_ms, &log, None)
+        },
+        regions: &|speech| detect(speech, folder, cancel.unwrap_or(&never), 500),
+        detect: &|speech, regions| detect_take_language(speech, regions, folder, threads, cancel),
+        model: &|language| {
+            installed(deps::final_model(language)).map(|model| file_name(&model.path))
+        },
+        whisper: &|speech, language, raw| {
+            let model = installed(deps::final_model(language))?;
+            run_whisper(root, speech, folder, &model, language, threads, cancel, raw)
+        },
+    };
+    transcribe_media_in(root, folder, duration_ms, has_audio, reuse, &tools)
+}
+type Converter<'a> = &'a dyn Fn(&Path, &Path, Option<u64>, Option<u64>) -> Result<(), String>;
+type SpeechFinder<'a> = &'a dyn Fn(&Path) -> Result<Vec<(u64, u64)>, String>;
+type Detector<'a> = &'a dyn Fn(&Path, &[(u64, u64)]) -> Option<String>;
+/// The work a whole-take pass leaves to FFmpeg, the speech detector and
+/// Whisper. Tests pass fakes, so the pass itself runs without them.
+pub(crate) struct Tools<'a> {
+    /// Converts audio to 16 kHz PCM: source, target, and optionally from
+    /// where and for how long (ms).
+    pub convert: Converter<'a>,
+    /// Where a 16 kHz file holds speech (start and end in ms).
+    pub regions: SpeechFinder<'a>,
+    /// The language heard in a 16 kHz file with those speech regions
+    /// ([`detect_take_language`]); `None` for no guess.
+    pub detect: Detector<'a>,
+    /// The file name of the model that transcribes a language now, or why
+    /// none can.
+    pub model: &'a dyn Fn(&str) -> Result<String, String>,
+    /// Transcribes a 16 kHz file held to a language, keeping the raw output
+    /// at the given path.
+    pub whisper: &'a dyn Fn(&Path, &str, &Path) -> Result<Transcript, String>,
+}
+/// [`transcribe_media_with`] with its outside work done by `tools`.
+pub(crate) fn transcribe_media_in(
+    root: &Path,
+    folder: &Path,
+    duration_ms: u64,
+    has_audio: bool,
+    reuse: bool,
+    tools: &Tools<'_>,
 ) -> Result<Transcript, String> {
     if !has_audio {
         return Ok(Transcript {
@@ -1005,10 +1086,8 @@ fn transcribe_media_with(
     let chosen = settings::chosen_language(&settings);
     // Base stands in for a language's model that is missing, so when this
     // one is missing no speech model is installed at all.
-    installed(deps::final_model(
-        chosen.unwrap_or(stretches::FALLBACK_LANGUAGE),
-    ))?;
-    let model_file = |language: &str| file_name(&deps::final_model(language).path);
+    (tools.model)(chosen.unwrap_or(stretches::FALLBACK_LANGUAGE))?;
+    let model_file = |language: &str| (tools.model)(language).unwrap_or_default();
     let (source, mut saved) = if reuse {
         reused_source(folder, |name| {
             stretches::usable(folder, name, chosen, &model_file)
@@ -1016,25 +1095,18 @@ fn transcribe_media_with(
     } else {
         media_source(folder, |_| None)
     };
-    let mut held = held_language(&settings, folder, saved.as_ref());
-    let threads = final_threads(logical_threads());
-    if let (Some(saved), Some(language)) = (saved.as_mut(), held) {
+    let mut held = held_language(&settings, folder, saved.as_ref(), !reuse);
+    if let (Some(saved), Some((language, _))) = (saved.as_mut(), held) {
         // Stretches made before the take's language was decided, in another one.
-        let model = installed(deps::final_model(language))?;
         for part in saved.to_redo() {
-            redo_stretch(
-                root,
-                folder,
-                folder,
-                &source,
-                part.start_ms,
-                &part,
-                language,
-                &model,
-                threads,
-                cancel,
-                saved,
-            )?;
+            let speech = folder.join("stretch.wav");
+            let from = (part.start_ms > 0).then_some(part.start_ms);
+            (tools.convert)(&source, &speech, from, Some(part.end_ms - part.start_ms))?;
+            fs::create_dir_all(stretches::folder(folder)).map_err(|e| e.to_string())?;
+            let raw = stretches::folder(folder).join(format!("{}.json", part.start_ms));
+            let words = (tools.whisper)(&speech, language, &raw)?;
+            saved.replace(part.start_ms, words, language, &(tools.model)(language)?);
+            stretches::save(folder, saved)?;
         }
     }
     let from_ms = saved
@@ -1046,35 +1118,22 @@ fn transcribe_media_with(
     } else {
         let speech = folder.join("speech.wav");
         let from = (from_ms > 0).then_some(from_ms);
-        to_speech(
-            &source,
-            &speech,
-            from,
-            Some(rest_ms),
-            &folder.join("transcode.log"),
-            None,
-        )?;
-        let never = AtomicBool::new(false);
-        let regions = detect(&speech, folder, cancel.unwrap_or(&never), 500)?;
+        (tools.convert)(&source, &speech, from, Some(rest_ms))?;
+        let regions = (tools.regions)(&speech)?;
         if regions.is_empty() {
             empty_transcript()
         } else {
-            let language = held.unwrap_or_else(|| {
+            let (language, _) = *held.get_or_insert_with(|| {
                 // Auto, and nothing decided the take yet: hear its speech.
-                let heard = detect_take_language(&speech, &regions, folder, threads, cancel);
-                settings::held_language(&settings, heard.as_deref())
-                    .unwrap_or(stretches::FALLBACK_LANGUAGE)
+                let heard = (tools.detect)(&speech, &regions);
+                let language = settings::held_language(&settings, heard.as_deref())
+                    .unwrap_or(stretches::FALLBACK_LANGUAGE);
+                (language, true)
             });
-            held = Some(language);
-            let model = installed(deps::final_model(language))?;
-            let raw = folder.join("whisper.json");
-            run_whisper(
-                root, &speech, folder, &model, language, threads, cancel, &raw,
-            )?
+            (tools.whisper)(&speech, language, &folder.join("whisper.json"))?
         }
     };
-    let detected = chosen.is_none();
-    if let (Some(saved), Some(language)) = (saved.as_mut(), held) {
+    if let (Some(saved), Some((language, detected))) = (saved.as_mut(), held) {
         // Kept with the stretches for the pass that refines them, which
         // does not detect again.
         saved.language = Some(language.into());
@@ -1086,27 +1145,109 @@ fn transcribe_media_with(
         None => rest,
     };
     // A take without words has no language.
-    let language = held.filter(|_| !transcript.segments.is_empty());
-    transcript.language = language.map(str::to_owned);
-    transcript.language_detected = language.is_some() && detected;
+    let held = held.filter(|_| !transcript.segments.is_empty());
+    transcript.language = held.map(|(language, _)| language.to_owned());
+    transcript.language_detected = held.is_some_and(|(_, detected)| detected);
     Ok(transcript)
 }
-/// The language that holds a take before a whole-take pass hears its audio:
-/// the one chosen in Settings; under Auto the one its stretches decided,
-/// which Stop reuses (`saved`, settled) and the refining pass reads from the
-/// file Stop left. `None`: Auto, and the pass detects it. Retry and
-/// `cue transcribe` forget the stretches first, so under Auto they always
-/// detect again.
+/// The language that holds a take before a whole-take pass hears its audio,
+/// and whether it was detected. `None`: Auto, and the pass detects it.
+///
+/// Stop reuses stretches (`saved`, settled) and takes what they hold the take
+/// to. The pass that refines them (`refining`) reads the same from the file
+/// Stop left and keeps it, whatever Settings say by then. Otherwise the
+/// language chosen in Settings holds the take: Retry and `cue transcribe`
+/// forget the stretches first, so they follow the current choice and under
+/// Auto detect again.
 pub(crate) fn held_language(
     settings: &crate::models::Settings,
     folder: &Path,
     saved: Option<&Stretches>,
-) -> Option<&'static str> {
-    let decided = match saved {
-        Some(saved) => saved.language.clone(),
-        None => stretches::language(folder).map(|(language, _)| language),
+    refining: bool,
+) -> Option<(&'static str, bool)> {
+    let kept = match saved {
+        Some(saved) => saved
+            .language
+            .clone()
+            .map(|language| (language, saved.language_detected)),
+        None if refining => stretches::language(folder),
+        None => None,
     };
-    settings::held_language(settings, decided.as_deref())
+    kept.and_then(|(language, detected)| Some((settings::known_language(&language)?, detected)))
+        .or_else(|| settings::chosen_language(settings).map(|language| (language, false)))
+}
+/// A whole-take pass whose outside work is faked, for tests here and of the
+/// callers: speech everywhere unless `silent`, a detector that hears `heard`
+/// and counts how often it is asked, and a Whisper that returns one word
+/// naming the language it was held to.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FakePass {
+    pub heard: Option<&'static str>,
+    pub silent: bool,
+    pub detections: std::cell::Cell<usize>,
+    /// The language of each Whisper run, in order.
+    pub languages: std::cell::RefCell<Vec<String>>,
+    /// From where and for how long each conversion read the take's audio.
+    pub converted: std::cell::RefCell<Vec<(Option<u64>, Option<u64>)>>,
+}
+#[cfg(test)]
+impl FakePass {
+    pub fn hearing(heard: &'static str) -> Self {
+        Self {
+            heard: Some(heard),
+            ..Default::default()
+        }
+    }
+    pub fn run(
+        &self,
+        root: &Path,
+        folder: &Path,
+        duration_ms: u64,
+        reuse: bool,
+    ) -> Result<Transcript, String> {
+        let tools = Tools {
+            convert: &|_, _, from_ms, length_ms| {
+                self.converted.borrow_mut().push((from_ms, length_ms));
+                Ok(())
+            },
+            regions: &|_| Ok(if self.silent { vec![] } else { vec![(0, 1000)] }),
+            detect: &|_, _| {
+                self.detections.set(self.detections.get() + 1);
+                self.heard.map(str::to_owned)
+            },
+            model: &|language| {
+                Ok(if language == "en" {
+                    "ggml-small.en.bin"
+                } else {
+                    "ggml-small.bin"
+                }
+                .into())
+            },
+            whisper: &|_, language, _| {
+                self.languages.borrow_mut().push(language.into());
+                let text = format!("{language}-words");
+                Ok(Transcript {
+                    segments: vec![Segment {
+                        id: "segment-0".into(),
+                        start_ms: 100,
+                        end_ms: 400,
+                        text: text.clone(),
+                        words: vec![Word {
+                            text,
+                            start_ms: 100,
+                            end_ms: 400,
+                            seek_ms: Some(150),
+                        }],
+                    }],
+                    language: Some(language.into()),
+                    status: Some("complete".into()),
+                    ..Default::default()
+                })
+            },
+        };
+        transcribe_media_in(root, folder, duration_ms, true, reuse, &tools)
+    }
 }
 /// Replaces the words of every take of session `id` that Stop transcribed
 /// from stretches with a whole-take pass, then forgets the stretches.
@@ -1728,19 +1869,43 @@ Speech segment 0: start = 1.0, end = 2.0
         assert_eq!(quiet.takes, [mark_in(1, 0, "de", true), mark(2, 2000)]);
     }
 
+    fn chosen(language: &str) -> crate::models::Settings {
+        crate::models::Settings {
+            language: Some(language.into()),
+            ..Default::default()
+        }
+    }
+    fn guessed(language: &str, p: f32) -> Guess {
+        Guess {
+            language: language.into(),
+            p,
+        }
+    }
+    /// A data root and in it a take folder with a microphone track.
+    fn take_folder() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("take");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("mic.wav"), b"").unwrap();
+        (root, folder)
+    }
+    fn in_language(transcript: &Transcript) -> (Option<&str>, bool) {
+        (transcript.language.as_deref(), transcript.language_detected)
+    }
+
     #[test]
     fn a_whole_take_pass_is_held_by_settings_or_by_its_stretches() {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("take");
         let auto = crate::models::Settings::default();
-        let german = crate::models::Settings {
-            language: Some("de".into()),
-            ..Default::default()
-        };
+        let german = chosen("de");
         // Auto and no stretches: nothing holds the take, the pass detects.
-        assert_eq!(held_language(&auto, &folder, None), None);
+        assert_eq!(held_language(&auto, &folder, None, false), None);
         // A language chosen in Settings holds it without detecting.
-        assert_eq!(held_language(&german, &folder, None), Some("de"));
+        assert_eq!(
+            held_language(&german, &folder, None, false),
+            Some(("de", false))
+        );
         // Stop reuses stretches the live worker decided as French.
         let mut decided = Stretches::new("mic.wav", None);
         decided.push(
@@ -1748,20 +1913,188 @@ Speech segment 0: start = 1.0, end = 2.0
             10_000,
             "fr",
             "ggml-small.bin",
-            Some(Guess {
-                language: "fr".into(),
-                p: 0.95,
-            }),
+            Some(guessed("fr", 0.95)),
         );
-        assert_eq!(held_language(&auto, &folder, Some(&decided)), Some("fr"));
-        // The refining pass reads the same decision from the file Stop left.
+        assert_eq!(
+            held_language(&auto, &folder, Some(&decided), false),
+            Some(("fr", true))
+        );
+        // The refining pass reads the same decision from the file Stop
+        // left, and keeps it whatever Settings say by then.
         stretches::save(&folder, &decided).unwrap();
-        assert_eq!(held_language(&auto, &folder, None), Some("fr"));
-        // Settings win over what was detected.
-        assert_eq!(held_language(&german, &folder, None), Some("de"));
-        // Retry and `cue transcribe` forget the stretches: detect again.
+        assert_eq!(
+            held_language(&auto, &folder, None, true),
+            Some(("fr", true))
+        );
+        assert_eq!(
+            held_language(&german, &folder, None, true),
+            Some(("fr", true))
+        );
+        // Any other pass follows Settings, and Retry and `cue transcribe`
+        // forget the stretches: under Auto they detect again.
+        assert_eq!(
+            held_language(&german, &folder, None, false),
+            Some(("de", false))
+        );
         stretches::forget(&folder);
-        assert_eq!(held_language(&auto, &folder, None), None);
+        assert_eq!(held_language(&auto, &folder, None, true), None);
+        assert_eq!(held_language(&auto, &folder, None, false), None);
+    }
+
+    #[test]
+    fn a_whole_take_pass_detects_under_auto_and_never_under_a_chosen_language() {
+        let (root, folder) = take_folder();
+        // No language chosen and no stretches (Stop without usable ones,
+        // Retry, `cue transcribe`): the pass asks the detector once and
+        // transcribes in what it heard.
+        let german = FakePass::hearing("de");
+        let transcript = german.run(root.path(), &folder, 5000, true).unwrap();
+        assert_eq!(german.detections.get(), 1);
+        assert_eq!(*german.languages.borrow(), ["de"]);
+        assert_eq!(in_language(&transcript), (Some("de"), true));
+        assert_eq!(transcript.segments[0].text, "de-words");
+        // Each pass hears for itself: nothing of the last one holds the next.
+        let english = FakePass::hearing("en");
+        let transcript = english.run(root.path(), &folder, 5000, true).unwrap();
+        assert_eq!(english.detections.get(), 1);
+        assert_eq!(*english.languages.borrow(), ["en"]);
+        assert_eq!(in_language(&transcript), (Some("en"), true));
+        // No guess at all: English.
+        let unheard = FakePass::default();
+        let transcript = unheard.run(root.path(), &folder, 5000, true).unwrap();
+        assert_eq!(unheard.detections.get(), 1);
+        assert_eq!(*unheard.languages.borrow(), ["en"]);
+        assert_eq!(in_language(&transcript), (Some("en"), true));
+        // No speech: nothing to detect or transcribe, and no language.
+        let silent = FakePass {
+            silent: true,
+            ..FakePass::hearing("de")
+        };
+        let transcript = silent.run(root.path(), &folder, 5000, true).unwrap();
+        assert_eq!(silent.detections.get(), 0);
+        assert!(silent.languages.borrow().is_empty() && transcript.segments.is_empty());
+        assert_eq!(in_language(&transcript), (None, false));
+
+        // A language chosen in Settings: the detector is never asked,
+        // whatever it would hear.
+        settings::save(root.path(), &chosen("fr")).unwrap();
+        let held = FakePass::hearing("de");
+        let transcript = held.run(root.path(), &folder, 5000, true).unwrap();
+        assert_eq!(held.detections.get(), 0);
+        assert_eq!(*held.languages.borrow(), ["fr"]);
+        assert_eq!(in_language(&transcript), (Some("fr"), false));
+    }
+
+    #[test]
+    fn the_refining_pass_keeps_the_language_stop_saved_with_the_stretches() {
+        let (root, folder) = take_folder();
+        // Recorded under Auto and decided as German; Stop left that with
+        // the stretches. Then English is chosen in Settings.
+        let mut german = Stretches::new("mic.wav", None);
+        german.push(
+            spoken("eins"),
+            10_000,
+            "de",
+            "ggml-small.bin",
+            Some(guessed("de", 0.97)),
+        );
+        stretches::save(&folder, &german).unwrap();
+        settings::save(root.path(), &chosen("en")).unwrap();
+        // The refining pass (it never reuses the stretches' words) stays in
+        // German, still marked as detected, and detects nothing.
+        let refine = FakePass::hearing("ja");
+        let transcript = refine.run(root.path(), &folder, 20_000, false).unwrap();
+        assert_eq!(*refine.languages.borrow(), ["de"]);
+        assert_eq!(refine.detections.get(), 0);
+        assert_eq!(in_language(&transcript), (Some("de"), true));
+        // The whole take was transcribed, not only what follows the stretches.
+        assert_eq!(*refine.converted.borrow(), [(None, Some(20_000))]);
+
+        // Recorded under a chosen English; then Settings go back to Auto.
+        // The refined take is still English, and not "detected".
+        let mut english = Stretches::new("mic.wav", Some("en"));
+        english.push(spoken("one"), 10_000, "en", "ggml-small.en.bin", None);
+        stretches::save(&folder, &english).unwrap();
+        settings::save(root.path(), &crate::models::Settings::default()).unwrap();
+        let refine = FakePass::hearing("ja");
+        let transcript = refine.run(root.path(), &folder, 20_000, false).unwrap();
+        assert_eq!(*refine.languages.borrow(), ["en"]);
+        assert_eq!(refine.detections.get(), 0);
+        assert_eq!(in_language(&transcript), (Some("en"), false));
+
+        // Retry and `cue transcribe` forget the stretches and follow the
+        // choice that holds now: Auto, so they detect again.
+        stretches::forget(&folder);
+        let retry = FakePass::hearing("ja");
+        let transcript = retry.run(root.path(), &folder, 20_000, true).unwrap();
+        assert_eq!(retry.detections.get(), 1);
+        assert_eq!(in_language(&transcript), (Some("ja"), true));
+        // And a language chosen by then holds them.
+        settings::save(root.path(), &chosen("fr")).unwrap();
+        let retry = FakePass::hearing("ja");
+        let transcript = retry.run(root.path(), &folder, 20_000, true).unwrap();
+        assert_eq!(retry.detections.get(), 0);
+        assert_eq!(in_language(&transcript), (Some("fr"), false));
+    }
+
+    #[test]
+    fn stop_redoes_the_stretches_made_in_another_language_and_keeps_the_decision() {
+        let (root, folder) = take_folder();
+        // An unclear start taken for English, then German decided the take.
+        let mut take = Stretches::new("mic.wav", None);
+        take.push(
+            spoken("nonsense"),
+            12_000,
+            "en",
+            "ggml-small.en.bin",
+            Some(guessed("en", 0.5)),
+        );
+        take.push(
+            spoken("zwei"),
+            30_000,
+            "de",
+            "ggml-small.bin",
+            Some(guessed("de", 0.96)),
+        );
+        stretches::save(&folder, &take).unwrap();
+        // Stop: the first stretch again from the take's audio in German,
+        // then only the audio after the stretches, with nothing detected.
+        let stop = FakePass::hearing("ja");
+        let transcript = stop.run(root.path(), &folder, 40_000, true).unwrap();
+        assert_eq!(stop.detections.get(), 0);
+        assert_eq!(*stop.languages.borrow(), ["de", "de"]);
+        assert_eq!(
+            *stop.converted.borrow(),
+            [(None, Some(12_000)), (Some(30_000), Some(10_000))]
+        );
+        assert_eq!(in_language(&transcript), (Some("de"), true));
+        let texts: Vec<_> = transcript
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(texts, ["de-words", "zwei", "de-words"]);
+        let kept: Stretches = read_json(&folder.join("stretches/stretches.json")).unwrap();
+        assert!(kept.to_redo().is_empty());
+        assert_eq!(stretches::language(&folder), Some(("de".into(), true)));
+
+        // Stopped undecided: settled on the likeliest language, which is
+        // saved for the refining pass even when nothing had to be redone.
+        let mut undecided = Stretches::new("mic.wav", None);
+        undecided.push(
+            spoken("eins"),
+            12_000,
+            "de",
+            "ggml-small.bin",
+            Some(guessed("de", 0.7)),
+        );
+        stretches::save(&folder, &undecided).unwrap();
+        assert_eq!(stretches::language(&folder), None);
+        let stop = FakePass::hearing("ja");
+        let transcript = stop.run(root.path(), &folder, 40_000, true).unwrap();
+        assert_eq!(*stop.languages.borrow(), ["de"]);
+        assert_eq!(in_language(&transcript), (Some("de"), true));
+        assert_eq!(stretches::language(&folder), Some(("de".into(), true)));
     }
 
     #[test]
@@ -2057,14 +2390,85 @@ Speech segment 0: start = 1.0, end = 2.0
                 .join(" ")
         );
 
+        // While it still records: a stretch taken for French before the
+        // take was decided is transcribed again from a copy of the live
+        // track made as the live worker makes it, from the stretch's start
+        // for up to 60 s.
+        let mut early = Stretches::new("mic.wav", None);
+        early.push(
+            spoken("erste"),
+            12_000,
+            "de",
+            small,
+            Some(guessed("de", 0.6)),
+        );
+        early.push(
+            spoken("faux"),
+            first.end_ms,
+            "fr",
+            small,
+            Some(guessed("fr", 0.5)),
+        );
+        let deciding = early.push(
+            spoken("dritte"),
+            first.end_ms + 5_000,
+            "de",
+            small,
+            Some(guessed("de", 0.95)),
+        );
+        assert!(deciding, "the third stretch decides and leaves one to redo");
+        let mut redo = stretches::Redo::default();
+        let copies = std::cell::RefCell::new(Vec::new());
+        let outcome = redo_provisional(
+            &root,
+            &take,
+            &live,
+            &models,
+            &mut early,
+            &mut redo,
+            &cancel,
+            &mut |from_ms, target| {
+                copies.borrow_mut().push(from_ms);
+                wav_slice(&mic, target, from_ms, from_ms + 60_000)
+            },
+        );
+        assert_eq!(outcome, stretches::Redone::Done);
+        assert_eq!(*copies.borrow(), [12_000]);
+        assert!(early.to_redo().is_empty() && !redo.pending(&early));
+        let again = &early.parts[1];
+        assert_eq!(
+            (
+                again.language.as_str(),
+                again.model.as_str(),
+                again.provisional
+            ),
+            ("de", small, false)
+        );
+        // The stretch's words are what is said from 12 s on, in German; the
+        // stretches around it keep theirs.
+        let inside = |segment: &&Segment| (12_000..first.end_ms).contains(&segment.start_ms);
+        let stretch = Transcript {
+            segments: early.segments.iter().filter(inside).cloned().collect(),
+            ..Default::default()
+        };
+        eprintln!(
+            "redone while recording: {:?}",
+            stretch.segments.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+        assert!(!stretch.segments.is_empty() && !says(&stretch, "faux"));
+        assert!(keeps(&stretch, "Ergebnisse") && (own || !says(&stretch, "Bibliothek")));
+        let all = Transcript {
+            segments: early.segments.clone(),
+            ..Default::default()
+        };
+        assert!(says(&all, "erste") && says(&all, "dritte"));
+        let saved_early: Stretches = read_json(&take.join("stretches/stretches.json")).unwrap();
+        assert!(saved_early.to_redo().is_empty());
+
         // An unclear start: the first 10 s were taken for French before a
         // later stretch decided the take. Stop transcribes them again from
         // the take's audio, in German.
         let mut unclear = Stretches::new("mic.wav", None);
-        let guessed = |language: &str, p| Guess {
-            language: language.into(),
-            p,
-        };
         unclear.push(
             spoken("faux"),
             10_000,

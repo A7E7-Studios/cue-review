@@ -85,6 +85,7 @@ short or noisy audio. A language chosen in Settings is used for every take witho
 - **THEN** the take's language is detected from its audio again and its transcript is made in that
   language
 - **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_again_detects_the_language_again
+- **PROOF** test: src-tauri/src/transcribe.rs::tests::a_whole_take_pass_detects_under_auto_and_never_under_a_chosen_language
 - **PROOF** desk: open
 
 ### Requirement: The models the language needs arrive in the background
