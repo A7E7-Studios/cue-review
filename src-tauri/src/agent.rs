@@ -1552,13 +1552,15 @@ mod tests {
             },
         )
         .unwrap();
-        // Both tracks were read whole, the system track first, and the
-        // microphone was compared with it.
+        // Both tracks were read whole, and the microphone was compared
+        // with the system audio.
         assert_eq!(
-            *pass.work.borrow(),
+            pass.work_of(Track::System),
+            ["convert system.wav", "whisper whisper-system.json de"]
+        );
+        assert_eq!(
+            pass.work_of(Track::Microphone),
             [
-                "convert system.wav",
-                "whisper whisper-system.json de",
                 "convert mic.wav",
                 "convert system.wav",
                 "echo",

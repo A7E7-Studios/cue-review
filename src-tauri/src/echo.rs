@@ -360,6 +360,15 @@ pub fn judge(
         ))
     })
 }
+/// What the gate made of a microphone file's speech regions (start and end
+/// in ms).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Gated {
+    /// The regions that are still speech.
+    pub speech: Vec<(u64, u64)>,
+    /// The regions, or pieces of long ones, silenced as echo.
+    pub echo: Vec<(u64, u64)>,
+}
 /// The pieces that are still speech, neighbours joined again.
 fn kept(pieces: &[Piece]) -> Vec<(u64, u64)> {
     let mut regions: Vec<(u64, u64)> = Vec::new();
@@ -405,17 +414,30 @@ fn silence(microphone: &Path, pieces: &[Piece]) -> Result<(), String> {
 /// (start and end in ms) that is echo of the file `system`, the system audio
 /// of the same span; both are 16 kHz mono 16-bit. The file keeps its length,
 /// and every sample outside those regions stays as it was. Returns the
-/// regions that are still speech.
+/// regions that are still speech and those it silenced.
+///
+/// The two files are taken to start at the same moment. Copies of two live
+/// tracks, or two tracks converted from the same offset, start less than a
+/// sample period of their device rates apart; that, like the loudspeakers'
+/// delay, is found by the search for the delay and not assumed away.
 pub fn silence_echo(
     microphone: &Path,
     system: &Path,
     regions: &[(u64, u64)],
-) -> Result<Vec<(u64, u64)>, String> {
+) -> Result<Gated, String> {
     let pieces = judge(microphone, system, regions)?;
-    if pieces.iter().any(Piece::is_echo) {
+    let echo: Vec<_> = pieces
+        .iter()
+        .filter(|piece| piece.is_echo())
+        .map(|piece| (piece.start_ms, piece.end_ms))
+        .collect();
+    if !echo.is_empty() {
         silence(microphone, &pieces)?;
     }
-    Ok(kept(&pieces))
+    Ok(Gated {
+        speech: kept(&pieces),
+        echo,
+    })
 }
 
 /// Made-up audio for tests here and of the passes that use the gate.
@@ -490,6 +512,56 @@ pub(crate) mod made_up {
                 .unwrap();
         }
         writer.finalize().unwrap();
+    }
+    /// `samples` at `from_rate` as a device at `to_rate` has them, by
+    /// straight lines between the samples.
+    pub fn resampled(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+        let length = samples.len() as u64 * to_rate as u64 / from_rate as u64;
+        (0..length)
+            .map(|at| {
+                let position = at as f64 * from_rate as f64 / to_rate as f64;
+                let before = position.floor() as usize;
+                let share = (position - before as f64) as f32;
+                let next = samples.get(before + 1).copied().unwrap_or(0.0);
+                samples[before] * (1.0 - share) + next * share
+            })
+            .collect()
+    }
+    /// Writes 16 kHz `samples` as the capture records a track from a device
+    /// at `rate`: mono 32-bit float.
+    pub fn write_recorded(path: &Path, samples: &[f32], rate: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for sample in resampled(samples, RATE, rate) {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+    /// The rate and samples of a track as recorded.
+    pub fn read_recorded(path: &Path) -> (u32, Vec<f32>) {
+        let mut reader = hound::WavReader::open(path).unwrap();
+        let rate = reader.spec().sample_rate;
+        (rate, reader.samples().map(Result::unwrap).collect())
+    }
+    /// Copies a recorded track from `from_ms`, as far as it was recorded by
+    /// `until_ms`, as the capture copies a live track; returns the bounds
+    /// the capture reports for the copy.
+    pub fn copy_recorded(source: &Path, target: &Path, from_ms: u64, until_ms: u64) -> (u64, u64) {
+        let (rate, samples) = read_recorded(source);
+        let recorded = (until_ms * rate as u64 / 1000).min(samples.len() as u64) as u32;
+        let (start, end) = crate::capture::copy_span(rate, recorded, Some(from_ms));
+        let spec = hound::WavReader::open(source).unwrap().spec();
+        let mut writer = hound::WavWriter::create(target, spec).unwrap();
+        for sample in &samples[start as usize..end as usize] {
+            writer.write_sample(*sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        crate::capture::span_ms(rate, (start, end))
     }
     pub fn read(path: &Path) -> Vec<i16> {
         hound::WavReader::open(path)
@@ -648,6 +720,37 @@ mod tests {
     }
 
     #[test]
+    fn what_lies_between_the_two_starts_is_part_of_the_delay() {
+        // Two live tracks copied from one point start up to a sample period
+        // of their devices apart, and report starts up to 1 ms apart; the
+        // files are compared as if they started together. Whatever lies
+        // between the starts moves the delay that is found, and nothing else.
+        let call = voice(1, 8_000, -20.0);
+        let microphone = heard(&call, 130, 20.0);
+        let together = score(one(&microphone, &call, (2_000, 5_000)));
+        // The system file starting a sample of 8 kHz, a sample of 44.1 kHz
+        // (rounded up to one of 16 kHz) or a whole millisecond late or early.
+        for (late, lag_ms) in [(2i64, 130), (1, 130), (16, 131), (-1, 129), (-16, 129)] {
+            let system: Vec<f32> = (0..call.len() as i64)
+                .map(|at| {
+                    usize::try_from(at + late)
+                        .ok()
+                        .and_then(|at| call.get(at))
+                        .copied()
+                        .unwrap_or(0.0)
+                })
+                .collect();
+            let found = score(one(&microphone, &system, (2_000, 5_000)));
+            assert!(found.is_echo(), "{late} samples: {found:?}");
+            assert_eq!(found.lag_ms, lag_ms, "{late} samples");
+            assert!(
+                (found.share - together.share).abs() < 0.01,
+                "{late} samples: {found:?} against {together:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_long_region_is_judged_in_pieces() {
         assert_eq!(pieces(&[(1_000, 16_000)], 60_000), [(1_000, 16_000)]);
         assert_eq!(
@@ -718,14 +821,19 @@ mod tests {
                 &[(500, 3_500), (4_500, 6_000), (7_000, 9_000)]
             )
             .unwrap(),
-            [(4_500, 6_000), (7_000, 9_000)]
+            Gated {
+                speech: vec![(4_500, 6_000), (7_000, 9_000)],
+                echo: vec![(500, 3_500)],
+            }
         );
         // A system file without a sample makes nothing echo, and a longer
         // one is compared over the microphone's span.
         write(&microphone_file, &heard(&call, 130, 20.0));
         write(&system_file, &[]);
         assert_eq!(
-            silence_echo(&microphone_file, &system_file, &[(500, 3_500)]).unwrap(),
+            silence_echo(&microphone_file, &system_file, &[(500, 3_500)])
+                .unwrap()
+                .speech,
             [(500, 3_500)]
         );
         write(
@@ -735,6 +843,7 @@ mod tests {
         assert!(
             silence_echo(&microphone_file, &system_file, &[(500, 3_500)])
                 .unwrap()
+                .speech
                 .is_empty()
         );
     }
@@ -781,8 +890,9 @@ mod tests {
             .map(Piece::is_echo)
             .collect();
         assert_eq!(verdicts, [true, false, true, false]);
-        let speech = silence_echo(&microphone_file, &system_file, &regions).unwrap();
-        assert_eq!(speech, [(5_000, 8_000), (13_000, 13_600)]);
+        let gated = silence_echo(&microphone_file, &system_file, &regions).unwrap();
+        assert_eq!(gated.speech, [(5_000, 8_000), (13_000, 13_600)]);
+        assert_eq!(gated.echo, [(1_100, 4_150), (9_100, 12_150)]);
 
         let after = read(&microphone_file);
         assert_eq!(after.len(), before.len());
@@ -802,14 +912,17 @@ mod tests {
         let own = folder.path().join("own.wav");
         write(&own, &reviewer);
         let untouched = std::fs::read(&own).unwrap();
-        let speech = silence_echo(&own, &system_file, &[(5_000, 8_000)]).unwrap();
-        assert_eq!(speech, [(5_000, 8_000)]);
+        let gated = silence_echo(&own, &system_file, &[(5_000, 8_000)]).unwrap();
+        assert_eq!(gated.speech, [(5_000, 8_000)]);
+        assert!(gated.echo.is_empty());
         assert_eq!(std::fs::read(&own).unwrap(), untouched);
         // Neighbouring pieces of one region that both stay are one region.
         write(&own, &voice(3, 20_000, -30.0));
         write(&system_file, &quiet(20_000));
         assert_eq!(
-            silence_echo(&own, &system_file, &[(0, 20_000)]).unwrap(),
+            silence_echo(&own, &system_file, &[(0, 20_000)])
+                .unwrap()
+                .speech,
             [(0, 20_000)]
         );
         // Only 16 kHz mono 16-bit audio is compared.

@@ -646,13 +646,26 @@ pub enum Copied {
     /// Nothing of the take's only track could be copied.
     Failed(String),
 }
+/// How far apart two copies made from the same point of the take can report
+/// their starts (ms). The capture starts each copy at the last sample at or
+/// before the point asked for and reports the start in whole ms, rounded
+/// down ([`crate::capture::copy_span`], [`crate::capture::span_ms`]): at a
+/// device rate that is not a multiple of 1000 Hz that can be the ms before,
+/// so a 48 kHz microphone and a 44.1 kHz loopback copied from 12345 ms
+/// report 12345 and 12344. Their audio starts less than one sample period of
+/// the slower track apart: 23 microseconds there, 125 at 8 kHz.
+pub const SAME_START_MS: u64 = 1;
 /// Whether a copy of the system track with these bounds (ms into the take)
-/// can be compared with a microphone copy that starts at `start_ms`: it was
-/// made, starts at the same point and holds audio. A system track that is
-/// shorter than `start_ms` gives an empty copy from its own end, and one
-/// without samples none at all: nothing has played there.
+/// can be compared with a microphone copy that reports its start at
+/// `start_ms`: it was made, holds audio, and starts at the same point, which
+/// is within [`SAME_START_MS`] as reported. The comparison does not take
+/// the two starts for equal: what is left between them, less than a sample
+/// period, is part of the delay its search finds ([`crate::echo`] looks from
+/// 50 ms ahead to 500 ms behind). A system track that is shorter than the
+/// point asked for gives an empty copy from its own end, and one without
+/// samples none at all: nothing has played there.
 pub fn is_reference(start_ms: u64, system: &Bounds) -> bool {
-    matches!(system, Ok((start, end)) if *start == start_ms && end > start)
+    matches!(system, Ok((start, end)) if start.abs_diff(start_ms) <= SAME_START_MS && end > start)
 }
 /// Makes the copies for `turn` of a take recording two tracks (`two`) or
 /// one. `copy` copies a live track from the end of the turn's last finished
@@ -665,7 +678,8 @@ pub fn is_reference(start_ms: u64, system: &Bounds) -> bool {
 /// can start late) or for any other reason, is silent for this cycle; the
 /// take's only track failing is a failure, as it always was. The microphone
 /// of two is compared with the system track only when that copy was made
-/// and starts where the microphone's does; where the system copy ends
+/// and starts where the microphone's does ([`is_reference`]), whatever the
+/// two devices' sample rates; where the system copy ends
 /// before the microphone's, the system audio counts as silent from there
 /// ([`crate::echo`]).
 pub fn copy_for(turn: Turn, two: bool, copy: &mut dyn FnMut(Track, bool) -> Bounds) -> Copied {
@@ -1452,11 +1466,27 @@ mod tests {
     /// What the capture answers when a live track has no samples yet.
     const WAITING: &str = "Waiting for audio samples";
     const BUSY: &str = "Audio snapshot is busy; retry next update";
+    /// The rates the two devices of these tests record at: different, as a
+    /// microphone's and a loopback's mostly are.
+    fn device_rate(track: Track) -> u32 {
+        match track {
+            Track::Microphone => 48_000,
+            Track::System => 44_100,
+        }
+    }
     /// The copies one cycle makes of a take whose live tracks hold `lengths`
     /// ms of audio (`Err` for a track that cannot be copied), each track
     /// from `from` ms: what each turn has to work on, and which copies were
     /// asked for, the echo reference marked.
     fn cycle_copies(
+        lengths: &[(Track, Result<u64, &str>)],
+        from: &[(Track, u64)],
+    ) -> (Vec<(Track, Copied)>, Asked) {
+        cycle_copies_at(&device_rate, lengths, from)
+    }
+    /// [`cycle_copies`] with each track recorded at the rate `rate` gives.
+    fn cycle_copies_at(
+        rate: &dyn Fn(Track) -> u32,
         lengths: &[(Track, Result<u64, &str>)],
         from: &[(Track, u64)],
     ) -> (Vec<(Track, Copied)>, Asked) {
@@ -1470,8 +1500,10 @@ mod tests {
                     .iter()
                     .find(|(track, _)| *track == turn.track)
                     .map_or(0, |(_, from_ms)| *from_ms);
-                // As the capture copies: from the point asked for, or from
-                // the track's end when it is shorter, up to 60 s.
+                // As the capture copies, and reports what it copied: from
+                // the last sample at or before the point asked for, or from
+                // the track's end when it is shorter, up to 60 s, in whole
+                // ms rounded down.
                 let mut copy = |track: Track, reference: bool| {
                     asked.borrow_mut().push((track, reference));
                     let length = lengths
@@ -1483,8 +1515,10 @@ mod tests {
                     if length == 0 {
                         return Err(WAITING.to_owned());
                     }
-                    let start = from_ms.min(length);
-                    Ok((start, length.min(start + 60_000)))
+                    let rate = rate(track);
+                    let samples = (length * rate as u64 / 1000) as u32;
+                    let span = crate::capture::copy_span(rate, samples, Some(from_ms));
+                    Ok(crate::capture::span_ms(rate, span))
                 };
                 (turn.track, copy_for(turn, two, &mut copy))
             })
@@ -1688,6 +1722,72 @@ mod tests {
         assert!(!is_reference(3_000, &Ok((2_000, 9_000))));
         assert!(!is_reference(3_000, &Ok((4_000, 9_000))));
         assert!(!is_reference(3_000, &Err(WAITING.into())));
+    }
+
+    #[test]
+    fn tracks_at_different_rates_are_compared_from_the_same_point() {
+        use Track::{Microphone, System};
+        let lengths = [(Microphone, Ok(70_000)), (System, Ok(70_000))];
+        // The microphone's turn from `from`, the two devices at these rates.
+        let turn = |from: u64, microphone: u32, system: u32| {
+            let rate = move |track: Track| match track {
+                Microphone => microphone,
+                System => system,
+            };
+            cycle_copies_at(&rate, &lengths, &[(Microphone, from)]).0[1]
+                .1
+                .clone()
+        };
+        // What the capture reports for a copy from `from` at `rate`.
+        let reported = |from: u64, rate: u32| {
+            let span = crate::capture::copy_span(rate, rate * 70, Some(from));
+            crate::capture::span_ms(rate, span)
+        };
+        // A 48 kHz microphone and a 44.1 kHz loopback from 12345 ms report
+        // 12345 and 12344: the same point, and the system copy is the
+        // reference.
+        assert_eq!(reported(12_345, 48_000), (12_345, 70_000));
+        assert_eq!(reported(12_345, 44_100), (12_344, 70_000));
+        assert_eq!(turn(12_345, 48_000, 44_100), audio(57_655, true));
+        assert_eq!(turn(12_345, 44_100, 48_000), audio(57_656, true));
+        // So it is from every millisecond a stretch can end on, whatever
+        // the two rates, though most of them report different starts.
+        let rates = [
+            (48_000, 44_100),
+            (44_100, 48_000),
+            (16_000, 44_100),
+            (96_000, 22_050),
+            (8_000, 11_025),
+            (44_100, 44_100),
+            (48_000, 48_000),
+        ];
+        let mut apart = 0;
+        for (microphone, system) in rates {
+            for from in (1..2_000).chain([12_344, 12_346, 33_333, 59_999]) {
+                let (own, reference) = (reported(from, microphone), reported(from, system));
+                apart += usize::from(own.0 != reference.0);
+                assert_eq!(
+                    turn(from, microphone, system),
+                    audio(own.1 - own.0, true),
+                    "{microphone} Hz and {system} Hz from {from} ms: {own:?} {reference:?}"
+                );
+            }
+        }
+        assert!(
+            apart > 1_000,
+            "{apart} points with different reported starts"
+        );
+        // The rule: a millisecond apart is the same point, more is not.
+        assert_eq!(SAME_START_MS, 1);
+        assert!(is_reference(12_345, &Ok((12_344, 20_000))));
+        assert!(is_reference(12_344, &Ok((12_345, 20_000))));
+        assert!(!is_reference(12_345, &Ok((12_343, 20_000))));
+        assert!(!is_reference(12_345, &Ok((12_347, 20_000))));
+        // A system track that ends a millisecond before the point is no
+        // reference, near as its end is: its copy is empty.
+        let short = [(Microphone, Ok(70_000)), (System, Ok(12_344))];
+        let (copied, _) = cycle_copies(&short, &[(Microphone, 12_345)]);
+        assert_eq!(copied[1].1, audio(57_655, false));
     }
 
     #[test]
@@ -2220,30 +2320,30 @@ mod tests {
         // No settings: Auto, each track detected on its own.
         let models = crate::deps::TakeModels::now();
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        // A copy of a track from a point, as the capture makes it: at most
-        // 60 s, up to what is recorded by `now_ms`.
-        let copy = |track: Track, from_ms: u64, now_ms: u64, target: &Path| -> u64 {
+        // A copy of a track from a point, as the capture makes it and
+        // reports it: at most 60 s, of what is recorded by `now_ms`.
+        let copy = |track: Track, from_ms: u64, now_ms: u64, target: &Path| -> Bounds {
             let (samples, spec) = match track {
                 Track::Microphone => &microphone,
                 Track::System => &system,
             };
-            let rate = spec.sample_rate as u64;
-            let to_ms = now_ms.min(from_ms + 60_000);
-            let (a, b) = (
-                (from_ms * rate / 1000) as usize,
-                (to_ms * rate / 1000) as usize,
-            );
+            let rate = spec.sample_rate;
+            let recorded = (now_ms * rate as u64 / 1000) as u32;
+            if recorded == 0 {
+                return Err("Waiting for audio samples".into());
+            }
+            let (a, b) = crate::capture::copy_span(rate, recorded, Some(from_ms));
             let spec = hound::WavSpec {
                 bits_per_sample: 32,
                 sample_format: hound::SampleFormat::Float,
                 ..*spec
             };
             let mut writer = hound::WavWriter::create(target, spec).unwrap();
-            for sample in &samples[a.min(b)..b] {
+            for sample in &samples[a as usize..b as usize] {
                 writer.write_sample(*sample).unwrap();
             }
             writer.finalize().unwrap();
-            to_ms.saturating_sub(from_ms)
+            Ok(crate::capture::span_ms(rate, (a, b)))
         };
         let both = [Track::Microphone, Track::System];
         let mut tracks: Vec<(Stretches, Transcript)> = turns(&both, 0)
@@ -2256,16 +2356,38 @@ mod tests {
         let mut cycle = 0;
         // The longest a cycle took: how far the live transcript can lag.
         let mut slowest = Duration::ZERO;
+        // The microphone's turns: all, those compared with the system
+        // track, and those in which the gate silenced speech as echo; and
+        // the speech regions it silenced, counted each time they were
+        // judged, and by the second of the take they start in.
+        let (mut heard, mut compared, mut gated, mut silenced) = (0, 0, 0, 0);
+        let mut echoes = std::collections::BTreeSet::new();
         loop {
             let began = Instant::now();
             let now_ms = (started.elapsed().as_millis() as u64).min(length_ms);
             for (at, turn) in turns(&both, cycle).into_iter().enumerate() {
                 let (stretches, shown) = &mut tracks[at];
                 let from = stretches.until_ms;
-                let length = copy(turn.track, from, now_ms, &snapshot);
-                let echo = turn.track == Track::Microphone;
-                if echo {
-                    copy(Track::System, from, now_ms, &system_snapshot);
+                // The copies and what they are good for, as the live worker
+                // decides it.
+                let copied = copy_for(turn, true, &mut |track, reference| {
+                    let target = if reference {
+                        &system_snapshot
+                    } else {
+                        &snapshot
+                    };
+                    copy(track, from, now_ms, target)
+                });
+                let Copied::Audio {
+                    length_ms: length,
+                    reference,
+                } = copied
+                else {
+                    continue;
+                };
+                if turn.track == Track::Microphone {
+                    heard += 1;
+                    compared += usize::from(reference);
                 }
                 let (guess, audio) = crate::transcribe::live_guess(
                     root.path(),
@@ -2273,11 +2395,16 @@ mod tests {
                     &snapshot,
                     length,
                     stretches.language.as_deref(),
-                    echo.then_some(system_snapshot.as_path()),
+                    reference.then_some(system_snapshot.as_path()),
                     turn.guess,
                     &cancel,
                 )
                 .unwrap();
+                if let Some(audio) = &audio {
+                    gated += usize::from(!audio.silenced().is_empty());
+                    silenced += audio.silenced().len();
+                    echoes.extend(audio.silenced().iter().map(|echo| (from + echo.0) / 1000));
+                }
                 let guess = guess.unwrap_or_else(|| shown.clone());
                 let before = stretches.until_ms;
                 *shown = match audio {
@@ -2311,6 +2438,22 @@ mod tests {
                 std::thread::sleep(LIVE_CYCLE - spent);
             }
         }
+        eprintln!(
+            "the echo gate, at {} Hz (microphone) and {} Hz (system): compared in {compared} of {heard} microphone turns, silenced speech in {gated} of them, {silenced} regions in all, starting in {} different seconds of the take",
+            microphone.1.sample_rate,
+            system.1.sample_rate,
+            echoes.len()
+        );
+        // The fixture is a call over loudspeakers: a gate that silences
+        // nothing of it is not comparing the two tracks.
+        assert!(
+            compared > 0,
+            "the microphone was never compared with the system track"
+        );
+        assert!(
+            silenced > 0 && !echoes.is_empty(),
+            "the echo gate silenced nothing of a call over loudspeakers"
+        );
         // Stop: the finished tracks, as the capture leaves them.
         for track in both {
             fs::copy(fixtures.join(track.file()), take.join(track.file())).unwrap();

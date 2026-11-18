@@ -1647,9 +1647,36 @@ fn snapshot_live_track(
         .ok_or_else(|| format!("No live {} track is being recorded", track.name()))?;
     snapshot_track(&live.path, &live.writer, target, Some(from_ms))
 }
+/// The samples a copy of a live track holds, of a track of `recorded`
+/// samples at `rate`: from the last sample at or before `from_ms`, or from
+/// the track's end when it is shorter, for at most 60 s; with `None` the
+/// latest 30 s. A copy so starts less than one sample period before the
+/// point asked for, whatever the rate.
+pub(crate) fn copy_span(rate: u32, recorded: u32, from_ms: Option<u64>) -> (u32, u32) {
+    match from_ms {
+        Some(from_ms) => {
+            let start = (from_ms * rate as u64 / 1000).min(recorded as u64) as u32;
+            (
+                start,
+                recorded.min(start.saturating_add(rate.saturating_mul(60))),
+            )
+        }
+        None => (recorded.saturating_sub(rate.saturating_mul(30)), recorded),
+    }
+}
+/// A span of samples at `rate` in whole ms from the track's start, rounded
+/// down. At a rate that is not a multiple of 1000 Hz a copy asked for from
+/// some ms can so report the ms before it: 12345 ms at 44.1 kHz is sample
+/// 544414, which lies in ms 12344.
+pub(crate) fn span_ms(rate: u32, (start, end): (u32, u32)) -> (u64, u64) {
+    (
+        start as u64 * 1000 / rate as u64,
+        end as u64 * 1000 / rate as u64,
+    )
+}
 /// Copies the live track into `target`: from `from_ms` (at most 60 s of it),
-/// or the latest 30 s when `from_ms` is `None`. Returns the copy's bounds in
-/// ms from the track's start.
+/// or the latest 30 s when `from_ms` is `None` ([`copy_span`]). Returns the
+/// copy's bounds in ms from the track's start ([`span_ms`]).
 fn snapshot_track(
     path: &Path,
     writer: &Arc<Mutex<AudioWriter>>,
@@ -1685,17 +1712,7 @@ fn snapshot_track(
     if end == 0 {
         return Err("Waiting for audio samples".into());
     }
-    let rate = spec.sample_rate as u64;
-    let (start, end) = match from_ms {
-        Some(from_ms) => {
-            let start = (from_ms * rate / 1000).min(end as u64) as u32;
-            (
-                start,
-                end.min(start.saturating_add(spec.sample_rate.saturating_mul(60))),
-            )
-        }
-        None => (end.saturating_sub(spec.sample_rate.saturating_mul(30)), end),
-    };
+    let (start, end) = copy_span(spec.sample_rate, end, from_ms);
     // Existing samples are append-only. Hound has already captured a finite header length.
     reader.seek(start).map_err(|e| e.to_string())?;
     let mut output = hound::WavWriter::create(target, spec).map_err(|e| e.to_string())?;
@@ -1705,10 +1722,7 @@ fn snapshot_track(
             .map_err(|e| e.to_string())?;
     }
     output.finalize().map_err(|e| e.to_string())?;
-    Ok((
-        start as u64 * 1000 / spec.sample_rate as u64,
-        end as u64 * 1000 / spec.sample_rate as u64,
-    ))
+    Ok(span_ms(spec.sample_rate, (start, end)))
 }
 fn audio_track(
     device: cpal::Device,
@@ -4736,34 +4750,166 @@ mod tests {
         assert!(snapshot_live_track(&[], Track::Microphone, 0, &copy).is_err());
     }
     #[test]
+    fn a_copy_starts_at_the_sample_at_or_before_the_point_asked_for() {
+        // 20 s at 48 kHz and at 44.1 kHz, copied from 12345 ms: the last
+        // sample at or before it, which at 44.1 kHz lies in ms 12344.
+        let (fast, slow) = (48_000, 44_100);
+        assert_eq!(copy_span(fast, 960_000, Some(12_345)), (592_560, 960_000));
+        assert_eq!(copy_span(slow, 882_000, Some(12_345)), (544_414, 882_000));
+        assert_eq!(span_ms(fast, (592_560, 960_000)), (12_345, 20_000));
+        assert_eq!(span_ms(slow, (544_414, 882_000)), (12_344, 20_000));
+        // From any point, at any two rates, the two copies start less than
+        // a sample period of the slower track apart, and report starts at
+        // most 1 ms apart.
+        for (a, b) in [
+            (48_000u32, 44_100u32),
+            (96_000, 22_050),
+            (16_000, 11_025),
+            (8_000, 44_100),
+        ] {
+            for from_ms in (0..3_000).chain([12_345, 33_333, 59_999]) {
+                let start = |rate: u32| copy_span(rate, rate * 70, Some(from_ms)).0;
+                let seconds = |rate: u32| start(rate) as f64 / rate as f64;
+                let period = 1.0 / a.min(b) as f64;
+                assert!(
+                    (seconds(a) - seconds(b)).abs() < period,
+                    "{a} {b} {from_ms}"
+                );
+                assert!(from_ms as f64 / 1000.0 - seconds(a).min(seconds(b)) < period);
+                let reported = |rate: u32| span_ms(rate, (start(rate), rate * 70)).0;
+                assert!(reported(a).abs_diff(reported(b)) <= crate::stretches::SAME_START_MS);
+                assert!(from_ms - reported(a).min(reported(b)) <= 1);
+            }
+        }
+        // Never more than 60 s, never past the end, and from the end of a
+        // track that is shorter than the point asked for.
+        assert_eq!(copy_span(slow, slow * 100, Some(1)), (44, 44 + slow * 60));
+        assert_eq!(copy_span(slow, slow * 2, Some(5_000)), (slow * 2, slow * 2));
+        assert_eq!(span_ms(slow, (slow * 2, slow * 2)), (2_000, 2_000));
+        // Without a point: the latest 30 s.
+        assert_eq!(copy_span(slow, slow * 40, None), (slow * 10, slow * 40));
+        assert_eq!(copy_span(slow, slow * 4, None), (0, slow * 4));
+    }
+    /// A live track at `rate` as the capture starts it: a file and no
+    /// packet yet.
+    fn live_track(folder: &Path, track: Track, name: &str, rate: u32) -> LiveTrack {
+        let path = folder.join(name);
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let wav = hound::WavWriter::create(&path, spec).unwrap();
+        LiveTrack {
+            track,
+            writer: Arc::new(Mutex::new(AudioWriter::new(wav, &path, rate))),
+            path,
+        }
+    }
+    #[test]
+    fn tracks_at_48000_and_44100_hz_are_compared_from_any_point() {
+        use crate::echo::{
+            self,
+            made_up::{heard, mixed, read_recorded, resampled, voice, write},
+        };
+        use crate::stretches::{copy_for, Copied, Turn};
+        let dir = tempfile::tempdir().unwrap();
+        // A call of 20 s on the system track, at 44.1 kHz; the microphone,
+        // at 48 kHz, hears it from the loudspeakers 130 ms late.
+        let call = voice(1, 20_000, -20.0);
+        let microphone = mixed(&heard(&call, 130, 20.0), &voice(2, 20_000, -62.0));
+        let recording = |track: Track, name: &str, rate: u32, audio: &[f32]| {
+            let live = live_track(dir.path(), track, name, rate);
+            let samples = resampled(audio, 16_000, rate);
+            let mut writer = live.writer.lock().unwrap();
+            writer.packet(&samples, 1, 0.0, 0.0, false).unwrap();
+            drop(writer);
+            live
+        };
+        let tracks = [
+            recording(Track::Microphone, "mic.wav", 48_000, &microphone),
+            recording(Track::System, "system.wav", 44_100, &call),
+        ];
+        let (snapshot, reference) = (dir.path().join("copy.wav"), dir.path().join("echo.wav"));
+        let (speech, system_speech) = (
+            dir.path().join("speech.wav"),
+            dir.path().join("system-speech.wav"),
+        );
+        let turn = Turn {
+            track: Track::Microphone,
+            guess: true,
+        };
+        let mut apart = Vec::new();
+        // The end of a stretch falls on any millisecond.
+        for from in [0u64, 1_237, 7_001, 12_340, 12_345, 12_346] {
+            let starts = std::cell::RefCell::new(Vec::new());
+            let copied = copy_for(turn, true, &mut |track, echo| {
+                let target = if echo { &reference } else { &snapshot };
+                let bounds = snapshot_live_track(&tracks, track, from, target)?;
+                starts.borrow_mut().push(bounds.0);
+                Ok(bounds)
+            });
+            // Both tracks were copied, and the system's serves as the
+            // reference, whether or not the two report the same start.
+            assert_eq!(
+                copied,
+                Copied::Audio {
+                    length_ms: 20_000 - from,
+                    reference: true
+                },
+                "from {from} ms"
+            );
+            let starts = starts.into_inner();
+            assert_eq!(starts[0], from);
+            if starts[1] != starts[0] {
+                apart.push((from, starts[1]));
+            }
+            // Each copy at 16 kHz, as FFmpeg makes it, and the two compared
+            // as they are: the echo is found, at its delay.
+            for (copy, at_16) in [(&snapshot, &speech), (&reference, &system_speech)] {
+                let (rate, samples) = read_recorded(copy);
+                write(at_16, &resampled(&samples, rate, 16_000));
+            }
+            let pieces = echo::judge(&speech, &system_speech, &[(1_000, 4_000)]).unwrap();
+            let score = pieces[0].score.unwrap();
+            assert!(
+                pieces[0].is_echo() && (129..=131).contains(&score.lag_ms),
+                "from {from} ms: {score:?}"
+            );
+        }
+        // At 44.1 kHz only every tenth millisecond falls on a sample: from
+        // any other the copy reports the millisecond before.
+        assert_eq!(
+            apart,
+            [
+                (1_237, 1_236),
+                (7_001, 7_000),
+                (12_345, 12_344),
+                (12_346, 12_345)
+            ]
+        );
+        // The copy from 12345 ms holds the track from sample 544414 on.
+        let bounds = snapshot_live_track(&tracks, Track::System, 12_345, &reference).unwrap();
+        assert_eq!(bounds, (12_344, 20_000));
+        let (_, copy) = read_recorded(&reference);
+        let (_, whole) = read_recorded(&tracks[1].path);
+        assert_eq!(copy.len(), whole.len() - 544_414);
+        assert_eq!(copy[..100], whole[544_414..544_514]);
+    }
+    #[test]
     fn a_live_track_without_samples_is_silent_until_its_first_packet() {
         use crate::stretches::{copy_for, cycle_error, turns, Copied, Turned};
         let dir = tempfile::tempdir().unwrap();
-        // A track as the capture starts it: a file and no packet yet.
-        let live = |track: Track, name: &str| {
-            let path = dir.path().join(name);
-            let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: 1000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-            let wav = hound::WavWriter::create(&path, spec).unwrap();
-            LiveTrack {
-                track,
-                writer: Arc::new(Mutex::new(AudioWriter::new(wav, &path, 1000))),
-                path,
-            }
-        };
+        // The two devices run at different rates, as they mostly do.
         let tracks = [
-            live(Track::Microphone, "mic.wav"),
-            live(Track::System, "system.wav"),
+            live_track(dir.path(), Track::Microphone, "mic.wav", 48_000),
+            live_track(dir.path(), Track::System, "system.wav", 44_100),
         ];
         let packet = |track: &LiveTrack, value: f32, ms: usize, at: f64, start: f64| {
             let mut writer = track.writer.lock().unwrap();
-            writer
-                .packet(&vec![value; ms], 1, at, start, false)
-                .unwrap();
+            let samples = vec![value; ms * writer.rate as usize / 1000];
+            writer.packet(&samples, 1, at, start, false).unwrap();
         };
         let (snapshot, reference) = (dir.path().join("copy.wav"), dir.path().join("echo.wav"));
         // One cycle of the live worker over these tracks, each from `from`.
@@ -4818,8 +4964,8 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(
-            (played.len(), played[0], played[5_999], played[6_000]),
-            (8_000, 0.0, 0.0, 0.5)
+            (played.len(), played[0], played[264_599], played[264_600]),
+            (352_800, 0.0, 0.0, 0.5)
         );
         // Nothing plays again while the microphone goes on to 20 s: the
         // system track stays at 8 s. From 5 s its copy ends early, and
@@ -4828,13 +4974,17 @@ mod tests {
         assert_eq!(cycle(5_000), [audio(3_000, false), audio(15_000, true)]);
         assert_eq!(
             hound::WavReader::open(&reference).unwrap().duration(),
-            3_000
+            132_300
         );
+        // From a millisecond between two of the system track's samples its
+        // copy reports the millisecond before, and is the reference still.
+        assert_eq!(cycle(5_003), [audio(2_998, false), audio(14_997, true)]);
         assert_eq!(cycle(15_000)[1], audio(5_000, false));
+        assert_eq!(cycle(15_001)[1], audio(4_999, false));
 
         // Stop: a track that never got a sample ends as silence of the
         // take's length, as any other finished track.
-        let never = live(Track::System, "never.wav");
+        let never = live_track(dir.path(), Track::System, "never.wav", 44_100);
         let mut writer = never.writer.lock().unwrap();
         writer.finish(Duration::from_secs(9)).unwrap();
         let finished: Vec<f32> = hound::WavReader::open(&never.path)
@@ -4842,7 +4992,7 @@ mod tests {
             .samples()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(finished.len(), 9_000);
+        assert_eq!(finished.len(), 396_900);
         assert!(finished.iter().all(|sample| *sample == 0.0));
     }
     #[test]

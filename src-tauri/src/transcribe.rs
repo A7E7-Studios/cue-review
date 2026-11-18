@@ -26,6 +26,14 @@ fn final_threads(logical: usize) -> usize {
 fn live_threads(logical: usize) -> usize {
     (logical / 4).max(logical.min(2)).clamp(1, 4)
 }
+/// Whisper threads for each track of a take with two, whose two final
+/// transcriptions run at the same time: [`final_threads`] where the two
+/// together fit the processor, which is from 8 logical threads on (4 each
+/// there, 8 each from 16), and half the logical threads below that, so the
+/// two never ask for more threads than there are.
+fn track_threads(logical: usize) -> usize {
+    final_threads(logical).min((logical / 2).max(1))
+}
 fn logical_threads() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
 }
@@ -136,6 +144,22 @@ pub fn parse_whisper(value: &Value) -> Result<Transcript, String> {
         ..Default::default()
     })
 }
+/// What a command that ran to its end and failed is reported as: its exit
+/// status and the end of its log.
+fn failure(status: std::process::ExitStatus, log: &Path) -> String {
+    let detail = fs::read_to_string(log).unwrap_or_default();
+    format!(
+        "Processing failed ({status}): {}",
+        detail
+            .chars()
+            .rev()
+            .take(1800)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+    )
+}
 fn run_logged(mut command: std::process::Command, log: &Path) -> Result<(), String> {
     let file = fs::File::create(log).map_err(|e| e.to_string())?;
     let status = command
@@ -144,20 +168,79 @@ fn run_logged(mut command: std::process::Command, log: &Path) -> Result<(), Stri
         .status()
         .map_err(|e| e.to_string())?;
     if !status.success() {
-        let detail = fs::read_to_string(log).unwrap_or_default();
-        return Err(format!(
-            "Processing failed ({status}): {}",
-            detail
-                .chars()
-                .rev()
-                .take(1800)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>()
-        ));
+        return Err(failure(status, log));
     }
     Ok(())
+}
+/// What work that was stopped before its end is reported as.
+const CANCELLED: &str = "Live transcription cancelled.";
+/// [`run_logged`], with the command killed once `stop` is set: a failure is
+/// reported as [`run_logged`] reports it, a stop as [`CANCELLED`].
+fn run_stoppable(
+    mut command: std::process::Command,
+    log: &Path,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    if stop.load(Ordering::Acquire) {
+        return Err(CANCELLED.into());
+    }
+    let file = fs::File::create(log).map_err(|e| e.to_string())?;
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(file)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(failure(status, log)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    }
+}
+/// How long a command of a transcription runs.
+#[derive(Clone, Copy)]
+enum Until<'a> {
+    /// To its end ([`run_logged`]).
+    Done,
+    /// Until a live job or a refinement is cancelled ([`run_live`]).
+    Cancelled(&'a AtomicBool),
+    /// To its end, unless the pass is stopped ([`run_stoppable`]): a track
+    /// of two when the other one has failed.
+    Stopped(&'a AtomicBool),
+}
+impl<'a> From<Option<&'a AtomicBool>> for Until<'a> {
+    fn from(cancel: Option<&'a AtomicBool>) -> Self {
+        cancel.map_or(Until::Done, Until::Cancelled)
+    }
+}
+fn run_until(command: std::process::Command, log: &Path, until: Until<'_>) -> Result<(), String> {
+    match until {
+        Until::Done => run_logged(command, log),
+        Until::Cancelled(cancel) => run_live(command, log, cancel),
+        Until::Stopped(stop) => run_stoppable(command, log, stop),
+    }
+}
+/// The scratch file `name` of the track `speech` belongs to. A take with
+/// two tracks is transcribed from both at the same time: the system track's
+/// speech files start with `system-`, and so does every file made of them,
+/// so no two passes write the same file.
+fn scratch(folder: &Path, speech: &Path, name: &str) -> std::path::PathBuf {
+    if file_name(speech).starts_with("system-") {
+        folder.join(format!("system-{name}"))
+    } else {
+        folder.join(name)
+    }
 }
 fn run_live(command: std::process::Command, log: &Path, cancel: &AtomicBool) -> Result<(), String> {
     run_live_output(command, log, cancel, None)
@@ -263,8 +346,9 @@ fn detect(
         .args(["-vt", "0.35", "-vp"])
         .arg(pad_ms.to_string())
         .args(["-vspd", "100", "-np"]);
-    let output = folder.join("vad.txt");
-    run_live_output(detector, &folder.join("vad.log"), cancel, Some(&output))?;
+    let output = scratch(folder, speech, "vad.txt");
+    let log = scratch(folder, speech, "vad.log");
+    run_live_output(detector, &log, cancel, Some(&output))?;
     vad_regions(&fs::read_to_string(output).map_err(|e| e.to_string())?)
 }
 /// Where `speech` (16 kHz) holds speech, padded by only 100 ms so the pauses
@@ -314,6 +398,17 @@ fn to_speech(
     log: &Path,
     cancel: Option<&AtomicBool>,
 ) -> Result<(), String> {
+    to_speech_until(source, target, from_ms, length_ms, log, cancel.into())
+}
+/// [`to_speech`], running as `until` says.
+fn to_speech_until(
+    source: &Path,
+    target: &Path,
+    from_ms: Option<u64>,
+    length_ms: Option<u64>,
+    log: &Path,
+    until: Until<'_>,
+) -> Result<(), String> {
     let mut ffmpeg = deps::command("ffmpeg")?;
     ffmpeg.args(["-hide_banner", "-y", "-i"]).arg(source);
     if let Some(from_ms) = from_ms {
@@ -325,10 +420,7 @@ fn to_speech(
     ffmpeg
         .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
         .arg(target);
-    match cancel {
-        Some(cancel) => run_live(ffmpeg, log, cancel),
-        None => run_logged(ffmpeg, log),
-    }
+    run_until(ffmpeg, log, until)
 }
 /// Copies `from_ms..to_ms` of a 16 kHz PCM file into `target`.
 fn wav_slice(source: &Path, target: &Path, from_ms: u64, to_ms: u64) -> Result<(), String> {
@@ -386,7 +478,7 @@ fn detect_language(
         .arg(speech)
         .args(["-dl", "-ng", "-t"])
         .arg(threads.to_string());
-    let log = folder.join("language.log");
+    let log = scratch(folder, speech, "language.log");
     match cancel {
         Some(cancel) => run_live(whisper, &log, cancel),
         None => run_logged(whisper, &log),
@@ -431,7 +523,7 @@ fn detect_take_language(
     threads: usize,
     cancel: Option<&AtomicBool>,
 ) -> Option<String> {
-    let window = folder.join("language.wav");
+    let window = scratch(folder, speech, "language.wav");
     let mut guesses = Vec::new();
     for index in 0..DETECT_WINDOWS {
         let spans = window_spans(regions, index);
@@ -461,10 +553,33 @@ fn run_whisper(
     cancel: Option<&AtomicBool>,
     raw: &Path,
 ) -> Result<Transcript, String> {
+    run_whisper_until(
+        root,
+        speech,
+        folder,
+        model,
+        language,
+        threads,
+        cancel.into(),
+        raw,
+    )
+}
+/// [`run_whisper`], running as `until` says.
+#[allow(clippy::too_many_arguments)]
+fn run_whisper_until(
+    root: &Path,
+    speech: &Path,
+    folder: &Path,
+    model: &deps::ModelChoice,
+    language: &str,
+    threads: usize,
+    until: Until<'_>,
+    raw: &Path,
+) -> Result<Transcript, String> {
     let mut whisper = deps::command("whisper-cli")?;
     alignment_options(&mut whisper, model)?;
     run_whisper_with(
-        whisper, root, speech, folder, model, language, threads, cancel, raw,
+        whisper, root, speech, folder, model, language, threads, until, raw,
     )
 }
 /// A quick guess of the words of `speech` with base: one beam and no
@@ -490,7 +605,7 @@ fn guess_words(
         &model,
         language,
         threads,
-        Some(cancel),
+        Until::Cancelled(cancel),
         &raw,
     )
 }
@@ -503,7 +618,7 @@ fn run_whisper_with(
     model: &deps::ModelChoice,
     language: &str,
     threads: usize,
-    cancel: Option<&AtomicBool>,
+    until: Until<'_>,
     raw: &Path,
 ) -> Result<Transcript, String> {
     let prefix = folder.join(format!("whisper-{}", uuid::Uuid::new_v4()));
@@ -517,11 +632,11 @@ fn run_whisper_with(
         .arg(threads.to_string())
         .arg("-of")
         .arg(&prefix);
-    let log = folder.join("transcription.log");
-    match cancel {
-        Some(cancel) => run_live(whisper, &log, cancel)?,
-        None => run_logged(whisper, &log)?,
-    }
+    run_until(
+        whisper,
+        &scratch(folder, speech, "transcription.log"),
+        until,
+    )?;
     accept_whisper_output(&prefix, raw)
 }
 /// [`media_source`] for Stop: saved stretches it cannot use are forgotten,
@@ -609,13 +724,23 @@ fn file_name(path: &Path) -> String {
 pub struct LiveAudio {
     speech: std::path::PathBuf,
     regions: Vec<(u64, u64)>,
+    /// The microphone's speech regions silenced as echo (ms from the copy's
+    /// start); they are no longer among `regions`.
+    echo: Vec<(u64, u64)>,
     length_ms: u64,
+}
+impl LiveAudio {
+    /// The speech regions of the microphone's copy that were silenced as
+    /// echo of the system audio, start and end in ms from the copy's start.
+    pub fn silenced(&self) -> &[(u64, u64)] {
+        &self.echo
+    }
 }
 /// Silences in the 16 kHz microphone file `speech` what the microphone
 /// heard of the system audio from the loudspeakers ([`echo`]). `system` is a
 /// copy of the system track over the same span, in any format; it is
 /// converted to `reference` first. Returns the regions of `regions` that
-/// are still speech.
+/// are still speech, and those silenced.
 fn silence_echo(
     speech: &Path,
     regions: &[(u64, u64)],
@@ -623,9 +748,9 @@ fn silence_echo(
     reference: &Path,
     log: &Path,
     cancel: &AtomicBool,
-) -> Result<Vec<(u64, u64)>, String> {
+) -> Result<echo::Gated, String> {
     if regions.is_empty() {
-        return Ok(Vec::new());
+        return Ok(echo::Gated::default());
     }
     to_speech(system, reference, None, None, log, Some(cancel))?;
     echo::silence_echo(speech, reference, regions)
@@ -661,9 +786,11 @@ pub fn live_guess(
     let log = folder.join("transcode.log");
     to_speech(snapshot, &speech, None, None, &log, Some(cancel))?;
     let mut regions = speech_regions(&speech, folder, cancel)?;
+    let mut echo = Vec::new();
     if let Some(system) = system {
         let reference = folder.join("echo-reference.wav");
-        regions = silence_echo(&speech, &regions, system, &reference, &log, cancel)?;
+        let gated = silence_echo(&speech, &regions, system, &reference, &log, cancel)?;
+        (regions, echo) = (gated.speech, gated.echo);
     }
     let guess = match guess {
         false => None,
@@ -679,6 +806,7 @@ pub fn live_guess(
     let audio = LiveAudio {
         speech,
         regions,
+        echo,
         length_ms,
     };
     Ok((guess, Some(audio)))
@@ -779,7 +907,9 @@ fn redo_stretch(
         let reference = folder.join("echo-reference.wav");
         to_speech(system, &reference, None, length, &log, Some(cancel))?;
         let regions = speech_regions(&speech, folder, cancel)?;
-        spoken = !echo::silence_echo(&speech, &reference, &regions)?.is_empty();
+        spoken = !echo::silence_echo(&speech, &reference, &regions)?
+            .speech
+            .is_empty();
     }
     let words = if spoken {
         fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
@@ -801,6 +931,25 @@ fn redo_stretch(
     };
     stretches.replace(part.start_ms, words, language, &file_name(&model.path));
     stretches::save(take, stretches)
+}
+/// Copies a take's live audio for a stretch that is transcribed again: the
+/// track `own` from `from_ms` into `audio` and, for the microphone of a take
+/// with two tracks, the system track from there into `system`. Returns
+/// whether the system copy can be compared with the stretch
+/// ([`stretches::is_reference`]): it was made and starts at the same point,
+/// whatever the two devices' rates. A stretch whose own track cannot be
+/// copied is an error, to be tried again.
+fn redo_copies(
+    own: Track,
+    from_ms: u64,
+    audio: &Path,
+    system: Option<&Path>,
+    copy: &mut dyn FnMut(Track, u64, &Path) -> stretches::Bounds,
+) -> Result<bool, String> {
+    let (start, _) = copy(own, from_ms, audio)?;
+    Ok(system.is_some_and(|system| {
+        stretches::is_reference(start, &copy(Track::System, from_ms, system))
+    }))
 }
 /// While the take records: transcribes again, in the language the take was
 /// just held to, the stretches made before that in another language
@@ -832,10 +981,13 @@ pub fn redo_provisional(
     redo.run(
         stretches,
         &mut |part| {
-            let (start, _) = copy(own, part.start_ms, &audio)?;
-            compared.set(system.as_ref().is_some_and(|system| {
-                stretches::is_reference(start, &copy(Track::System, part.start_ms, system))
-            }));
+            compared.set(redo_copies(
+                own,
+                part.start_ms,
+                &audio,
+                system.as_deref(),
+                copy,
+            )?);
             Ok(())
         },
         &mut |part, language, stretches| {
@@ -1133,35 +1285,59 @@ fn transcribe_media_with(
     reuse: bool,
     cancel: Option<&AtomicBool>,
 ) -> Result<Transcript, String> {
-    let never = AtomicBool::new(false);
-    let threads = final_threads(logical_threads());
-    let log = folder.join("transcode.log");
+    // What stops the pass: the refinement's own cancel flag, or for the
+    // two tracks of a take, which are transcribed at the same time, a flag
+    // one sets when it fails so the other does not run on. A take with one
+    // track runs as ever: to the end, or until a refinement is cancelled.
+    let own = AtomicBool::new(false);
+    let stop = cancel.unwrap_or(&own);
+    let two = has_audio && two_tracks(folder);
+    let (threads, until, converting) = match (two, cancel) {
+        (false, _) => (final_threads(logical_threads()), cancel.into(), Until::Done),
+        (true, Some(cancel)) => {
+            let until = Until::Cancelled(cancel);
+            (track_threads(logical_threads()), until, until)
+        }
+        (true, None) => {
+            let until = Until::Stopped(stop);
+            (track_threads(logical_threads()), until, until)
+        }
+    };
+    // Detection's failures are no failures of the take: it only has to end.
+    let detecting = if two { Some(stop) } else { cancel };
     let tools = Tools {
         convert: &|source, target, from_ms, length_ms| {
-            to_speech(source, target, from_ms, length_ms, &log, None)
+            let log = scratch(folder, target, "transcode.log");
+            to_speech_until(source, target, from_ms, length_ms, &log, converting)
         },
-        regions: &|speech| detect(speech, folder, cancel.unwrap_or(&never), 500),
-        detect: &|speech, regions| detect_take_language(speech, regions, folder, threads, cancel),
+        regions: &|speech| detect(speech, folder, stop, 500),
+        detect: &|speech, regions| {
+            detect_take_language(speech, regions, folder, threads, detecting)
+        },
         model: &|language| {
             installed(deps::final_model(language)).map(|model| file_name(&model.path))
         },
         whisper: &|speech, language, raw| {
             let model = installed(deps::final_model(language))?;
-            run_whisper(root, speech, folder, &model, language, threads, cancel, raw)
+            run_whisper_until(root, speech, folder, &model, language, threads, until, raw)
         },
         echo: &|microphone, system| {
             // Padded by only 100 ms, as the regions the rule was measured on.
-            let regions = detect(microphone, folder, cancel.unwrap_or(&never), 100)?;
+            let regions = detect(microphone, folder, stop, 100)?;
             echo::silence_echo(microphone, system, &regions).map(|_| ())
         },
+        stop,
     };
     transcribe_media_in(root, folder, duration_ms, has_audio, reuse, &tools)
 }
-type Converter<'a> = &'a dyn Fn(&Path, &Path, Option<u64>, Option<u64>) -> Result<(), String>;
-type SpeechFinder<'a> = &'a dyn Fn(&Path) -> Result<Vec<(u64, u64)>, String>;
-type Detector<'a> = &'a dyn Fn(&Path, &[(u64, u64)]) -> Option<String>;
+type Converter<'a> =
+    &'a (dyn Fn(&Path, &Path, Option<u64>, Option<u64>) -> Result<(), String> + Sync);
+type SpeechFinder<'a> = &'a (dyn Fn(&Path) -> Result<Vec<(u64, u64)>, String> + Sync);
+type Detector<'a> = &'a (dyn Fn(&Path, &[(u64, u64)]) -> Option<String> + Sync);
 /// The work a whole-take pass leaves to FFmpeg, the speech detector and
-/// Whisper. Tests pass fakes, so the pass itself runs without them.
+/// Whisper. Tests pass fakes, so the pass itself runs without them. The two
+/// tracks of a take are transcribed at the same time, so every tool is
+/// called from two threads at once.
 pub(crate) struct Tools<'a> {
     /// Converts audio to 16 kHz PCM: source, target, and optionally from
     /// where and for how long (ms).
@@ -1173,14 +1349,18 @@ pub(crate) struct Tools<'a> {
     pub detect: Detector<'a>,
     /// The file name of the model that transcribes a language now, or why
     /// none can.
-    pub model: &'a dyn Fn(&str) -> Result<String, String>,
+    pub model: &'a (dyn Fn(&str) -> Result<String, String> + Sync),
     /// Transcribes a 16 kHz file held to a language, keeping the raw output
     /// at the given path.
-    pub whisper: &'a dyn Fn(&Path, &str, &Path) -> Result<Transcript, String>,
+    pub whisper: &'a (dyn Fn(&Path, &str, &Path) -> Result<Transcript, String> + Sync),
     /// Silences in a 16 kHz microphone file what it heard of the system
     /// audio, a 16 kHz file of the same span, from the loudspeakers
     /// ([`echo::silence_echo`]).
-    pub echo: &'a dyn Fn(&Path, &Path) -> Result<(), String>,
+    pub echo: &'a (dyn Fn(&Path, &Path) -> Result<(), String> + Sync),
+    /// Stops the work under way once it is set: every tool then ends with
+    /// an error as soon as it can. The pass of a take with two tracks sets
+    /// it when one track fails, so the other does not run on.
+    pub stop: &'a AtomicBool,
 }
 /// [`transcribe_media_with`] with its outside work done by `tools`.
 pub(crate) fn transcribe_media_in(
@@ -1210,12 +1390,19 @@ pub(crate) fn transcribe_media_in(
         tools,
     };
     if two_tracks(folder) {
-        // The clear track first; then the microphone, without its echo.
-        let system = pass.run(Some(Track::System))?;
-        let microphone = pass.run(Some(Track::Microphone))?;
-        return Ok(merge_tracks(system, microphone));
+        return pass.run_both();
     }
     pass.run(None)
+}
+/// Sets a flag when it is dropped by a panic, so a pass on another thread
+/// does not run on.
+struct StopOnPanic<'a>(&'a AtomicBool);
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Release);
+        }
+    }
 }
 /// Whether `speech` is an audio file without a single sample.
 fn holds_no_audio(speech: &Path) -> bool {
@@ -1231,6 +1418,40 @@ struct Pass<'a> {
     tools: &'a Tools<'a>,
 }
 impl Pass<'_> {
+    /// Transcribes both tracks of a take with two, at the same time, and
+    /// merges their rows. Neither pass needs anything of the other: the
+    /// microphone's echo is recognised by the system track's audio, which it
+    /// converts for itself, and every scratch and output file carries its
+    /// track ([`scratch`]). The result is that of one pass after the other.
+    ///
+    /// When a track fails, the take fails with its error, as it would one
+    /// after the other, and the other track is stopped; when both fail, the
+    /// system track's error is the take's, unless it was only stopped.
+    fn run_both(&self) -> Result<Transcript, String> {
+        let stop = self.tools.stop;
+        let run = |track: Track| {
+            let _stop = StopOnPanic(stop);
+            let result = self.run(Some(track));
+            if result.is_err() {
+                stop.store(true, Ordering::Release);
+            }
+            result
+        };
+        let (system, microphone) = std::thread::scope(|scope| {
+            let system = scope.spawn(|| run(Track::System));
+            let microphone = run(Track::Microphone);
+            let system = system
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (system, microphone)
+        });
+        match (system, microphone) {
+            (Ok(system), Ok(microphone)) => Ok(merge_tracks(system, microphone)),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(stopped), Err(error)) if stopped == CANCELLED && error != CANCELLED => Err(error),
+            (Err(error), _) => Err(error),
+        }
+    }
     /// Transcribes `track` of a take with two tracks, or with `None` the
     /// one file a take with one track is transcribed from.
     fn run(&self, track: Option<Track>) -> Result<Transcript, String> {
@@ -1241,6 +1462,13 @@ impl Pass<'_> {
             reuse,
             tools,
         } = *self;
+        // A track of two ends here once the other has failed or the pass is
+        // cancelled; its tools end by themselves too.
+        let going = || match track {
+            Some(_) if tools.stop.load(Ordering::Acquire) => Err(CANCELLED.to_string()),
+            _ => Ok(()),
+        };
+        going()?;
         let chosen = settings::chosen_language(settings);
         let model_file = |language: &str| (tools.model)(language).unwrap_or_default();
         let usable = |name: &str| stretches::usable(folder, track, name, chosen, &model_file);
@@ -1265,6 +1493,7 @@ impl Pass<'_> {
         // `speech`, the microphone's without what it heard of the system
         // audio.
         let convert = |speech: &Path, from_ms: u64, length_ms: u64| -> Result<(), String> {
+            going()?;
             let from = (from_ms > 0).then_some(from_ms);
             (tools.convert)(&source, speech, from, Some(length_ms))?;
             if track == Some(Track::Microphone) && !holds_no_audio(speech) {
@@ -1283,6 +1512,7 @@ impl Pass<'_> {
                 convert(&speech, part.start_ms, part.end_ms - part.start_ms)?;
                 fs::create_dir_all(stretches::folder(folder)).map_err(|e| e.to_string())?;
                 let raw = stretches::raw(folder, track, part.start_ms);
+                going()?;
                 let words = (tools.whisper)(&speech, language, &raw)?;
                 saved.replace(part.start_ms, words, language, &(tools.model)(language)?);
                 stretches::save(folder, saved)?;
@@ -1319,6 +1549,7 @@ impl Pass<'_> {
                     Some(Track::System) => folder.join("whisper-system.json"),
                     _ => folder.join("whisper.json"),
                 };
+                going()?;
                 (tools.whisper)(&speech, language, &raw)?
             }
         };
@@ -1379,14 +1610,52 @@ pub(crate) struct FakePass {
     pub heard: Option<&'static str>,
     pub heard_on_system: Option<&'static str>,
     pub silent: bool,
-    pub detections: std::cell::Cell<usize>,
-    /// The language of each Whisper run, in order.
-    pub languages: std::cell::RefCell<Vec<String>>,
+    pub detections: Count,
+    /// The language of each Whisper run, in order. (The two tracks of a
+    /// take run at the same time: see [`FakePass::languages_of`].)
+    pub languages: Noted<Vec<String>>,
     /// From where and for how long each conversion read the take's audio.
-    pub converted: std::cell::RefCell<Vec<(Option<u64>, Option<u64>)>>,
+    pub converted: Noted<Vec<(Option<u64>, Option<u64>)>>,
     /// The work in order: `convert <source file>`, `echo` for each time the
     /// microphone's echo is silenced, `whisper <raw output file> <language>`.
-    pub work: std::cell::RefCell<Vec<String>>,
+    pub work: Noted<Vec<String>>,
+    /// The same work with the track whose pass did it: the system track's
+    /// files are named for it, every other file is the microphone's or the
+    /// one track's.
+    pub tracked: Noted<Vec<(Track, String)>>,
+    pub stop: AtomicBool,
+}
+/// What a fake tool noted, from whichever thread called it.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Noted<T>(std::sync::Mutex<T>);
+#[cfg(test)]
+impl<T> Noted<T> {
+    pub fn borrow(&self) -> std::sync::MutexGuard<'_, T> {
+        self.0.lock().unwrap()
+    }
+    pub fn borrow_mut(&self) -> std::sync::MutexGuard<'_, T> {
+        self.0.lock().unwrap()
+    }
+    pub fn take(&self) -> T
+    where
+        T: Default,
+    {
+        std::mem::take(&mut *self.borrow_mut())
+    }
+}
+/// How often a fake tool was called, from whichever thread.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Count(std::sync::atomic::AtomicUsize);
+#[cfg(test)]
+impl Count {
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+    pub fn add(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
 }
 #[cfg(test)]
 impl FakePass {
@@ -1396,6 +1665,31 @@ impl FakePass {
             ..Default::default()
         }
     }
+    /// The work the pass of `track` did, in its order.
+    pub fn work_of(&self, track: Track) -> Vec<String> {
+        let tracked = self.tracked.borrow();
+        let of = tracked.iter().filter(|(by, _)| *by == track);
+        of.map(|(_, step)| step.clone()).collect()
+    }
+    /// The language of each Whisper run of the pass of `track`.
+    pub fn languages_of(&self, track: Track) -> Vec<String> {
+        self.work_of(track)
+            .iter()
+            .filter(|step| step.starts_with("whisper "))
+            .filter_map(|step| step.rsplit(' ').next().map(str::to_owned))
+            .collect()
+    }
+    fn note(&self, file: &Path, step: String) {
+        // The system track's speech and raw output carry its name.
+        let name = file_name(file);
+        let track = if name.starts_with("system-") || name == "whisper-system.json" {
+            Track::System
+        } else {
+            Track::Microphone
+        };
+        self.work.borrow_mut().push(step.clone());
+        self.tracked.borrow_mut().push((track, step));
+    }
     pub fn run(
         &self,
         root: &Path,
@@ -1404,15 +1698,14 @@ impl FakePass {
         reuse: bool,
     ) -> Result<Transcript, String> {
         let tools = Tools {
-            convert: &|source, _, from_ms, length_ms| {
+            convert: &|source, target, from_ms, length_ms| {
                 self.converted.borrow_mut().push((from_ms, length_ms));
-                let step = format!("convert {}", file_name(source));
-                self.work.borrow_mut().push(step);
+                self.note(target, format!("convert {}", file_name(source)));
                 Ok(())
             },
             regions: &|_| Ok(if self.silent { vec![] } else { vec![(0, 1000)] }),
             detect: &|speech, _| {
-                self.detections.set(self.detections.get() + 1);
+                self.detections.add();
                 let system = file_name(speech).starts_with("system-");
                 let heard = self.heard_on_system.filter(|_| system).or(self.heard);
                 heard.map(str::to_owned)
@@ -1425,14 +1718,14 @@ impl FakePass {
                 }
                 .into())
             },
-            echo: &|_, _| {
-                self.work.borrow_mut().push("echo".into());
+            echo: &|microphone, _| {
+                self.note(microphone, "echo".into());
                 Ok(())
             },
+            stop: &self.stop,
             whisper: &|_, language, raw| {
                 self.languages.borrow_mut().push(language.into());
-                let step = format!("whisper {} {language}", file_name(raw));
-                self.work.borrow_mut().push(step);
+                self.note(raw, format!("whisper {} {language}", file_name(raw)));
                 let text = format!("{language}-words");
                 Ok(Transcript {
                     segments: vec![Segment {
@@ -1510,6 +1803,23 @@ mod tests {
         assert_eq!(counts(8), (4, 2));
         assert_eq!(counts(12), (6, 3));
         assert_eq!(counts(32), (8, 4));
+        // The two tracks of a take are transcribed at the same time: each
+        // keeps the final count where both fit the processor, from 8
+        // logical threads on, and has half the processor below that.
+        for (logical, each) in [
+            (32, 8),
+            (16, 8),
+            (12, 6),
+            (8, 4),
+            (6, 3),
+            (4, 2),
+            (2, 1),
+            (1, 1),
+        ] {
+            assert_eq!(track_threads(logical), each, "{logical} logical threads");
+            assert!(each * 2 <= logical.max(2));
+            assert!(logical < 8 || each == final_threads(logical));
+        }
     }
     #[test]
     fn detector_regions_are_read_in_milliseconds() {
@@ -2462,21 +2772,24 @@ Speech segment 0: start = 1.0, end = 2.0
         let (root, folder) = two_track_folder();
         assert!(two_tracks(&folder));
         // Stop without stretches, Retry, `cue transcribe`: the system track
-        // first, then the microphone, compared with the system audio of the
-        // same span before its speech is looked for.
+        // and, at the same time, the microphone, compared with the system
+        // audio of the same span before its speech is looked for.
         let pass = FakePass::hearing("en");
         let transcript = pass.run(root.path(), &folder, 5000, true).unwrap();
         assert_eq!(
-            *pass.work.borrow(),
+            pass.work_of(Track::System),
+            ["convert system.wav", "whisper whisper-system.json en"]
+        );
+        assert_eq!(
+            pass.work_of(Track::Microphone),
             [
-                "convert system.wav",
-                "whisper whisper-system.json en",
                 "convert mic.wav",
                 "convert system.wav",
                 "echo",
                 "whisper whisper.json en",
             ]
         );
+        assert_eq!(pass.work.borrow().len(), 6);
         assert_eq!(*pass.converted.borrow(), [(None, Some(5000)); 3]);
         assert_eq!(
             rows(&transcript),
@@ -2496,8 +2809,10 @@ Speech segment 0: start = 1.0, end = 2.0
         settings::save(root.path(), &chosen("en")).unwrap();
         let stop = FakePass::default();
         let transcript = stop.run(root.path(), &folder, 20_000, true).unwrap();
+        let mut converted = stop.converted.take();
+        converted.sort();
         assert_eq!(
-            *stop.converted.borrow(),
+            converted,
             [
                 (Some(10_000), Some(10_000)),
                 (Some(12_000), Some(8_000)),
@@ -2556,7 +2871,8 @@ Speech segment 0: start = 1.0, end = 2.0
         let pass = call();
         let transcript = pass.run(root.path(), &folder, 5000, true).unwrap();
         assert_eq!(pass.detections.get(), 2);
-        assert_eq!(*pass.languages.borrow(), ["de", "en"]);
+        assert_eq!(pass.languages_of(Track::System), ["de"]);
+        assert_eq!(pass.languages_of(Track::Microphone), ["en"]);
         assert_eq!(
             rows(&transcript),
             [(SYSTEM, "de-words", 100), (MICROPHONE, "en-words", 100)]
@@ -2609,7 +2925,8 @@ Speech segment 0: start = 1.0, end = 2.0
         let stop = FakePass::hearing("ja");
         let transcript = stop.run(root.path(), &folder, 20_000, true).unwrap();
         assert_eq!(stop.detections.get(), 0);
-        assert_eq!(*stop.languages.borrow(), ["de", "de", "en"]);
+        assert_eq!(stop.languages_of(Track::System), ["de", "de"]);
+        assert_eq!(stop.languages_of(Track::Microphone), ["en"]);
         let texts: Vec<_> = transcript
             .segments
             .iter()
@@ -2641,7 +2958,8 @@ Speech segment 0: start = 1.0, end = 2.0
         let refine = FakePass::hearing("ja");
         let transcript = refine.run(root.path(), &folder, 20_000, false).unwrap();
         assert_eq!(refine.detections.get(), 0);
-        assert_eq!(*refine.languages.borrow(), ["de", "en"]);
+        assert_eq!(refine.languages_of(Track::System), ["de"]);
+        assert_eq!(refine.languages_of(Track::Microphone), ["en"]);
         assert_eq!(in_language(&transcript), (Some("en"), true));
 
         // Retry and `cue transcribe` forget the stretches: a language
@@ -2706,6 +3024,7 @@ Speech segment 0: start = 1.0, end = 2.0
             echo: &|microphone, system| {
                 echo::silence_echo(microphone, system, &loud(microphone)?).map(|_| ())
             },
+            stop: &AtomicBool::new(false),
         };
         let transcript =
             transcribe_media_in(root.path(), &folder, duration_ms, true, true, &tools).unwrap();
@@ -2809,6 +3128,604 @@ Speech segment 0: start = 1.0, end = 2.0
         );
     }
 
+    /// Where the two passes of a take meet: each waits here until both have
+    /// arrived, which they only do when they run at the same time.
+    #[derive(Default)]
+    struct Meeting {
+        arrived: std::sync::Mutex<usize>,
+        both: std::sync::Condvar,
+    }
+    impl Meeting {
+        const PATIENCE: Duration = Duration::from_secs(10);
+        /// Arrives and waits for the other pass; an error when it never
+        /// comes, as when one pass runs after the other.
+        fn meet(&self) -> Result<(), String> {
+            *self.arrived.lock().unwrap() += 1;
+            self.both.notify_all();
+            self.wait()
+        }
+        /// Waits until both passes have arrived.
+        fn wait(&self) -> Result<(), String> {
+            let arrived = self.arrived.lock().unwrap();
+            let (_arrived, waited) = self
+                .both
+                .wait_timeout_while(arrived, Self::PATIENCE, |arrived| *arrived < 2)
+                .unwrap();
+            match waited.timed_out() {
+                true => Err("The other track's pass did not run at the same time.".into()),
+                false => Ok(()),
+            }
+        }
+    }
+    /// Waits until `stop` is set; an error when it never is.
+    fn until_stopped(stop: &AtomicBool) -> Result<(), String> {
+        let began = std::time::Instant::now();
+        while !stop.load(Ordering::Acquire) {
+            if began.elapsed() > Meeting::PATIENCE {
+                return Err("The pass was left running.".into());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+    /// The track a fake Whisper is asked for, from its raw output's name.
+    fn track_of(raw: &Path) -> Track {
+        match file_name(raw).contains("system") {
+            true => Track::System,
+            false => Track::Microphone,
+        }
+    }
+    /// One word, as a fake Whisper returns it for the track of `raw`.
+    fn one_row(raw: &Path) -> Transcript {
+        let mut said = spoken(track_of(raw).name());
+        said.segments[0].words[0].seek_ms = Some(150);
+        said
+    }
+
+    #[test]
+    fn the_two_tracks_of_a_take_are_transcribed_at_the_same_time() {
+        let (root, folder) = two_track_folder();
+        settings::save(root.path(), &chosen("en")).unwrap();
+        // Neither track's Whisper returns before the other track's has
+        // started, and nor does either conversion before the other: one
+        // pass after the other would wait in vain.
+        let (converting, transcribing) = (Meeting::default(), Meeting::default());
+        let stop = AtomicBool::new(false);
+        let tools = Tools {
+            convert: &|_, target, _, _| match file_name(target).as_str() {
+                // The first conversion of each pass.
+                "speech.wav" | "system-speech.wav" => converting.meet(),
+                _ => Ok(()),
+            },
+            regions: &|_| Ok(vec![(0, 1000)]),
+            detect: &|_, _| panic!("a language is chosen"),
+            model: &|_| Ok("ggml-small.en.bin".into()),
+            whisper: &|_, _, raw| {
+                transcribing.meet()?;
+                Ok(one_row(raw))
+            },
+            echo: &|_, _| Ok(()),
+            stop: &stop,
+        };
+        let began = std::time::Instant::now();
+        let transcript =
+            transcribe_media_in(root.path(), &folder, 5000, true, true, &tools).unwrap();
+        assert!(began.elapsed() < Meeting::PATIENCE);
+        assert_eq!(
+            rows(&transcript),
+            [(SYSTEM, "system", 100), (MICROPHONE, "microphone", 100)]
+        );
+        assert!(!stop.load(Ordering::Acquire), "nothing was stopped");
+        // A take with one track is one pass: nothing to meet.
+        let (root, folder) = take_folder();
+        settings::save(root.path(), &chosen("en")).unwrap();
+        let alone = Tools {
+            convert: &|_, _, _, _| Ok(()),
+            whisper: &|_, _, raw| Ok(one_row(raw)),
+            ..tools
+        };
+        let transcript =
+            transcribe_media_in(root.path(), &folder, 5000, true, true, &alone).unwrap();
+        assert_eq!(rows(&transcript), [(None, "microphone", 100)]);
+    }
+
+    /// A take of 15 s with both tracks as made-up audio, a call over
+    /// loudspeakers, whose tracks each finished a stretch while it recorded,
+    /// the system track's in a language it was not held to in the end.
+    fn made_up_take() -> (tempfile::TempDir, std::path::PathBuf) {
+        let (root, folder) = take_folder();
+        let (call, microphone) = call_on_loudspeakers();
+        echo::made_up::write(&folder.join("mic.wav"), &microphone);
+        echo::made_up::write(&folder.join("system.wav"), &call);
+        let mut system = Stretches::of_track(Track::System, None);
+        system.push(
+            spoken("nonsense"),
+            2_000,
+            "en",
+            "ggml-small.en.bin",
+            Some(guessed("en", 0.5)),
+        );
+        system.push(
+            spoken("anruf"),
+            4_500,
+            "de",
+            "ggml-small.bin",
+            Some(guessed("de", 0.97)),
+        );
+        stretches::save(&folder, &system).unwrap();
+        let mut reviewer = Stretches::of_track(Track::Microphone, None);
+        reviewer.push(
+            spoken("answer"),
+            8_500,
+            "en",
+            "ggml-small.en.bin",
+            Some(guessed("en", 0.95)),
+        );
+        stretches::save(&folder, &reviewer).unwrap();
+        (root, folder)
+    }
+
+    #[test]
+    fn two_tracks_at_once_give_what_one_after_the_other_gives() {
+        // The pass itself and the echo gate, on made-up audio; a detector
+        // that finds what is loud and a Whisper that returns a row for each
+        // stretch of speech, in the language it is held to.
+        let stop = AtomicBool::new(false);
+        let tools = Tools {
+            convert: &|source, target, from_ms, length_ms| {
+                let from = from_ms.unwrap_or(0);
+                wav_slice(source, target, from, from + length_ms.unwrap())
+            },
+            regions: &loud,
+            detect: &|_, _| Some("en".into()),
+            model: &|language| {
+                Ok(match language {
+                    "en" => "ggml-small.en.bin",
+                    _ => "ggml-small.bin",
+                }
+                .into())
+            },
+            whisper: &|speech, language, _| {
+                let mut said = empty_transcript();
+                for (start_ms, end_ms) in loud(speech)? {
+                    let mut row = sample_transcript(&[(language, start_ms, end_ms)]);
+                    row.segments[0].words[0].seek_ms = Some(start_ms + 40);
+                    said.segments.extend(row.segments);
+                }
+                Ok(said)
+            },
+            echo: &|microphone, system| {
+                echo::silence_echo(microphone, system, &loud(microphone)?).map(|_| ())
+            },
+            stop: &stop,
+        };
+        // One track after the other, as a pass was made before.
+        let (root, folder) = made_up_take();
+        let settings = settings::load(root.path());
+        let pass = Pass {
+            settings: &settings,
+            folder: &folder,
+            duration_ms: 15_000,
+            reuse: true,
+            tools: &tools,
+        };
+        let system = pass.run(Some(Track::System)).unwrap();
+        let microphone = pass.run(Some(Track::Microphone)).unwrap();
+        let in_turn = merge_tracks(system, microphone);
+        let saved_in_turn = |track: Track| {
+            fs::read(folder.join(format!("stretches/{}.json", track.name()))).unwrap()
+        };
+        // The system track's first stretch done again in German, its rest
+        // from 4.5 s; the microphone's rest from 8.5 s, without the echo.
+        assert_eq!(
+            rows(&in_turn),
+            [
+                (MICROPHONE, "answer", 100),
+                (SYSTEM, "de", 1_000),
+                (SYSTEM, "anruf", 2_100),
+                (SYSTEM, "de", 9_000),
+                (MICROPHONE, "en", 13_000),
+            ]
+        );
+        // Both at once, on a take that is the same: the same rows, in the
+        // same order, with the same ids, languages and saved stretches.
+        for _ in 0..5 {
+            let (root, folder) = made_up_take();
+            let at_once =
+                transcribe_media_in(root.path(), &folder, 15_000, true, true, &tools).unwrap();
+            assert_eq!(
+                serde_json::to_value(&at_once).unwrap(),
+                serde_json::to_value(&in_turn).unwrap()
+            );
+            for track in [Track::System, Track::Microphone] {
+                let saved =
+                    fs::read(folder.join(format!("stretches/{}.json", track.name()))).unwrap();
+                assert!(saved == saved_in_turn(track), "{track:?}");
+            }
+        }
+        let ids: Vec<_> = in_turn.segments.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "segment-0",
+                "segment-1",
+                "segment-2",
+                "segment-3",
+                "segment-4"
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&in_turn).unwrap()["trackLanguages"],
+            json!({"microphone":{"language":"en","languageDetected":true},
+                "system":{"language":"de","languageDetected":true}})
+        );
+    }
+
+    #[test]
+    fn cancelling_a_pass_stops_both_tracks() {
+        let (root, folder) = two_track_folder();
+        settings::save(root.path(), &chosen("en")).unwrap();
+        // A refinement's cancel flag is what stops its tools. Both tracks
+        // are transcribing when it is set.
+        let cancel = AtomicBool::new(false);
+        let transcribing = Meeting::default();
+        let stopped = Count::default();
+        let later = Count::default();
+        let tools = Tools {
+            convert: &|_, _, _, _| Ok(()),
+            regions: &|_| Ok(vec![(0, 1000)]),
+            detect: &|_, _| panic!("a language is chosen"),
+            model: &|_| Ok("ggml-small.en.bin".into()),
+            // As Whisper under a cancel flag: killed, and reported so.
+            whisper: &|_, _, _| {
+                transcribing.meet()?;
+                until_stopped(&cancel)?;
+                stopped.add();
+                Err(CANCELLED.into())
+            },
+            echo: &|_, _| {
+                later.add();
+                Ok(())
+            },
+            stop: &cancel,
+        };
+        let began = std::time::Instant::now();
+        let result = std::thread::scope(|scope| {
+            let pass = scope
+                .spawn(|| transcribe_media_in(root.path(), &folder, 5000, true, false, &tools));
+            transcribing.wait().unwrap();
+            cancel.store(true, Ordering::Release);
+            pass.join().unwrap()
+        });
+        assert_eq!(result.unwrap_err(), CANCELLED);
+        assert_eq!(stopped.get(), 2, "both tracks were stopped");
+        assert!(began.elapsed() < Duration::from_secs(5), "and promptly");
+        assert_eq!(
+            later.get(),
+            1,
+            "the microphone's one comparison came before"
+        );
+        // A pass cancelled before it starts does nothing for either track.
+        let never = Tools {
+            convert: &|_, _, _, _| panic!("converted after the cancel"),
+            whisper: &|_, _, _| panic!("transcribed after the cancel"),
+            ..tools
+        };
+        let result = transcribe_media_in(root.path(), &folder, 5000, true, false, &never);
+        assert_eq!(result.unwrap_err(), CANCELLED);
+    }
+
+    #[test]
+    fn a_track_that_fails_stops_the_other_and_fails_the_take() {
+        let crashed = |track: Track| format!("The {} track's Whisper crashed.", track.name());
+        for failing in [Track::System, Track::Microphone] {
+            let (root, folder) = two_track_folder();
+            settings::save(root.path(), &chosen("en")).unwrap();
+            let stop = AtomicBool::new(false);
+            let transcribing = Meeting::default();
+            let (stopped, ran) = (Count::default(), Count::default());
+            let tools = Tools {
+                convert: &|_, _, _, _| Ok(()),
+                regions: &|_| Ok(vec![(0, 1000)]),
+                detect: &|_, _| panic!("a language is chosen"),
+                model: &|_| Ok("ggml-small.en.bin".into()),
+                // Both tracks are transcribing when one fails; the other
+                // runs until it is stopped, as a Whisper that is killed.
+                whisper: &|_, _, raw| {
+                    ran.add();
+                    transcribing.meet()?;
+                    if track_of(raw) == failing {
+                        return Err(crashed(failing));
+                    }
+                    until_stopped(&stop)?;
+                    stopped.add();
+                    Err(CANCELLED.into())
+                },
+                echo: &|_, _| Ok(()),
+                stop: &stop,
+            };
+            let began = std::time::Instant::now();
+            let result = transcribe_media_in(root.path(), &folder, 5000, true, true, &tools);
+            // The take fails with the failing track's error, as it did when
+            // one track ran after the other; the other track was stopped,
+            // not left to finish, and nothing of it is returned.
+            assert_eq!(result.unwrap_err(), crashed(failing), "{failing:?}");
+            assert_eq!((ran.get(), stopped.get()), (2, 1), "{failing:?}");
+            assert!(stop.load(Ordering::Acquire));
+            assert!(began.elapsed() < Duration::from_secs(5));
+        }
+
+        // A track that fails before the other has come to Whisper: the
+        // other does not start it.
+        for failing in [Track::System, Track::Microphone] {
+            let (root, folder) = two_track_folder();
+            settings::save(root.path(), &chosen("en")).unwrap();
+            let stop = AtomicBool::new(false);
+            let converting = Meeting::default();
+            let own = |target: &Path| match file_name(target).as_str() {
+                "system-speech.wav" => Some(Track::System),
+                "speech.wav" => Some(Track::Microphone),
+                _ => None,
+            };
+            let tools = Tools {
+                convert: &|_, target, _, _| {
+                    let Some(track) = own(target) else {
+                        return Ok(());
+                    };
+                    converting.meet()?;
+                    if track == failing {
+                        return Err("FFmpeg failed.".into());
+                    }
+                    // As FFmpeg that is stopped.
+                    until_stopped(&stop)?;
+                    Err(CANCELLED.into())
+                },
+                regions: &|_| panic!("looked for speech after the failure"),
+                detect: &|_, _| panic!("a language is chosen"),
+                model: &|_| Ok("ggml-small.en.bin".into()),
+                whisper: &|_, _, _| panic!("transcribed after the failure"),
+                echo: &|_, _| panic!("compared after the failure"),
+                stop: &stop,
+            };
+            let result = transcribe_media_in(root.path(), &folder, 5000, true, true, &tools);
+            assert_eq!(result.unwrap_err(), "FFmpeg failed.", "{failing:?}");
+        }
+
+        // Both fail on their own: the system track's error is the take's,
+        // as when it ran first and the microphone's pass never started.
+        let (root, folder) = two_track_folder();
+        settings::save(root.path(), &chosen("en")).unwrap();
+        let stop = AtomicBool::new(false);
+        let transcribing = Meeting::default();
+        let tools = Tools {
+            convert: &|_, _, _, _| Ok(()),
+            regions: &|_| Ok(vec![(0, 1000)]),
+            detect: &|_, _| panic!("a language is chosen"),
+            model: &|_| Ok("ggml-small.en.bin".into()),
+            whisper: &|_, _, raw| {
+                transcribing.meet()?;
+                Err(crashed(track_of(raw)))
+            },
+            echo: &|_, _| Ok(()),
+            stop: &stop,
+        };
+        let result = transcribe_media_in(root.path(), &folder, 5000, true, true, &tools);
+        assert_eq!(result.unwrap_err(), crashed(Track::System));
+        // A take with one track fails as ever, and sets no flag.
+        let (root, folder) = take_folder();
+        settings::save(root.path(), &chosen("en")).unwrap();
+        let stop = AtomicBool::new(false);
+        let alone = Tools {
+            whisper: &|_, _, _| Err("Whisper crashed.".into()),
+            stop: &stop,
+            ..tools
+        };
+        let result = transcribe_media_in(root.path(), &folder, 5000, true, true, &alone);
+        assert_eq!(result.unwrap_err(), "Whisper crashed.");
+        assert!(!stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn the_two_passes_write_no_file_in_common() {
+        let (root, folder) = made_up_take();
+        // Every file each pass writes, by the thread that writes it: what
+        // the pass names for its tools, and what the tools name for
+        // themselves from the speech file they are given ([`scratch`]).
+        let written = Noted::<Vec<(std::thread::ThreadId, String)>>::default();
+        let write = |file: &Path| {
+            let name = file
+                .strip_prefix(&folder)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let thread = std::thread::current().id();
+            written.borrow_mut().push((thread, name));
+        };
+        let scratched = |speech: &Path, names: &[&str]| {
+            for name in names {
+                write(&scratch(&folder, speech, name));
+            }
+        };
+        let stop = AtomicBool::new(false);
+        let tools = Tools {
+            convert: &|source, target, from_ms, length_ms| {
+                write(target);
+                scratched(target, &["transcode.log"]);
+                let from = from_ms.unwrap_or(0);
+                wav_slice(source, target, from, from + length_ms.unwrap())
+            },
+            regions: &|speech| {
+                scratched(speech, &["vad.txt", "vad.log"]);
+                loud(speech)
+            },
+            detect: &|speech, _| {
+                scratched(speech, &["language.wav"]);
+                let window = scratch(&folder, speech, "language.wav");
+                scratched(&window, &["language.log"]);
+                Some("de".into())
+            },
+            model: &|language| {
+                Ok(match language {
+                    "en" => "ggml-small.en.bin",
+                    _ => "ggml-small.bin",
+                }
+                .into())
+            },
+            whisper: &|speech, _, raw| {
+                write(raw);
+                scratched(speech, &["transcription.log"]);
+                Ok(spoken("words"))
+            },
+            echo: &|microphone, _| {
+                scratched(microphone, &["vad.txt", "vad.log"]);
+                write(&folder.join("speech.wav.gated"));
+                Ok(())
+            },
+            stop: &stop,
+        };
+        // Stop: each track transcribes a stretch again and then its rest,
+        // and saves its stretches for itself.
+        transcribe_media_in(root.path(), &folder, 15_000, true, true, &tools).unwrap();
+        let mut saved: Vec<_> = fs::read_dir(stretches::folder(&folder))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        saved.sort();
+        assert_eq!(saved, ["microphone.json", "system.json"]);
+        // A whole-take pass: each track detects its language too.
+        stretches::forget(&folder);
+        transcribe_media_in(root.path(), &folder, 15_000, true, true, &tools).unwrap();
+        let written = written.take();
+        let files = |thread: std::thread::ThreadId| -> std::collections::BTreeSet<String> {
+            let by = written.iter().filter(|(by, _)| *by == thread);
+            by.map(|(_, name)| name.clone()).collect()
+        };
+        // The microphone's pass runs on this thread, the system's on others.
+        let here = std::thread::current().id();
+        let microphone = files(here);
+        let mut system = std::collections::BTreeSet::new();
+        for (thread, _) in written.iter().filter(|(thread, _)| *thread != here) {
+            system.extend(files(*thread));
+        }
+        let names = |files: &std::collections::BTreeSet<String>| -> Vec<String> {
+            files.iter().cloned().collect()
+        };
+        assert_eq!(
+            names(&system),
+            [
+                "stretches/system-0.json",
+                "system-language.log",
+                "system-language.wav",
+                "system-speech.wav",
+                "system-stretch.wav",
+                "system-transcode.log",
+                "system-transcription.log",
+                "system-vad.log",
+                "system-vad.txt",
+                "whisper-system.json",
+            ]
+        );
+        assert_eq!(
+            names(&microphone),
+            [
+                "echo-reference.wav",
+                "language.log",
+                "language.wav",
+                "speech.wav",
+                "speech.wav.gated",
+                "transcode.log",
+                "transcription.log",
+                "vad.log",
+                "vad.txt",
+                "whisper.json",
+            ]
+        );
+        assert!(system.is_disjoint(&microphone));
+        // A file of a take with one track, or of the live worker, keeps the
+        // name it always had.
+        for speech in [
+            "speech.wav",
+            "stretch.wav",
+            "language.wav",
+            "echo-reference.wav",
+        ] {
+            assert_eq!(
+                scratch(&folder, &folder.join(speech), "vad.txt"),
+                folder.join("vad.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn a_stretch_done_again_is_compared_whatever_the_two_rates() {
+        let (audio, system) = (Path::new("redo.wav"), Path::new("redo-system.wav"));
+        // What the capture reports for a copy of a 70 s track at its rate.
+        let reported = |track: Track, from_ms: u64| {
+            let rate = match track {
+                Track::Microphone => 48_000,
+                Track::System => 44_100,
+            };
+            let span = crate::capture::copy_span(rate, rate * 70, Some(from_ms));
+            crate::capture::span_ms(rate, span)
+        };
+        // A stretch of the microphone that starts at 12345 ms: the 48 kHz
+        // microphone reports 12345, the 44.1 kHz system track 12344, and
+        // the two are compared.
+        let copies = std::cell::RefCell::new(Vec::new());
+        let mut both = |track: Track, from_ms: u64, target: &Path| {
+            copies.borrow_mut().push((
+                track,
+                from_ms,
+                target.to_owned(),
+                reported(track, from_ms).0,
+            ));
+            Ok(reported(track, from_ms))
+        };
+        for from_ms in [12_345, 12_340, 1, 28_007] {
+            let compared = redo_copies(Track::Microphone, from_ms, audio, Some(system), &mut both);
+            assert_eq!(compared, Ok(true), "from {from_ms} ms");
+        }
+        assert_eq!(
+            copies.borrow()[..2],
+            [
+                (Track::Microphone, 12_345, audio.to_owned(), 12_345),
+                (Track::System, 12_345, system.to_owned(), 12_344),
+            ]
+        );
+        // A system track that cannot be copied, or ends before the stretch
+        // starts: nothing in the stretch counts as echo, and it is done.
+        let mut silent = |track: Track, from_ms: u64, _: &Path| match track {
+            Track::Microphone => Ok(reported(track, from_ms)),
+            Track::System => Err("Waiting for audio samples".to_string()),
+        };
+        assert_eq!(
+            redo_copies(Track::Microphone, 12_345, audio, Some(system), &mut silent),
+            Ok(false)
+        );
+        let mut short = |track: Track, from_ms: u64, _: &Path| match track {
+            Track::Microphone => Ok(reported(track, from_ms)),
+            Track::System => Ok((9_000, 9_000)),
+        };
+        assert_eq!(
+            redo_copies(Track::Microphone, 12_345, audio, Some(system), &mut short),
+            Ok(false)
+        );
+        // The stretch's own track failing is tried again later.
+        let mut busy = |_: Track, _: u64, _: &Path| Err("Audio snapshot is busy".to_string());
+        assert_eq!(
+            redo_copies(Track::Microphone, 12_345, audio, Some(system), &mut busy),
+            Err("Audio snapshot is busy".into())
+        );
+        // The system track's own stretches, and a take with one track, copy
+        // one track and compare nothing.
+        copies.borrow_mut().clear();
+        for own in [Track::System, Track::Microphone] {
+            assert_eq!(redo_copies(own, 12_345, audio, None, &mut both), Ok(false));
+        }
+        let copied: Vec<_> = copies.borrow().iter().map(|copy| copy.0).collect();
+        assert_eq!(copied, [Track::System, Track::Microphone]);
+    }
+
     #[test]
     fn a_track_without_audio_neither_fails_the_take_nor_costs_the_other_its_stretches() {
         use echo::made_up::{quiet, read, voice, write};
@@ -2838,7 +3755,7 @@ Speech segment 0: start = 1.0, end = 2.0
                 live.push(spoken("live"), 30_000, "en", "ggml-small.en.bin", None);
                 stretches::save(&folder, &live).unwrap();
                 settings::save(root.path(), &chosen("en")).unwrap();
-                let converted = std::cell::RefCell::new(Vec::new());
+                let converted = Noted::<Vec<(String, Option<u64>)>>::default();
                 // As the detector, which refuses a file without samples.
                 let detector = |speech: &Path| {
                     if read(speech).is_empty() {
@@ -2866,6 +3783,7 @@ Speech segment 0: start = 1.0, end = 2.0
                     echo: &|microphone, system| {
                         echo::silence_echo(microphone, system, &detector(microphone)?).map(|_| ())
                     },
+                    stop: &AtomicBool::new(false),
                 };
                 // Stop: the take is transcribed, the speaking track from its
                 // stretch and the 5 s after it, and nothing fails.
@@ -2881,9 +3799,9 @@ Speech segment 0: start = 1.0, end = 2.0
                 );
                 let whole = |track: Track| (track.file().to_owned(), None);
                 let rest = |track: Track| (track.file().to_owned(), Some(30_000));
-                let expected = match speaker {
-                    // The system track first, whole; then the microphone's
-                    // rest, compared with the system audio of the same span.
+                let mut expected = match speaker {
+                    // The system track whole; the microphone's rest,
+                    // compared with the system audio of the same span.
                     Track::Microphone => {
                         vec![whole(silent), rest(speaker), rest(silent)]
                     }
@@ -2893,7 +3811,11 @@ Speech segment 0: start = 1.0, end = 2.0
                         false => vec![rest(speaker), whole(silent), whole(speaker)],
                     },
                 };
-                assert_eq!(*converted.borrow(), expected);
+                // The two tracks are converted at the same time.
+                let mut converted = converted.take();
+                converted.sort();
+                expected.sort();
+                assert_eq!(converted, expected);
                 assert!(
                     stretches::language(&folder, Some(speaker)).is_some(),
                     "the stretches were reused, and wait for the refining pass"
@@ -3429,7 +4351,7 @@ Speech segment 0: start = 1.0, end = 2.0
     #[test]
     #[ignore = "Requires Whisper, FFmpeg, base, small.en, small and the detector in CUEREVIEW_DATA_DIR, and two installed Windows voices: an English one, and a German or a second English one"]
     fn actual_speaker_echo_is_transcribed_once() {
-        use echo::made_up::{heard, mixed, quiet, write};
+        use echo::made_up::{copy_recorded, heard, mixed, quiet, write_recorded};
         let scratch = tempfile::tempdir().unwrap();
         // A data root without settings.json: Auto.
         let root = scratch.path().join("data");
@@ -3457,7 +4379,9 @@ Speech segment 0: start = 1.0, end = 2.0
         // The take: the call speaks, and the reviewer answers in its
         // pauses. The system track holds the call; the microphone holds the
         // reviewer and, from the loudspeakers, the call 130 ms late and
-        // 20 dB quieter. The reviewer is 8 dB above that echo.
+        // 20 dB quieter. The reviewer is 8 dB above that echo. The two
+        // tracks are recorded at different rates, as two devices mostly are:
+        // the microphone at 48 kHz, the loopback at 44.1 kHz.
         let pause = || quiet(800);
         let mut system = quiet(1_000);
         let mut reviewer = quiet(1_000);
@@ -3482,8 +4406,9 @@ Speech segment 0: start = 1.0, end = 2.0
         }
         let microphone = mixed(&heard(&system, 130, 20.0), &reviewer);
         let length_ms = ms(&system);
-        write(&take.join("mic.wav"), &microphone);
-        write(&take.join("system.wav"), &system);
+        write_recorded(&take.join("mic.wav"), &microphone, 48_000);
+        write_recorded(&take.join("system.wav"), &system, 44_100);
+        let recorded = fs::read(take.join("mic.wav")).unwrap();
         eprintln!("call {call_spans:?}, reviewer {reviewer_spans:?}, {length_ms} ms");
 
         let on = |transcript: &Transcript, track: Track| Transcript {
@@ -3525,8 +4450,47 @@ Speech segment 0: start = 1.0, end = 2.0
             "the microphone alone does not even hear the call"
         );
 
+        // When each file of the take folder was last written, in ms after
+        // `since`: where the two passes, which run at the same time, spent
+        // their time.
+        let written = |since: std::time::SystemTime| {
+            let mut files: Vec<(u128, String)> = fs::read_dir(&take)
+                .unwrap()
+                .filter_map(|entry| {
+                    let entry = entry.unwrap();
+                    let after = entry.metadata().ok()?.modified().ok()?;
+                    let ms = after.duration_since(since).ok()?.as_millis();
+                    Some((ms, entry.file_name().to_string_lossy().into_owned()))
+                })
+                .collect();
+            files.sort();
+            files
+                .iter()
+                .map(|(ms, name)| format!("{name} {ms}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         // Both tracks: Stop without stretches, Retry and `cue transcribe`.
+        let (since, began) = (std::time::SystemTime::now(), std::time::Instant::now());
         let transcript = transcribe_media(&root, &take, length_ms, true).unwrap();
+        eprintln!(
+            "both tracks whole, {length_ms} ms each, in {:?}: {}",
+            began.elapsed(),
+            written(since)
+        );
+        // Each pass wrote scratch files of its own.
+        for name in [
+            "transcode.log",
+            "vad.txt",
+            "vad.log",
+            "language.log",
+            "transcription.log",
+        ] {
+            for file in [name.to_owned(), format!("system-{name}")] {
+                assert!(take.join(&file).is_file(), "{file} is missing");
+            }
+        }
+        assert!(take.join("whisper.json").is_file() && take.join("whisper-system.json").is_file());
         for row in &transcript.segments {
             eprintln!(
                 "{:>6} {:<10} {}",
@@ -3607,10 +4571,67 @@ Speech segment 0: start = 1.0, end = 2.0
         );
         assert_eq!(in_language(&transcript), (Some("en"), true));
         // The take's own audio is as it was recorded.
-        assert_eq!(
-            echo::made_up::read(&take.join("mic.wav")).len(),
-            microphone.len()
+        assert!(fs::read(take.join("mic.wav")).unwrap() == recorded);
+
+        // Stop after a recording whose stretches end on an odd millisecond,
+        // in the pause after the reviewer's first answer: each track's rest
+        // is converted from there, from its own rate, and the microphone's
+        // is compared with the system's of the same span.
+        let until = (reviewer_spans[0].1 + 357) | 1;
+        let call_language = if german { "de" } else { "en" };
+        let model = |language: &str| file_name(&deps::final_model(language).path);
+        let mut system_live = Stretches::of_track(Track::System, None);
+        system_live.push(
+            spoken("erstens"),
+            until,
+            call_language,
+            &model(call_language),
+            Some(guessed(call_language, 0.95)),
         );
+        let mut microphone_live = Stretches::of_track(Track::Microphone, None);
+        microphone_live.push(
+            spoken("firstly"),
+            until,
+            "en",
+            &model("en"),
+            Some(guessed("en", 0.95)),
+        );
+        stretches::save(&take, &system_live).unwrap();
+        stretches::save(&take, &microphone_live).unwrap();
+        let (since, began) = (std::time::SystemTime::now(), std::time::Instant::now());
+        let stopped = transcribe_media(&root, &take, length_ms, true).unwrap();
+        eprintln!(
+            "Stop from {until} ms, {} ms of each track left, in {:?}: {}",
+            length_ms - until,
+            began.elapsed(),
+            written(since)
+        );
+        for row in &stopped.segments {
+            eprintln!(
+                "from {until} ms: {:>6} {:<10} {}",
+                row.start_ms,
+                row.track.map_or("", Track::name),
+                row.text
+            );
+        }
+        assert!(
+            stretches::language(&take, SYSTEM).is_some()
+                && stretches::language(&take, MICROPHONE).is_some(),
+            "Stop reused the stretches of both tracks"
+        );
+        let (rest_system, rest_microphone) =
+            (on(&stopped, Track::System), on(&stopped, Track::Microphone));
+        assert_eq!(times(&rest_system, "erstens"), 1);
+        assert_eq!(times(&rest_microphone, "firstly"), 1);
+        // What was said before the stretches' end is theirs, not the rest's.
+        assert_eq!(times(&rest_system, call_said[0].1), 0);
+        assert_eq!(times(&rest_microphone, REVIEWER[0].1), 0);
+        for (_, word) in &call_said[1..] {
+            assert_eq!(times(&rest_system, word), 1, "the call says {word} once");
+            assert_eq!(times(&rest_microphone, word), 0, "{word} is echo");
+        }
+        assert_eq!(times(&rest_microphone, REVIEWER[1].1), 1);
+        stretches::forget(&take);
 
         // While it records: the microphone's copy up to the end of the
         // call's first sentence holds only echo, so nothing is guessed and
@@ -3618,44 +4639,64 @@ Speech segment 0: start = 1.0, end = 2.0
         // answer is guessed, without the call's words.
         let cancel = AtomicBool::new(false);
         let (snapshot, system_snapshot) = (live.join("snapshot.wav"), live.join("echo.wav"));
-        let hear = |until_ms: u64| {
-            wav_slice(&take.join("mic.wav"), &snapshot, 0, until_ms).unwrap();
-            wav_slice(&take.join("system.wav"), &system_snapshot, 0, until_ms).unwrap();
+        // The copies are made as the capture makes them, from the start and
+        // from a millisecond that falls between two samples of the 44.1 kHz
+        // track, whose copy then reports the millisecond before.
+        let hear = |from_ms: u64, until_ms: u64| {
+            let own = copy_recorded(&take.join("mic.wav"), &snapshot, from_ms, until_ms);
+            let reference = copy_recorded(
+                &take.join("system.wav"),
+                &system_snapshot,
+                from_ms,
+                until_ms,
+            );
+            assert_eq!(own.0, from_ms);
+            assert_eq!(
+                reference.0,
+                from_ms - u64::from(!from_ms.is_multiple_of(10))
+            );
+            assert!(stretches::is_reference(own.0, &Ok(reference)));
             let (guess, audio) = live_guess(
                 &root,
                 &live,
                 &snapshot,
-                until_ms,
+                own.1 - own.0,
                 None,
                 Some(&system_snapshot),
                 true,
                 &cancel,
             )
             .unwrap();
+            let audio = audio.unwrap();
             (
                 guess.expect("a guess was asked for"),
-                audio.unwrap().regions,
+                audio.regions.clone(),
+                audio.silenced().len(),
             )
         };
-        let (guess, regions) = hear(call_spans[0].1 + 400);
-        assert!(
-            guess.segments.is_empty() && regions.is_empty(),
-            "echo was guessed: {:?} {regions:?}",
-            guess.segments
-        );
-        let (guess, regions) = hear(reviewer_spans[0].1 + 400);
-        eprintln!(
-            "live guess: {:?}",
-            guess
-                .segments
-                .iter()
-                .map(|row| &row.text)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(regions.len(), 1, "{regions:?}");
-        assert!(regions[0].0 + 1_000 > reviewer_spans[0].0);
-        assert_eq!(times(&guess, REVIEWER[0].1), 1);
-        assert_eq!(times(&guess, call_said[0].1), 0);
+        for from_ms in [0, 437] {
+            let (guess, regions, silenced) = hear(from_ms, call_spans[0].1 + 400);
+            assert!(
+                guess.segments.is_empty() && regions.is_empty(),
+                "from {from_ms} ms echo was guessed: {:?} {regions:?}",
+                guess.segments
+            );
+            assert!(silenced > 0, "from {from_ms} ms nothing was silenced");
+            let (guess, regions, silenced) = hear(from_ms, reviewer_spans[0].1 + 400);
+            eprintln!(
+                "live guess from {from_ms} ms: {:?}",
+                guess
+                    .segments
+                    .iter()
+                    .map(|row| &row.text)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(regions.len(), 1, "{regions:?}");
+            assert!(from_ms + regions[0].0 + 1_000 > reviewer_spans[0].0);
+            assert!(silenced > 0);
+            assert_eq!(times(&guess, REVIEWER[0].1), 1);
+            assert_eq!(times(&guess, call_said[0].1), 0);
+        }
     }
     #[test]
     #[ignore = "Requires FFmpeg; verifies live subprocess cancellation"]
