@@ -122,6 +122,8 @@ disturb a game or headset app under review, and the person needs to see and undo
 - **WHEN** the person opens Settings
 - **THEN** Settings names that graphics card as the device transcription runs on
 - **AND** on a computer that transcribes on the processor it names the processor
+- **AND** after a run on the graphics card failed, it says that the card stopped and the processor
+  transcribes
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::names the device transcription runs on
 - **PROOF** desk: open
 
@@ -132,6 +134,15 @@ disturb a game or headset app under review, and the person needs to see and undo
   choice is kept across restarts
 - **PROOF** test: src-tauri/src/deps.rs::tests::the_switch_keeps_transcription_on_the_processor
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::turns the graphics card off for transcription
+- **PROOF** desk: open
+
+#### Scenario: The person has the graphics card tested again
+- **GIVEN** a computer that keeps to the processor because a run on its graphics card failed
+- **WHEN** the person chooses "Test the graphics card again" in Settings
+- **THEN** the devices are measured again in the background, and transcription returns to the
+  graphics card when it measures fastest
+- **PROOF** test: src-tauri/src/deps.rs::tests::a_failed_graphics_card_is_used_again_after_a_new_measurement
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::asks for the graphics card to be tested again
 - **PROOF** desk: open
 
 #### Scenario: An agent reads the device

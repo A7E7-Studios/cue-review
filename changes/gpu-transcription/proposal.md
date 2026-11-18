@@ -40,11 +40,12 @@ the pinned revision, on ten minutes of German speech with the app's own argument
 - A run that fails on the graphics card is done again on the processor: "A failed graphics-card
   run is repeated on the processor".
 - Settings shows where transcription runs and can keep it off the graphics card, and `cue setup`
-  reports it: "Settings names the device", "The switch keeps transcription on the processor", "An
-  agent reads the device".
+  reports it: "Settings names the device", "The switch keeps transcription on the processor", "The
+  person has the graphics card tested again", "An agent reads the device".
 - A fast graphics card can run the larger model for every language: "Settings offers the larger
   model on a fast graphics card", "The larger model transcribes every language", "Without the
-  graphics card the small models transcribe", "A slower computer is not offered the larger model".
+  graphics card the small models transcribe", "Choosing Standard goes back to the small models", "A
+  slower computer is not offered the larger model".
 
 ## Settled questions
 
@@ -68,6 +69,8 @@ the pinned revision, on ten minutes of German speech with the app's own argument
 - **Q22 While recording**: the graphics card is used while recording too, with a switch in Settings
   to keep transcription off it. Rejected: only after Stop; no switch.
 - **Q23 Summary**: confirmed as written here.
+- **Look**: Model choice (`look.md`): a Model select, Standard or Large, and one folded "Runs on"
+  line holding the switch. Rejected: two switches; a Graphics card section of its own.
 - **Another engine**: faster-whisper (CTranslate2) was weighed on the owner's question and not
   chosen: it has no Vulkan path, so no Intel graphics, adds 0.85 to 1.4 GB of runtime, and would
   replace the model, word-timing and prompt pipeline.
