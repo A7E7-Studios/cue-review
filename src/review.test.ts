@@ -103,15 +103,28 @@ describe('takes and transcript layout', () => {
   it('marks the recording take live, its words still being heard as the tail, and shows its divider before it has words', () => {
     const heard = [...segments.slice(0, 3), { ...segments[3], id: 'live-90000' }];
     const items = transcriptItems(heard, [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }], { index: 2, startMs: 80000 });
-    expect(items.filter(item => item.kind === 'divider')).toEqual([{ kind: 'divider', take: 2, startMs: 80000, live: true }]);
+    // With words and no language yet, its language is being detected.
+    expect(items.filter(item => item.kind === 'divider')).toEqual([{ kind: 'divider', take: 2, startMs: 80000, live: true, detecting: true }]);
     expect(items.slice(-2)).toEqual([{ kind: 'segment', index: 2, live: true, tail: false }, { kind: 'segment', index: 3, live: true, tail: true }]);
     // Only finished stretches: no tail.
     expect(transcriptItems(segments, [], { index: 2, startMs: 80000 }).slice(-2)).toEqual([{ kind: 'segment', index: 2, live: true, tail: false }, { kind: 'segment', index: 3, live: true, tail: false }]);
-    expect(transcriptItems(segments.slice(0, 2), [], { index: 2, startMs: 80000 }).at(-1)).toEqual({ kind: 'divider', take: 2, startMs: 80000, live: true });
+    expect(transcriptItems(segments.slice(0, 2), [], { index: 2, startMs: 80000 }).at(-1)).toEqual({ kind: 'divider', take: 2, startMs: 80000, live: true, detecting: false });
   });
-  it('treats a first recording as one live take without a divider', () => {
+  it('treats a first recording as one live take, divided once it has words or a language', () => {
+    expect(transcriptItems([], undefined, { index: 1, startMs: 0 })).toEqual([]);
     const items = transcriptItems([segments[0], { ...segments[1], id: 'live-5000' }], undefined, { index: 1, startMs: 0 });
-    expect(items).toEqual([{ kind: 'segment', index: 0, live: true, tail: false }, { kind: 'segment', index: 1, live: true, tail: true }]);
+    expect(items).toEqual([{ kind: 'divider', take: 1, startMs: 0, live: true, detecting: true }, { kind: 'segment', index: 0, live: true, tail: false }, { kind: 'segment', index: 1, live: true, tail: true }]);
+    expect(transcriptItems([], undefined, { index: 1, startMs: 0 }, { language: 'de' })).toEqual([{ kind: 'divider', take: 1, startMs: 0, live: true, language: 'de', detecting: false }]);
+  });
+  it("divides take 1 too once its language is known, from its mark or a single take's transcript", () => {
+    const marks = [{ index: 1, startMs: 0, language: 'de', languageDetected: true }, { index: 2, startMs: 80000, language: 'en' }];
+    expect(transcriptItems(segments, marks).filter(item => item.kind === 'divider')).toEqual([
+      { kind: 'divider', take: 1, startMs: 0, live: false, language: 'de', languageDetected: true },
+      { kind: 'divider', take: 2, startMs: 80000, live: false, language: 'en' },
+    ]);
+    expect(transcriptItems(segments.slice(0, 2), undefined, undefined, { language: 'de' })[0]).toEqual({ kind: 'divider', take: 1, startMs: 0, live: false, language: 'de' });
+    // With later takes, the transcript's own language names no take: each mark carries its own.
+    expect(transcriptItems(segments, [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }], undefined, { language: 'de' })[0]).toEqual({ kind: 'segment', index: 0, live: false, tail: false });
   });
   it('finds segments by their words or text, ignoring case and surrounding space', () => {
     const worded: Segment = { startMs: 0, endMs: 1000, text: 'stale text', words: [{ text: 'Push', startMs: 0, endMs: 500 }, { text: 'the grid', startMs: 500, endMs: 1000 }] };

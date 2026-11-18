@@ -8,8 +8,11 @@ export type TakeStatus = 'recording' | 'finalizing' | 'swapping' | 'transcribing
  * take has none. `swapping` appears only in sessions saved before takes kept their own videos.
  */
 export interface Take { index: number; offsetMs: number; durationMs: number; status: TakeStatus; folder: string; sourceId?: string; microphoneId?: string; systemAudio: boolean }
-/** Start of a take on the combined timeline, for the "Take N · m:ss" divider. */
-export interface TakeMark { index: number; startMs: number }
+/**
+ * Start of a take on the combined timeline, for the "Take N · m:ss" divider, and the take's language: a speech-model
+ * code, absent until it is known; `languageDetected` when Auto found it rather than a language chosen in Settings.
+ */
+export interface TakeMark { index: number; startMs: number; language?: string; languageDetected?: boolean }
 /** What a `window:` or `monitor:` source id named at the session's first capture (docs/ARCHITECTURE.md, Source identity). */
 export type SourceIdentity =
   | { kind: 'window'; title: string; process: string; class: string; pid?: number; processCreatedMs?: number }
@@ -30,21 +33,31 @@ export interface Word { text: string; startMs: number; endMs: number; seekMs?: n
  * second. While nothing is being heard there is no `live-` segment.
  */
 export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
-export interface Transcript { segments: Segment[]; language?: string; status?: string; error?: string; takes?: TakeMark[] }
+/**
+ * `language` and `languageDetected` are those of a session of one take, which has no `takes`; with takes, each mark
+ * carries its own. In the live transcript of a take being recorded, `language` is the take's, absent until it is decided.
+ */
+export interface Transcript { segments: Segment[]; language?: string; languageDetected?: boolean; status?: string; error?: string; takes?: TakeMark[] }
 export interface CaptureSource { id: string; name: string; kind: 'display' | 'window' | 'android' | 'quest' | 'camera'; available: boolean; detail?: string }
 export interface Microphone { id: string; name: string }
 export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 'error'; sessionId?: string; elapsedMs?: number; audioLevel?: number; liveTranscript?: Transcript; error?: string; takeIndex?: number; takeOffsetMs?: number;
   /** Counts transcripts refined in the background after Stop; the open recording's transcript is read again when it changes. */
   transcriptRevision?: number }
-/** A transcription language: English by default, or German. */
-export type Language = 'en' | 'de';
-/** The chosen language's speech model: base transcribes until it is `ready`. A failed or missing one is fetched with `downloadLanguageModel`. */
-export interface LanguageModel { language: Language; model: string; state: 'ready' | 'downloading' | 'failed' | 'missing'; receivedBytes: number; totalBytes: number; error?: string }
-/** `languageModel` is absent when the environment names a custom model. */
-export interface SetupStatus { ready: boolean; issues: string[]; dependencies?: {name:string;available:boolean;path?:string;detail?:string}[]; modelReady?:boolean; modelPath?:string; languageModel?: LanguageModel }
+/** A language the speech model knows: its code (`en`, `de`, `nl`) and English name. */
+export interface SpeechLanguage { code: string; name: string }
+/**
+ * A speech model the chosen language needs: `small.en` for English, the multilingual `small` for every other language.
+ * Base transcribes until it is `ready`. A failed or missing one is fetched with `downloadLanguageModels`.
+ */
+export interface LanguageModel { model: 'small.en' | 'small'; state: 'ready' | 'downloading' | 'failed' | 'missing'; receivedBytes: number; totalBytes: number; error?: string }
+/**
+ * `languageModels`: one per model the chosen language needs, in download order (Auto: small.en then small). Absent or
+ * empty when the environment names a custom model.
+ */
+export interface SetupStatus { ready: boolean; issues: string[]; dependencies?: {name:string;available:boolean;path?:string;detail?:string}[]; modelReady?:boolean; modelPath?:string; languageModels?: LanguageModel[] }
 export interface Marker { id: string; timeMs: number; label: string }
-/** App-wide preferences in `<data root>/settings.json`, shared with the `cue` CLI. An absent `language` is English. */
-export interface Settings { vocabulary?: string; language?: Language }
+/** App-wide preferences in `<data root>/settings.json`, shared with the `cue` CLI. An absent `language` is Auto: each take's language is detected. */
+export interface Settings { vocabulary?: string; language?: string }
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error('Open CueReview as a desktop app to access your recordings and capture devices. Run npm run tauri dev.');
@@ -70,10 +83,12 @@ export const backend = {
   microphones: () => call<Microphone[]>('list_microphones'),
   setup: () => call<SetupStatus>('get_setup_status'),
   installTranscription: () => call<void>('install_transcription'),
-  /** The chosen language's model alone, as `setup().languageModel` reports it, without checking the tools: read each second while it downloads. */
-  languageModel: () => call<LanguageModel | null>('get_language_model'),
-  /** Starts the chosen language's model download in the background, or starts it again after a failure; the model reads `downloading` once it returns. Rejects with a message to show, e.g. while transcription is not installed. */
-  downloadLanguageModel: () => call<void>('download_language_model'),
+  /** Every language the speech model knows, in no particular order. */
+  languages: () => call<SpeechLanguage[]>('get_languages'),
+  /** The models the chosen language needs alone, as `setup().languageModels` reports them, without checking the tools: read each second while one downloads. */
+  languageModels: () => call<LanguageModel[]>('get_language_models'),
+  /** Starts the downloads of the models the chosen language needs in the background, or starts them again after a failure; a model reads `downloading` once it returns. Rejects with a message to show, e.g. while transcription is not installed. */
+  downloadLanguageModels: () => call<void>('download_language_models'),
   status: () => call<RecordingStatus>('get_recording_status'),
   start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
   stop: () => call<Session>('stop_recording'),

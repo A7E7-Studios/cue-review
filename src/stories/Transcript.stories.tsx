@@ -4,7 +4,7 @@ import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import type { Segment, Transcript } from '../backend';
 import { TranscriptPane } from '../workspace/TranscriptPane';
 import type { TranscriptPaneProps } from '../workspace/types';
-import { takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from './fixtures';
+import { germanChosenTranscript, germanRecordingTranscript, germanTwoTakeTranscript, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from './fixtures';
 
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const PHRASES = [
@@ -27,7 +27,7 @@ const longSegments: Segment[] = Array.from({ length: 480 }, (_, index) => {
 const longTranscript: Transcript = { segments: longSegments, takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 800000 }, { index: 3, startMs: 1800000 }] };
 const DURATIONS = { review: 134000, long: longSegments.length * 5000 };
 
-type Scenario = 'review' | 'recording-take-2' | 'recording-long' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'empty' | 'long';
+type Scenario = 'review' | 'recording-take-2' | 'recording-long' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'empty' | 'long' | 'languages' | 'language-chosen' | 'recording-detecting';
 interface Args { scenario: Scenario; playing: boolean }
 
 function Column({ scenario, playing: initiallyPlaying }: Args) {
@@ -41,7 +41,7 @@ function Column({ scenario, playing: initiallyPlaying }: Args) {
     const timer = window.setInterval(() => setTime(value => Math.min(duration, value + 250)), 250);
     return () => window.clearInterval(timer);
   }, [playing, duration]);
-  const base = { timeMs: time, onSeek: setTime };
+  const base = { timeMs: time, onSeek: setTime, languages: SPEECH_LANGUAGES };
   const props: TranscriptPaneProps = {
     review: { ...base, mode: 'review', transcript: twoTakeTranscript },
     long: { ...base, mode: 'review', transcript: longTranscript },
@@ -53,6 +53,12 @@ function Column({ scenario, playing: initiallyPlaying }: Args) {
     error: { ...base, mode: 'review', transcript: { segments: [] }, error: 'Speech model not found. Install transcription in Settings, then retry.', onRetry: () => setNotice('Retry selected.') },
     'error-after-take': { ...base, mode: 'review', transcript: { ...twoTakeTranscript, segments: takeOneSegments, takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: takeTwoStartMs }] }, error: 'Take 2 could not be transcribed: the audio track is missing.', onRetry: () => setNotice('Retry selected.') },
     empty: { ...base, mode: 'review', transcript: { segments: [] }, emptyMessage: 'No speech was detected in this recording.' },
+    // Auto found German in take 1 and English in take 2.
+    languages: { ...base, mode: 'review', transcript: germanTwoTakeTranscript },
+    // One take, held to German chosen in Settings.
+    'language-chosen': { ...base, mode: 'review', transcript: germanChosenTranscript },
+    // Take 2 records under Auto and its language is not decided yet.
+    'recording-detecting': { mode: 'recording', transcript: germanRecordingTranscript, timeMs: takeTwoStartMs + 8000, onSeek: setTime, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs }, languages: SPEECH_LANGUAGES },
   }[scenario] as TranscriptPaneProps;
   return <div style={{ height: '100vh', display: 'flex', justifyContent: 'flex-end', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
     <div style={{ flex: 1, minWidth: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start', fontSize: 12.5, color: 'var(--color-text-secondary)' }}>
@@ -68,7 +74,7 @@ const meta = {
   title: 'Workspace/Transcript',
   component: Column,
   args: { scenario: 'review', playing: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'empty', 'long'] } },
+  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'empty', 'long', 'languages', 'language-chosen', 'recording-detecting'] } },
   render: args => <Column key={args.scenario} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Column>;
@@ -87,6 +93,18 @@ export const ErrorAfterTake: Story = { args: { scenario: 'error-after-take' } };
 export const Empty: Story = { args: { scenario: 'empty' } };
 export const LongTranscript: Story = { args: { scenario: 'long' } };
 export const LongTranscriptPlaying: Story = { args: { scenario: 'long', playing: true } };
+/** Each take's divider names its language: detected by Auto here. */
+export const TakeLanguages: Story = {
+  args: { scenario: 'languages' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Take 1 · 0:00 · German, detected')).toBeVisible();
+    await expect(canvas.getByText('Take 2 · 1:20 · English, detected')).toBeInTheDocument();
+  },
+};
+export const TakeLanguagesDark: Story = { args: { scenario: 'languages' }, globals: { theme: 'dark' } };
+export const TakeLanguageChosen: Story = { args: { scenario: 'language-chosen' } };
+export const RecordingDetectingLanguage: Story = { args: { scenario: 'recording-detecting' } };
 
 export const FindInTranscript: Story = {
   play: async ({ canvasElement }) => {
@@ -131,7 +149,7 @@ export const BackToLive: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const scroller = canvasElement.querySelector<HTMLElement>('.cr-transcript-scroll')!;
-    await waitFor(() => expect(canvas.getByText('Take 2 · recording')).toBeVisible());
+    await waitFor(() => expect(canvas.getByText('Take 2 · recording · detecting language')).toBeVisible());
     await new Promise(resolve => setTimeout(resolve, 900));
     fireEvent.wheel(scroller);
     scroller.scrollTop = 0;

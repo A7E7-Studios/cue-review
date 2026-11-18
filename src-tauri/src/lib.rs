@@ -166,6 +166,12 @@ fn publish_live(s: &Shared, id: &str, cancel: &AtomicBool, result: Result<Transc
 /// guesses the words after them with base. Whisper runs outside the runtime
 /// lock and under the shared inference lock. Stop cancels a stretch in
 /// progress, and Stop's transcription covers its audio instead.
+///
+/// The take is held to the language chosen in Settings. Under Auto each
+/// finished stretch's language is detected until one guess is confident,
+/// which holds the take from then on; the stretches before it that were made
+/// in another language are transcribed again from the take's audio before
+/// newer ones are handled ([`redo_provisional`]).
 fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
     if !deps::setup_status().ready {
         publish_live(&s,&id,&cancel,Err("Install local transcription tools to see words while recording. The recording will still be saved.".into()));
@@ -181,18 +187,16 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
         return;
     }
     let root = s.store.root.clone();
-    let language = settings::language(&settings::load(&root));
-    // Chosen once, so every stretch of the take comes from the same model.
-    let model = deps::final_model(language);
-    let model_file = model
-        .path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // Read once, so the whole take is recorded under one language choice.
+    let chosen = settings::chosen_language(&settings::load(&root));
+    // Chosen once, so every stretch in a language comes from the same model.
+    let models = deps::TakeModels::now();
     let offset = take.map_or(0, |take| take.offset_ms);
     let snapshot = folder.join("snapshot.wav");
     stretches::forget(&take_folder);
     let mut saved: Option<stretches::Stretches> = None;
+    // Set when transcribing a stretch again failed: Stop does it instead.
+    let mut redo_left_to_stop = false;
     let mut next = Instant::now() + stretches::LIVE_CYCLE;
     loop {
         while Instant::now() < next {
@@ -220,35 +224,62 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
                 .snapshot_audio_from(from, &snapshot)
         };
         let result = copied.and_then(|(start, end, source)| {
-            let stretches = saved
-                .get_or_insert_with(|| stretches::Stretches::new(&source, &model_file, language));
-            let _inference = s.inference.lock().map_err(|e| e.to_string())?;
-            if cancel.load(Ordering::Acquire) {
-                return Err("Live transcription cancelled.".into());
-            }
-            // The guess shows at once; finishing stretches takes longer.
-            let length = end - start;
-            let (guess, audio) =
-                transcribe::live_guess(&root, &folder, &snapshot, length, &cancel)?;
-            publish_live(
-                &s,
-                &id,
-                &cancel,
-                Ok(stretches.live(guess.clone(), length, offset)),
-            );
-            let (guess, guess_ms) = match audio {
-                Some(audio) => transcribe::live_commit(
+            let stretches = saved.get_or_insert_with(|| stretches::Stretches::new(&source, chosen));
+            let (guess, guess_ms) = {
+                let _inference = s.inference.lock().map_err(|e| e.to_string())?;
+                if cancel.load(Ordering::Acquire) {
+                    return Err("Live transcription cancelled.".into());
+                }
+                // The guess shows at once; finishing stretches takes longer.
+                let length = end - start;
+                let language = stretches.language.clone();
+                let (guess, audio) = transcribe::live_guess(
                     &root,
-                    &take_folder,
                     &folder,
-                    &model,
-                    stretches,
-                    &audio,
-                    guess,
+                    &snapshot,
+                    length,
+                    language.as_deref(),
                     &cancel,
-                )?,
-                None => (guess, length),
+                )?;
+                publish_live(
+                    &s,
+                    &id,
+                    &cancel,
+                    Ok(stretches.live(guess.clone(), length, offset)),
+                );
+                match audio {
+                    Some(audio) => transcribe::live_commit(
+                        &root,
+                        &take_folder,
+                        &folder,
+                        &models,
+                        stretches,
+                        &audio,
+                        guess,
+                        &cancel,
+                    )?,
+                    None => (guess, length),
+                }
             };
+            if !redo_left_to_stop && !stretches.to_redo().is_empty() {
+                // The take was just decided: show that, then catch up.
+                publish_live(
+                    &s,
+                    &id,
+                    &cancel,
+                    Ok(stretches.live(guess.clone(), guess_ms, offset)),
+                );
+                let redone =
+                    redo_provisional(&s, &id, &cancel, &take_folder, &folder, &models, stretches);
+                if let Err(error) = redone {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err(error);
+                    }
+                    // The words stay as first heard until Stop redoes them.
+                    eprintln!("A stretch of {id} was not transcribed again: {error}");
+                    redo_left_to_stop = true;
+                }
+            }
             Ok(stretches.live(guess, guess_ms, offset))
         });
         publish_live(&s, &id, &cancel, result);
@@ -256,6 +287,49 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             return;
         }
     }
+}
+/// Transcribes again, in the language the take was just held to, the
+/// stretches made before that in another language, each from a fresh copy of
+/// the take's live audio. One that fails stays marked, for Stop.
+fn redo_provisional(
+    s: &Shared,
+    id: &str,
+    cancel: &AtomicBool,
+    take_folder: &std::path::Path,
+    folder: &std::path::Path,
+    models: &deps::TakeModels,
+    stretches: &mut stretches::Stretches,
+) -> Result<(), String> {
+    let Some(language) = stretches.language.clone() else {
+        return Ok(());
+    };
+    let copy = folder.join("redo.wav");
+    for part in stretches.to_redo() {
+        // As for a snapshot: copy under the runtime lock, infer outside it.
+        {
+            let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
+            if !accepts_live_update(&runtime, id, cancel) {
+                return Err("Live transcription cancelled.".into());
+            }
+            let (_, active) = runtime.active.as_ref().ok_or("No recording is active.")?;
+            active.snapshot_audio_from(part.start_ms, &copy)?;
+        }
+        let _inference = s.inference.lock().map_err(|e| e.to_string())?;
+        transcribe::redo_stretch(
+            &s.store.root,
+            take_folder,
+            folder,
+            &copy,
+            0,
+            &part,
+            &language,
+            models.of(&language),
+            transcribe::live_thread_count(),
+            Some(cancel),
+            stretches,
+        )?;
+    }
+    Ok(())
 }
 #[tauri::command]
 fn list_projects(s: CmdState<'_>) -> Result<Vec<Project>, String> {
@@ -419,20 +493,27 @@ async fn install_transcription(s: CmdState<'_>) -> Result<SetupStatus, String> {
     blocking(move || {
         let _guard = s.installer.lock().map_err(|e| e.to_string())?;
         let status = deps::install_transcription()?;
-        deps::start_language_model_download()?;
+        deps::start_language_models_download()?;
         Ok(status)
     })
     .await
 }
-/// Starts the chosen language's model download again, for example after it failed.
+/// Starts or restarts downloading whichever models the chosen language needs
+/// and are missing, for example after a download failed.
 #[tauri::command]
-fn download_language_model() -> Result<(), String> {
-    deps::start_language_model_download()
+fn download_language_models() -> Result<(), String> {
+    deps::start_language_models_download()
 }
-/// The chosen language's model and its download, without probing the tools.
+/// The models the chosen language needs and their download, without probing
+/// the tools.
 #[tauri::command]
-fn get_language_model() -> Option<LanguageModel> {
-    deps::language_model_status()
+fn get_language_models() -> Vec<LanguageModel> {
+    deps::language_models_status()
+}
+/// Every language the speech model knows, for the list in Settings.
+#[tauri::command]
+fn get_languages() -> Vec<Language> {
+    settings::languages()
 }
 #[tauri::command]
 fn get_agent_handoff(s: CmdState<'_>, app: tauri::AppHandle, id: String) -> Result<String, String> {
@@ -1043,8 +1124,8 @@ fn get_settings(s: CmdState<'_>) -> Settings {
 #[tauri::command]
 fn save_settings(s: CmdState<'_>, settings: Settings) -> Result<Settings, String> {
     save_settings_in(&s.store.root, &settings, || {
-        // Before Install transcription the model comes with it instead.
-        let _ = deps::start_language_model_download();
+        // Before Install transcription the models come with it instead.
+        let _ = deps::start_language_models_download();
     })
 }
 /// Saves the settings and calls `language_changed` when the language did.
@@ -1053,9 +1134,9 @@ fn save_settings_in(
     settings: &Settings,
     language_changed: impl FnOnce(),
 ) -> Result<Settings, String> {
-    let before = settings::language(&settings::load(root));
+    let before = settings::chosen_language(&settings::load(root));
     let saved = settings::save(root, settings)?;
-    if settings::language(&saved) != before {
+    if settings::chosen_language(&saved) != before {
         language_changed();
     }
     Ok(saved)
@@ -1129,8 +1210,8 @@ pub fn run() {
             }
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
-            // An installation with only base fetches its language's model now.
-            let _ = deps::start_language_model_download();
+            // An installation that lacks a model its language needs fetches it now.
+            let _ = deps::start_language_models_download();
             app.manage(Arc::new(AppState {
                 store,
                 _ownership: ownership,
@@ -1177,8 +1258,9 @@ pub fn run() {
             stop_preview,
             get_setup_status,
             install_transcription,
-            download_language_model,
-            get_language_model,
+            download_language_models,
+            get_language_models,
+            get_languages,
             get_agent_handoff,
             open_session_folder,
             start_recording,
@@ -1229,11 +1311,7 @@ mod orchestration_tests {
         let state = state(folder.path().into());
         let session = ready_with_takes(&state);
         let take = takes::take_dir(&state.store.session_dir(&session.id).unwrap(), 1);
-        stretches::save(
-            &take,
-            &stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en"),
-        )
-        .unwrap();
+        stretches::save(&take, &stretches::Stretches::new("mic.wav", Some("en"))).unwrap();
         let ours = Arc::new(AtomicBool::new(false));
         let other = Arc::new(AtomicBool::new(false));
         {
@@ -1282,11 +1360,31 @@ mod orchestration_tests {
         };
         save_settings_in(root.path(), &vocabulary, || started.set(started.get() + 1)).unwrap();
         assert_eq!(started.get(), 1);
+        // Back to Auto, which needs both models.
         save_settings_in(root.path(), &Settings::default(), || {
             started.set(started.get() + 1)
         })
         .unwrap();
         assert_eq!(started.get(), 2);
+        // English is a choice of its own, not the same as never choosing.
+        let english = Settings {
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        save_settings_in(root.path(), &english, || started.set(started.get() + 1)).unwrap();
+        assert_eq!(started.get(), 3);
+        // A code the speech model does not know is Auto: a change from English.
+        let unknown = Settings {
+            language: Some("xx".into()),
+            ..Default::default()
+        };
+        save_settings_in(root.path(), &unknown, || started.set(started.get() + 1)).unwrap();
+        assert_eq!(started.get(), 4);
+        save_settings_in(root.path(), &Settings::default(), || {
+            started.set(started.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(started.get(), 4, "Auto stays Auto");
     }
     #[test]
     fn shell_folder_resolves_the_physical_path_and_preserves_spaces() {
@@ -1437,8 +1535,8 @@ mod orchestration_tests {
             }],
             ..Default::default()
         };
-        let mut stretches = stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en");
-        stretches.push(update.clone(), 5000);
+        let mut stretches = stretches::Stretches::new("mic.wav", Some("en"));
+        stretches.push(update.clone(), 5000, "en", "ggml-small.en.bin", None);
         // Take 2 starts at 80 s on the session timeline.
         let live = stretches.live(update, 3000, 80_000);
         assert_eq!(live.segments.len(), 2);
@@ -1746,11 +1844,13 @@ mod orchestration_tests {
             [
                 TakeMark {
                     index: 1,
-                    start_ms: 0
+                    start_ms: 0,
+                    ..Default::default()
                 },
                 TakeMark {
                     index: 2,
-                    start_ms: 2000
+                    start_ms: 2000,
+                    ..Default::default()
                 }
             ]
         );

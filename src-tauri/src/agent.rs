@@ -1246,7 +1246,7 @@ mod tests {
             Ok::<_, String>(words(if path == folder { "First" } else { "Second" }))
         };
         let take_two = crate::takes::take_dir(&folder, 2);
-        let saved = crate::stretches::Stretches::new("mic.wav", "ggml-small.en.bin", "en");
+        let saved = crate::stretches::Stretches::new("mic.wav", Some("en"));
         crate::stretches::save(&take_two, &saved).unwrap();
         let transcript = transcribe_existing_with(
             &store,
@@ -1307,6 +1307,191 @@ mod tests {
         assert_eq!(saved.status, "error");
         assert_eq!(saved.takes[1].status, TakeStatus::Error);
         assert_eq!(crate::takes::retry_plan(&saved), [2]);
+    }
+
+    /// One word, as a whole-take pass returns it for a take in `language`.
+    fn said(text: &str, language: &str, detected: bool) -> Transcript {
+        Transcript {
+            segments: vec![Segment {
+                id: "segment-0".into(),
+                start_ms: 200,
+                end_ms: 600,
+                text: text.into(),
+                words: vec![Word {
+                    text: text.into(),
+                    start_ms: 200,
+                    end_ms: 600,
+                    seek_ms: Some(250),
+                }],
+            }],
+            language: Some(language.into()),
+            language_detected: detected,
+            status: Some("complete".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transcribing_again_detects_the_language_again() {
+        use crate::{stretches, transcribe};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        // A German take whose transcript was made held to English, and whose
+        // stretches, saved while it recorded, hold it to English too.
+        let id = session_in(&store, Vec::new());
+        let folder = store.session_dir(&id).unwrap();
+        store
+            .save_transcript(&id, &said("nonsense", "en", false))
+            .unwrap();
+        let mut english = stretches::Stretches::new("mic.wav", None);
+        let heard = stretches::Guess {
+            language: "en".into(),
+            p: 0.95,
+        };
+        english.push(
+            said("nonsense", "en", true),
+            10_000,
+            "en",
+            "ggml-small.en.bin",
+            Some(heard),
+        );
+        stretches::save(&folder, &english).unwrap();
+        // No language was chosen: Auto.
+        let auto = crate::settings::load(dir.path());
+        assert_eq!(auto.language, None);
+        assert_eq!(transcribe::held_language(&auto, &folder, None), Some("en"));
+
+        // The whole-take pass as `transcribe_media` runs it: held to what
+        // Settings or the take's stretches say, else it detects the language
+        // from the take's audio, which is German.
+        let detections = std::cell::Cell::new(0);
+        let pass = |settings: crate::models::Settings| {
+            let detections = &detections;
+            move |take: &Path, _: u64, _: bool| {
+                Ok(match transcribe::held_language(&settings, take, None) {
+                    Some(language) => said("held", language, false),
+                    None => {
+                        detections.set(detections.get() + 1);
+                        said("Bibliothek", "de", true)
+                    }
+                })
+            }
+        };
+        let again = |settings: crate::models::Settings| {
+            transcribe_existing_with(
+                &store,
+                &id,
+                |_, _| Ok(()),
+                attached,
+                |store, id| transcribe::transcribe_with(store, id, &pass(settings)),
+            )
+            .unwrap()
+        };
+        // `cue transcribe`, or Retry, which forgets the stretches the same way.
+        let transcript = again(auto.clone());
+        assert_eq!(detections.get(), 1, "the take's audio is heard again");
+        assert_eq!(
+            (transcript.language.as_deref(), transcript.language_detected),
+            (Some("de"), true)
+        );
+        let saved = store.transcript(&id).unwrap();
+        assert_eq!(saved.segments[0].text, "Bibliothek");
+        assert_eq!(
+            (saved.language.as_deref(), saved.language_detected),
+            (Some("de"), true)
+        );
+        // And once more: nothing of the earlier pass holds the next one.
+        again(auto);
+        assert_eq!(detections.get(), 2);
+        // With a language chosen in Settings nothing is detected.
+        let french = crate::models::Settings {
+            language: Some("fr".into()),
+            ..Default::default()
+        };
+        let transcript = again(french);
+        assert_eq!(detections.get(), 2);
+        assert_eq!(
+            (transcript.language.as_deref(), transcript.language_detected),
+            (Some("fr"), false)
+        );
+    }
+
+    #[test]
+    fn the_transcript_reports_each_take_s_language() {
+        use crate::models::{Take, TakeStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let take = |index, offset_ms, duration_ms| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status: TakeStatus::Error,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: Some("mic:Studio".into()),
+            system_audio: false,
+        };
+        // A German take and an English take, each as Auto heard it.
+        let id = session_in(&store, vec![take(1, 0, 2000), take(2, 2000, 1500)]);
+        let folder = store.session_dir(&id).unwrap();
+        let media = |path: &Path, _: u64, _: bool| {
+            Ok::<_, String>(if path == folder {
+                said("Bibliothek", "de", true)
+            } else {
+                said("library", "en", true)
+            })
+        };
+        transcribe_existing_with(
+            &store,
+            &id,
+            |_, _| Ok(()),
+            attached,
+            |store, id| crate::transcribe::transcribe_with(store, id, &media),
+        )
+        .unwrap();
+        // `cue transcript ID --json` prints the stored transcript, with the
+        // pointer on each segment and word when the session has a track.
+        let transcript = store.transcript(&id).unwrap();
+        let expected = serde_json::json!([
+            {"index":1,"startMs":0,"language":"de","languageDetected":true},
+            {"index":2,"startMs":2000,"language":"en","languageDetected":true}
+        ]);
+        for printed in [
+            serde_json::to_value(&transcript).unwrap(),
+            transcript_with_cursor(&transcript, &CursorTrack::default()),
+        ] {
+            assert_eq!(printed["takes"], expected);
+            // The transcript's own language is its first take's.
+            assert_eq!(
+                (&printed["language"], &printed["languageDetected"]),
+                (&serde_json::json!("de"), &serde_json::json!(true))
+            );
+        }
+        // A take in a language chosen in Settings carries no `languageDetected`.
+        let chosen = |path: &Path, _: u64, _: bool| {
+            Ok::<_, String>(if path == folder {
+                said("Bibliothek", "de", true)
+            } else {
+                said("deuxieme", "fr", false)
+            })
+        };
+        let merged = crate::transcribe::transcribe_with(&store, &id, &chosen).unwrap();
+        assert_eq!(
+            serde_json::to_value(&merged).unwrap()["takes"],
+            serde_json::json!([
+                {"index":1,"startMs":0,"language":"de","languageDetected":true},
+                {"index":2,"startMs":2000,"language":"fr"}
+            ])
+        );
+        // A single recording carries its language on the transcript itself.
+        let single = serde_json::to_value(said("Bibliothek", "de", true)).unwrap();
+        assert_eq!(
+            (&single["language"], &single["languageDetected"]),
+            (&serde_json::json!("de"), &serde_json::json!(true))
+        );
+        assert!(single.get("takes").is_none());
+        let fixed = serde_json::to_value(said("library", "en", false)).unwrap();
+        assert!(fixed.get("languageDetected").is_none());
     }
 
     #[test]

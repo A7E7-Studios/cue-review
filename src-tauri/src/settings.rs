@@ -21,7 +21,7 @@
 
 use crate::{
     deps,
-    models::Settings,
+    models::{Language, Settings},
     store::{read_json, write_json},
 };
 use std::{
@@ -62,9 +62,9 @@ pub fn load(root: &Path) -> Settings {
 /// Validates and normalizes the settings, writes `settings.json` atomically
 /// and returns the settings as stored. An empty vocabulary turns the prompt off.
 pub fn save(root: &Path, settings: &Settings) -> Result<Settings, String> {
-    // English is the default, so it is not written; an unknown language
-    // (from a hand-edited file) reads as English and is dropped.
-    let language = (language(settings) == "de").then(|| "de".to_owned());
+    // Auto is the default, so it is not written; an unknown language (from
+    // a hand-edited file) reads as Auto and is dropped.
+    let language = chosen_language(settings).map(str::to_owned);
     let stored = Settings {
         vocabulary: normalize_vocabulary(settings.vocabulary.as_deref().unwrap_or(""))?,
         language,
@@ -184,13 +184,143 @@ fn letter_tokens(run: &[u8]) -> usize {
     total
 }
 
-/// The language every transcription is held to: `"de"` when German is
-/// chosen, else `"en"`.
-pub fn language(settings: &Settings) -> &'static str {
-    match settings.language.as_deref() {
-        Some("de") => "de",
-        _ => "en",
-    }
+/// The speech model's languages, code and English name: whisper.cpp's
+/// `g_lang` at revision d1be6fde11ac6e0407606b4e42fe72d34add8037, in its order,
+/// without its last entry, Cantonese (`yue`): the base and small models have
+/// 99 languages and no token for it, so holding a take to it yields nonsense.
+pub const LANGUAGES: [(&str, &str); 99] = [
+    ("en", "English"),
+    ("zh", "Chinese"),
+    ("de", "German"),
+    ("es", "Spanish"),
+    ("ru", "Russian"),
+    ("ko", "Korean"),
+    ("fr", "French"),
+    ("ja", "Japanese"),
+    ("pt", "Portuguese"),
+    ("tr", "Turkish"),
+    ("pl", "Polish"),
+    ("ca", "Catalan"),
+    ("nl", "Dutch"),
+    ("ar", "Arabic"),
+    ("sv", "Swedish"),
+    ("it", "Italian"),
+    ("id", "Indonesian"),
+    ("hi", "Hindi"),
+    ("fi", "Finnish"),
+    ("vi", "Vietnamese"),
+    ("he", "Hebrew"),
+    ("uk", "Ukrainian"),
+    ("el", "Greek"),
+    ("ms", "Malay"),
+    ("cs", "Czech"),
+    ("ro", "Romanian"),
+    ("da", "Danish"),
+    ("hu", "Hungarian"),
+    ("ta", "Tamil"),
+    ("no", "Norwegian"),
+    ("th", "Thai"),
+    ("ur", "Urdu"),
+    ("hr", "Croatian"),
+    ("bg", "Bulgarian"),
+    ("lt", "Lithuanian"),
+    ("la", "Latin"),
+    ("mi", "Maori"),
+    ("ml", "Malayalam"),
+    ("cy", "Welsh"),
+    ("sk", "Slovak"),
+    ("te", "Telugu"),
+    ("fa", "Persian"),
+    ("lv", "Latvian"),
+    ("bn", "Bengali"),
+    ("sr", "Serbian"),
+    ("az", "Azerbaijani"),
+    ("sl", "Slovenian"),
+    ("kn", "Kannada"),
+    ("et", "Estonian"),
+    ("mk", "Macedonian"),
+    ("br", "Breton"),
+    ("eu", "Basque"),
+    ("is", "Icelandic"),
+    ("hy", "Armenian"),
+    ("ne", "Nepali"),
+    ("mn", "Mongolian"),
+    ("bs", "Bosnian"),
+    ("kk", "Kazakh"),
+    ("sq", "Albanian"),
+    ("sw", "Swahili"),
+    ("gl", "Galician"),
+    ("mr", "Marathi"),
+    ("pa", "Punjabi"),
+    ("si", "Sinhala"),
+    ("km", "Khmer"),
+    ("sn", "Shona"),
+    ("yo", "Yoruba"),
+    ("so", "Somali"),
+    ("af", "Afrikaans"),
+    ("oc", "Occitan"),
+    ("ka", "Georgian"),
+    ("be", "Belarusian"),
+    ("tg", "Tajik"),
+    ("sd", "Sindhi"),
+    ("gu", "Gujarati"),
+    ("am", "Amharic"),
+    ("yi", "Yiddish"),
+    ("lo", "Lao"),
+    ("uz", "Uzbek"),
+    ("fo", "Faroese"),
+    ("ht", "Haitian Creole"),
+    ("ps", "Pashto"),
+    ("tk", "Turkmen"),
+    ("nn", "Nynorsk"),
+    ("mt", "Maltese"),
+    ("sa", "Sanskrit"),
+    ("lb", "Luxembourgish"),
+    ("my", "Myanmar"),
+    ("bo", "Tibetan"),
+    ("tl", "Tagalog"),
+    ("mg", "Malagasy"),
+    ("as", "Assamese"),
+    ("tt", "Tatar"),
+    ("haw", "Hawaiian"),
+    ("ln", "Lingala"),
+    ("ha", "Hausa"),
+    ("ba", "Bashkir"),
+    ("jw", "Javanese"),
+    ("su", "Sundanese"),
+];
+/// What Whisper takes for "detect the language yourself": the live guess
+/// uses it until the take's language is decided.
+pub const AUTO: &str = "auto";
+
+/// Every language the speech model knows, in the table's order, for Settings.
+pub fn languages() -> Vec<Language> {
+    LANGUAGES
+        .iter()
+        .map(|&(code, name)| Language {
+            code: code.into(),
+            name: name.into(),
+        })
+        .collect()
+}
+/// The table's own code for `code`, or `None` when the speech model does not
+/// know it.
+pub fn known_language(code: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map(|&(known, _)| known)
+}
+/// The language chosen in Settings. `None` is Auto: no language was chosen,
+/// or one the speech model does not know.
+pub fn chosen_language(settings: &Settings) -> Option<&'static str> {
+    settings.language.as_deref().and_then(known_language)
+}
+/// The language a take is held to: the one chosen in Settings whatever was
+/// `detected` in it, else the detected one. `None` while Auto has not
+/// decided.
+pub fn held_language(settings: &Settings, detected: Option<&str>) -> Option<&'static str> {
+    chosen_language(settings).or_else(|| detected.and_then(known_language))
 }
 
 const BASE_ARGS: [&str; 2] = ["-ojf", "-ng"];
@@ -204,12 +334,15 @@ const TAIL_ARGS: [&str; 3] = ["-nf", "-nth", "0.3"];
 /// every window, sized so no decoded text is carried (see the module notes).
 /// When the prompt's tokens cannot be counted, decoding stays as without it.
 /// `model` is the model that will transcribe, whose tokenizer counts the prompt.
-pub fn decoding_args(settings: &Settings, model: &Path) -> Vec<String> {
-    decoding_args_with(settings, |prompt| prompt_tokens(model, prompt))
+/// `language` is the language of this run, which the caller knows: the take's,
+/// or [`AUTO`], which anything but a code of the speech model becomes.
+pub fn decoding_args(settings: &Settings, model: &Path, language: &str) -> Vec<String> {
+    decoding_args_with(settings, language, |prompt| prompt_tokens(model, prompt))
 }
 
 fn decoding_args_with(
     settings: &Settings,
+    language: &str,
     count_tokens: impl FnOnce(&str) -> Option<usize>,
 ) -> Vec<String> {
     let prompt = settings
@@ -221,7 +354,8 @@ fn decoding_args_with(
                 .filter(|tokens| (1..=MAX_PROMPT_TOKENS).contains(tokens))
                 .map(|tokens| (prompt, tokens))
         });
-    let mut args: Vec<String> = vec!["-l".into(), language(settings).into()];
+    let language = known_language(language).unwrap_or(AUTO);
+    let mut args: Vec<String> = vec!["-l".into(), language.into()];
     args.extend(BASE_ARGS.into_iter().map(String::from));
     match prompt {
         Some((prompt, tokens)) => args.extend([
@@ -401,16 +535,17 @@ mod tests {
     fn decoding_args_match_the_v0_1_options_held_to_english() {
         let root = tempfile::tempdir().unwrap();
         let model = root.path().join("no-model.bin");
-        assert_eq!(decoding_args(&load(root.path()), &model), TODAY);
-        assert_eq!(decoding_args(&Settings::default(), &model), TODAY);
+        assert_eq!(decoding_args(&load(root.path()), &model, "en"), TODAY);
+        assert_eq!(decoding_args(&Settings::default(), &model, "en"), TODAY);
         let never = |_: &str| -> Option<usize> { panic!("no prompt to count") };
-        assert_eq!(decoding_args_with(&Settings::default(), never), TODAY);
-        assert_eq!(decoding_args_with(&vocabulary(" ,\n "), never), TODAY);
+        assert_eq!(decoding_args_with(&Settings::default(), "en", never), TODAY);
+        assert_eq!(decoding_args_with(&vocabulary(" ,\n "), "en", never), TODAY);
     }
 
     #[test]
     fn a_vocabulary_is_carried_into_every_window_without_decoded_history() {
-        let args = decoding_args_with(&vocabulary("CueReview,\n  Tauri  , Figtree"), |prompt| {
+        let terms = vocabulary("CueReview,\n  Tauri  , Figtree");
+        let args = decoding_args_with(&terms, "en", |prompt| {
             assert_eq!(prompt, "CueReview, Tauri, Figtree");
             Some(10)
         });
@@ -438,20 +573,20 @@ mod tests {
         // The tokenizer is unavailable, or the real count is out of range.
         for count in [None, Some(0), Some(MAX_PROMPT_TOKENS + 1)] {
             assert_eq!(
-                decoding_args_with(&vocabulary("CueReview"), |_| count),
+                decoding_args_with(&vocabulary("CueReview"), "en", |_| count),
                 TODAY
             );
         }
         assert_eq!(
-            decoding_args_with(&vocabulary("CueReview"), |_| Some(MAX_PROMPT_TOKENS))[5],
+            decoding_args_with(&vocabulary("CueReview"), "en", |_| Some(MAX_PROMPT_TOKENS))[5],
             (MAX_PROMPT_TOKENS + 1).to_string()
         );
         // A hand-edited settings.json is validated like a saved one.
         let never = |_: &str| -> Option<usize> { panic!("invalid vocabulary was counted") };
-        assert_eq!(decoding_args_with(&vocabulary("Café"), never), TODAY);
+        assert_eq!(decoding_args_with(&vocabulary("Café"), "en", never), TODAY);
         let too_many = (0..=MAX_TERMS).map(|i| format!("t{i}")).collect::<Vec<_>>();
         assert_eq!(
-            decoding_args_with(&vocabulary(&too_many.join(",")), never),
+            decoding_args_with(&vocabulary(&too_many.join(",")), "en", never),
             TODAY
         );
     }
@@ -467,7 +602,7 @@ mod tests {
             prompt,
             r#"-mc 999, "quoted" term, C:\path\, & | > %PATH% $(x)"#
         );
-        let args = decoding_args_with(&vocabulary(text), |_| Some(20));
+        let args = decoding_args_with(&vocabulary(text), "en", |_| Some(20));
         let at = args.iter().position(|arg| arg == "--prompt").unwrap();
         assert_eq!(args[at + 1], prompt);
         assert_eq!(args.len(), 12);
@@ -666,37 +801,130 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path(root.path())).unwrap(), "{}");
     }
 
-    #[test]
-    fn decoding_is_held_to_the_chosen_language() {
-        let never = |_: &str| -> Option<usize> { panic!("no prompt to count") };
-        let chosen = |language: Option<&str>| Settings {
+    fn chosen(language: Option<&str>) -> Settings {
+        Settings {
             language: language.map(str::to_owned),
             ..Default::default()
-        };
-        assert_eq!(language(&chosen(None)), "en");
-        assert_eq!(language(&chosen(Some("en"))), "en");
-        assert_eq!(language(&chosen(Some("de"))), "de");
-        assert_eq!(&decoding_args_with(&chosen(None), never)[..2], ["-l", "en"]);
+        }
+    }
+    fn held_to(args: &[String]) -> &str {
+        assert_eq!(args[0], "-l");
+        &args[1]
+    }
+
+    #[test]
+    fn a_chosen_language_is_used_without_detecting() {
+        let never = |_: &str| -> Option<usize> { panic!("no prompt to count") };
+        for code in ["en", "de", "fr", "su"] {
+            let settings = chosen(Some(code));
+            assert_eq!(chosen_language(&settings), Some(code));
+            // Nothing has to be detected, and whatever is spoken changes nothing.
+            for detected in [None, Some("en"), Some("de"), Some("ja")] {
+                assert_eq!(held_language(&settings, detected), Some(code), "{code}");
+            }
+            let held = held_language(&settings, None).unwrap();
+            assert_eq!(held_to(&decoding_args_with(&settings, held, never)), code);
+        }
+    }
+
+    #[test]
+    fn a_take_is_held_to_its_detected_language() {
+        let never = |_: &str| -> Option<usize> { panic!("no prompt to count") };
+        // No language was ever chosen: Auto.
+        let auto = load(tempfile::tempdir().unwrap().path());
+        assert_eq!(chosen_language(&auto), None);
+        // Until a guess decides, nothing holds the take and the live guess
+        // lets Whisper detect.
+        assert_eq!(held_language(&auto, None), None);
+        assert_eq!(held_to(&decoding_args_with(&auto, AUTO, never)), "auto");
+        // A German take is held to German and an English one to English.
+        for code in ["de", "en", "pt"] {
+            let held = held_language(&auto, Some(code)).unwrap();
+            assert_eq!(held, code);
+            assert_eq!(held_to(&decoding_args_with(&auto, held, never)), code);
+        }
+        // Something the speech model does not know holds nothing.
+        assert_eq!(held_language(&auto, Some("xx")), None);
+        assert_eq!(held_to(&decoding_args_with(&auto, "xx", never)), "auto");
+    }
+
+    #[test]
+    fn every_language_of_the_speech_model_can_be_chosen() {
+        assert_eq!(LANGUAGES.len(), 99);
+        // whisper.cpp's order: its language ids.
         assert_eq!(
-            &decoding_args_with(&chosen(Some("de")), never)[..2],
-            ["-l", "de"]
+            LANGUAGES[..3],
+            [("en", "English"), ("zh", "Chinese"), ("de", "German")]
         );
+        assert_eq!(LANGUAGES[80], ("ht", "Haitian Creole"));
+        assert_eq!(LANGUAGES[98], ("su", "Sundanese"));
+        // The installed models have no Cantonese token.
+        assert!(LANGUAGES.iter().all(|(code, _)| *code != "yue"));
         let root = tempfile::tempdir().unwrap();
-        let saved = save(root.path(), &chosen(Some("de"))).unwrap();
-        assert_eq!(saved.language.as_deref(), Some("de"));
-        assert_eq!(load(root.path()), saved);
-        // English is the default, so it is not written.
+        let mut seen = std::collections::HashSet::new();
+        for (code, name) in LANGUAGES {
+            assert!(seen.insert(code), "{code} is listed twice");
+            assert!(
+                (2..=3).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_lowercase()),
+                "{code}"
+            );
+            assert!(name.starts_with(|c: char| c.is_ascii_uppercase()), "{name}");
+            let saved = save(root.path(), &chosen(Some(code))).unwrap();
+            assert_eq!(saved.language.as_deref(), Some(code));
+            assert_eq!(chosen_language(&load(root.path())), Some(code));
+        }
+        // The app's list: the same table, in the same order.
+        let listed = languages();
+        assert_eq!(listed.len(), 99);
+        assert!(listed
+            .iter()
+            .zip(LANGUAGES)
+            .all(|(language, (code, name))| language.code == code && language.name == name));
         assert_eq!(
-            save(root.path(), &chosen(Some("en"))).unwrap(),
+            serde_json::to_value(&listed[2]).unwrap(),
+            serde_json::json!({"code":"de","name":"German"})
+        );
+    }
+
+    #[test]
+    fn the_language_is_stored_as_auto_or_one_of_the_speech_model_s_codes() {
+        let root = tempfile::tempdir().unwrap();
+        let file = || std::fs::read_to_string(path(root.path())).unwrap();
+        // Absent means Auto, and Auto is not written.
+        assert_eq!(chosen_language(&load(root.path())), None);
+        assert_eq!(
+            save(root.path(), &chosen(None)).unwrap(),
             Settings::default()
         );
-        // An unknown language from a hand-edited file reads as English and
-        // never blocks saving the vocabulary.
-        assert_eq!(language(&chosen(Some("fr"))), "en");
-        assert_eq!(
-            save(root.path(), &chosen(Some("fr"))).unwrap(),
-            Settings::default()
-        );
+        assert_eq!(file(), "{}");
+        // English is a choice of its own now, stored like any other language.
+        for code in ["en", "de", "ja"] {
+            let saved = save(root.path(), &chosen(Some(code))).unwrap();
+            assert_eq!(saved.language.as_deref(), Some(code));
+            assert_eq!(load(root.path()), saved);
+            assert_eq!(file(), format!("{{\n  \"language\": \"{code}\"\n}}"));
+        }
+        // Back to Auto.
+        save(root.path(), &chosen(None)).unwrap();
+        assert_eq!(chosen_language(&load(root.path())), None);
+        // An unknown code from a hand-edited file reads as Auto, is dropped
+        // on save and never blocks saving the vocabulary.
+        for unknown in ["xx", "EN", "german", ""] {
+            std::fs::write(
+                path(root.path()),
+                format!(r#"{{"vocabulary":"CueReview","language":"{unknown}"}}"#),
+            )
+            .unwrap();
+            let loaded = load(root.path());
+            assert_eq!(loaded.language.as_deref(), Some(unknown));
+            assert_eq!(chosen_language(&loaded), None, "{unknown}");
+            let saved = save(root.path(), &loaded).unwrap();
+            assert_eq!(
+                (saved.vocabulary.as_deref(), saved.language.as_deref()),
+                (Some("CueReview"), None)
+            );
+            assert_eq!(load(root.path()), saved);
+        }
     }
 
     #[test]
@@ -735,7 +963,7 @@ mod tests {
             .arg(deps::model_path())
             .arg("-f")
             .arg(input)
-            .args(decoding_args(settings, &deps::model_path()))
+            .args(decoding_args(settings, &deps::model_path(), "en"))
             .args(["-t", "2", "-of"])
             .arg(prefix)
             .output()
@@ -773,7 +1001,7 @@ mod tests {
             .expect("whisper-cli should count the prompt");
         let probe_ms = began.elapsed().as_millis();
         assert!((8..=32).contains(&tokens), "{tokens} tokens");
-        let args = decoding_args(&settings, &deps::model_path());
+        let args = decoding_args(&settings, &deps::model_path(), "en");
         let context = (tokens + 1).to_string();
         assert_eq!(
             args[4..9],

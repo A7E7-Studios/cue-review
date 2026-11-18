@@ -155,12 +155,21 @@ impl SpeechModel {
             .is_ok_and(|m| m.len() == self.size)
     }
 }
-/// The model of a transcription language (`"en"` or `"de"`): small.en for
-/// English, the multilingual small model for German.
+/// The model of a transcription language: small.en for English (`"en"`),
+/// the multilingual small model, held to the language, for every other.
 pub fn language_model(language: &str) -> &'static SpeechModel {
     match language {
-        "de" => &SMALL,
-        _ => &SMALL_EN,
+        "en" => &SMALL_EN,
+        _ => &SMALL,
+    }
+}
+/// The models the language chosen in Settings needs, in download order:
+/// both small models for Auto (`None`), the English one first, because any
+/// take can turn out to be in either; else the chosen language's model.
+pub fn needed_models(chosen: Option<&str>) -> Vec<&'static SpeechModel> {
+    match chosen {
+        None => vec![&SMALL_EN, &SMALL],
+        Some(language) => vec![language_model(language)],
     }
 }
 /// The model file a transcription runs, and its alignment preset (`None`
@@ -182,7 +191,31 @@ pub fn final_model(language: &str) -> ModelChoice {
         }
     })
 }
-/// The model for live words while recording: base, which is quicker per update.
+/// The final models of one take, chosen once when it starts, so every
+/// stretch of the take in one language comes from the same model whatever
+/// finishes downloading meanwhile.
+pub struct TakeModels {
+    english: ModelChoice,
+    other: ModelChoice,
+}
+impl TakeModels {
+    pub fn now() -> Self {
+        Self {
+            english: final_model("en"),
+            // Any other code: they all use the multilingual model.
+            other: final_model("de"),
+        }
+    }
+    pub fn of(&self, language: &str) -> &ModelChoice {
+        if language_model(language).name == SMALL_EN.name {
+            &self.english
+        } else {
+            &self.other
+        }
+    }
+}
+/// The model for live words while recording, and for detecting a take's
+/// language: base, which is multilingual and quicker per update.
 pub fn live_model() -> ModelChoice {
     custom_model().unwrap_or_else(|| ModelChoice {
         path: model_path(),
@@ -204,15 +237,16 @@ fn choose_model(models: &Path, language: &str) -> &'static SpeechModel {
     }
 }
 
-/// The background download of the chosen language's model.
+/// The background download of the models the chosen language needs.
 #[derive(Clone, Debug, Default)]
 struct Fetch {
     /// The model being or last downloaded, by name.
     model: &'static str,
     received: u64,
     running: bool,
-    /// Set when the chosen language changed during a download: the running
-    /// download stops and the loop moves on to the new language's model.
+    /// Set when the chosen language changed during a download and no longer
+    /// needs its model: the running download stops and the loop moves on to
+    /// what the new choice needs.
     cancel: bool,
     error: Option<String>,
 }
@@ -223,8 +257,12 @@ fn fetch_state() -> &'static Mutex<Fetch> {
 fn locked(state: &Mutex<Fetch>) -> std::sync::MutexGuard<'_, Fetch> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
-fn chosen_language() -> &'static str {
-    settings::language(&settings::load(&data_root()))
+/// The language chosen in Settings; `None` is Auto.
+fn chosen_language() -> Option<&'static str> {
+    settings::chosen_language(&settings::load(&data_root()))
+}
+fn needs(wanted: &[&SpeechModel], name: &str) -> bool {
+    wanted.iter().any(|model| model.name == name)
 }
 fn models_dir() -> PathBuf {
     data_root().join("models")
@@ -233,51 +271,56 @@ fn models_dir() -> PathBuf {
 /// progress callback that returns false to stop it.
 type Downloader<'a> = &'a dyn Fn(&SpeechModel, &Path, &dyn Fn(u64) -> bool) -> Result<(), String>;
 /// Takes the fetch for this caller, or returns false when one is running. A
-/// running fetch whose model is no longer `wanted` is told to move on.
-fn claim(state: &Mutex<Fetch>, wanted: &SpeechModel) -> bool {
+/// running fetch whose model none of `wanted` is, is told to move on.
+fn claim(state: &Mutex<Fetch>, wanted: &[&SpeechModel]) -> bool {
     let mut fetch = locked(state);
     if fetch.running {
-        // Choosing the model being fetched again takes back an earlier stop.
-        fetch.cancel = fetch.model != wanted.name;
+        // Choosing a language that needs the model being fetched takes back
+        // an earlier stop.
+        fetch.cancel = !needs(wanted, fetch.model);
         return false;
     }
     *fetch = Fetch {
-        model: wanted.name,
+        model: wanted.first().map_or("", |model| model.name),
         running: true,
         ..Default::default()
     };
     true
 }
-/// Tells a running download of a model other than `wanted`, which is
+/// Tells a running download of a model none of `wanted` is, which are all
 /// installed, to stop.
-fn stop_other(state: &Mutex<Fetch>, wanted: &SpeechModel) {
+fn stop_other(state: &Mutex<Fetch>, wanted: &[&SpeechModel]) {
     let mut fetch = locked(state);
     if fetch.running {
-        fetch.cancel = fetch.model != wanted.name;
+        fetch.cancel = !needs(wanted, fetch.model);
     }
 }
-/// Downloads the chosen language's model until it is installed, asking
-/// `chosen` again after each download, so a language chosen meanwhile gets
-/// its model too. Stops at the first failure of the model still chosen, and
-/// releases the fetch.
+/// Downloads every model the chosen language needs, in order, until all are
+/// installed, asking `chosen` again after each download, so a language
+/// chosen meanwhile gets its models too. Stops at the first failure of a
+/// model still needed, and releases the fetch.
 fn fetch_loop(
     models: &Path,
-    chosen: &dyn Fn() -> &'static str,
+    chosen: &dyn Fn() -> Option<&'static str>,
     download: Downloader<'_>,
     state: &Mutex<Fetch>,
 ) -> Result<(), String> {
+    let missing = || {
+        needed_models(chosen())
+            .into_iter()
+            .find(|model| !model.installed_in(models))
+    };
     loop {
-        let model = language_model(chosen());
-        if model.installed_in(models) {
+        let Some(model) = missing() else {
             // Released under the lock that a refused claim takes, after
             // asking once more: a language chosen meanwhile is fetched too.
             let mut fetch = locked(state);
-            if language_model(chosen()).installed_in(models) {
+            if missing().is_none() {
                 fetch.running = false;
                 return Ok(());
             }
             continue;
-        }
+        };
         {
             let mut fetch = locked(state);
             fetch.model = model.name;
@@ -296,7 +339,7 @@ fn fetch_loop(
             let mut fetch = locked(state);
             // A download stopped for another language is no failure, even
             // when that language is taken back before this point.
-            if !stopped.get() && language_model(chosen()).name == model.name {
+            if !stopped.get() && needs(&needed_models(chosen()), model.name) {
                 fetch.error = Some(error.clone());
                 fetch.running = false;
                 return Err(error);
@@ -353,38 +396,40 @@ fn sweep_partial(models: &Path) {
         }
     }
 }
-/// Downloads the chosen language's model unless it is installed, blocking,
-/// with its progress in [`setup_status`]. Used by `cue setup --install`.
-pub fn fetch_language_model() -> Result<(), String> {
+/// Downloads every model the chosen language needs that is not installed,
+/// blocking, with the progress in [`setup_status`]. Used by
+/// `cue setup --install`.
+pub fn fetch_language_models() -> Result<(), String> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return Ok(());
     }
     let models = models_dir();
-    if !claim(fetch_state(), language_model(chosen_language())) {
-        return Err("The language model is already being downloaded.".into());
+    if !claim(fetch_state(), &needed_models(chosen_language())) {
+        return Err("The language models are already being downloaded.".into());
     }
     sweep_partial(&models);
     fetch_loop(&models, &chosen_language, &download_model, fetch_state())
 }
-/// Starts downloading the chosen language's model on its own thread, unless
-/// it is installed. A download already running moves on to it. Refused until
-/// Install transcription has put base and the speech tools in place.
-pub fn start_language_model_download() -> Result<(), String> {
+/// Starts downloading the models the chosen language needs on their own
+/// thread, unless they are installed. A download already running moves on to
+/// them. Refused until Install transcription has put base and the speech
+/// tools in place.
+pub fn start_language_models_download() -> Result<(), String> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return Ok(());
     }
     if !speech_model_ready() {
         return Err(
-            "Install transcription first, then the language model downloads by itself.".into(),
+            "Install transcription first, then the language models download by themselves.".into(),
         );
     }
     let models = models_dir();
-    let wanted = language_model(chosen_language());
-    if wanted.installed_in(&models) {
-        stop_other(fetch_state(), wanted);
+    let wanted = needed_models(chosen_language());
+    if wanted.iter().all(|model| model.installed_in(&models)) {
+        stop_other(fetch_state(), &wanted);
         return Ok(());
     }
-    if !claim(fetch_state(), wanted) {
+    if !claim(fetch_state(), &wanted) {
         return Ok(());
     }
     sweep_partial(&models);
@@ -393,21 +438,28 @@ pub fn start_language_model_download() -> Result<(), String> {
     });
     Ok(())
 }
-/// The chosen language's model and its download, for Settings and `cue setup`.
-pub fn language_model_status() -> Option<LanguageModel> {
+/// The models the chosen language needs and their download, in download
+/// order, for Settings and `cue setup`. Empty when `CUEREVIEW_MODEL`
+/// replaces them.
+pub fn language_models_status() -> Vec<LanguageModel> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
-        return None;
+        return Vec::new();
     }
     let fetch = locked(fetch_state()).clone();
-    Some(status_of(&models_dir(), chosen_language(), &fetch))
+    statuses_of(&models_dir(), chosen_language(), &fetch)
 }
-fn status_of(models: &Path, language: &str, fetch: &Fetch) -> LanguageModel {
-    let model = language_model(language);
+fn statuses_of(models: &Path, chosen: Option<&str>, fetch: &Fetch) -> Vec<LanguageModel> {
+    needed_models(chosen)
+        .into_iter()
+        .map(|model| status_of(models, model, fetch))
+        .collect()
+}
+fn status_of(models: &Path, model: &SpeechModel, fetch: &Fetch) -> LanguageModel {
     let ours = fetch.model == model.name;
     let (state, received, error) = if model.installed_in(models) {
         ("ready", model.size, None)
     } else if fetch.running {
-        // A download of the other language's model moves on to this one next.
+        // A download of another model moves on to this one next.
         ("downloading", if ours { fetch.received } else { 0 }, None)
     } else if let Some(received) = growing_partial(&model.path_in(models)) {
         // The app downloads it while `cue setup` asks.
@@ -418,7 +470,6 @@ fn status_of(models: &Path, language: &str, fetch: &Fetch) -> LanguageModel {
         ("missing", 0, None)
     };
     LanguageModel {
-        language: language.into(),
         model: model.name.into(),
         state: state.into(),
         received_bytes: received,
@@ -501,7 +552,7 @@ pub fn setup_status() -> SetupStatus {
         dependencies,
         model_ready,
         model_path: model_ready.then(|| model_path().to_string_lossy().into()),
-        language_model: language_model_status(),
+        language_models: language_models_status(),
     }
 }
 fn download(url: &str, target: &Path, expected: Option<&str>) -> Result<(), String> {
@@ -716,18 +767,26 @@ mod tests {
     }
 
     #[test]
-    fn english_uses_small_en_by_default() {
-        let dir = models(&[&BASE, &SMALL_EN]);
-        let language = settings::language(&Default::default());
-        assert_eq!(choose_model(dir.path(), language), &SMALL_EN);
-        assert_eq!(SMALL_EN.dtw, "small.en");
-    }
-
-    #[test]
-    fn german_uses_the_multilingual_small_model() {
+    fn english_uses_small_en_and_every_other_language_the_multilingual_model() {
         let dir = models(&[&BASE, &SMALL_EN, &SMALL]);
-        assert_eq!(choose_model(dir.path(), "de"), &SMALL);
-        assert_eq!(SMALL.dtw, "small");
+        assert_eq!(choose_model(dir.path(), "en"), &SMALL_EN);
+        // Each model aligns with its own preset.
+        assert_eq!((SMALL_EN.dtw, SMALL.dtw), ("small.en", "small"));
+        // Every other language of the speech model, German included.
+        for (code, _) in settings::LANGUAGES {
+            let expected = if code == "en" { &SMALL_EN } else { &SMALL };
+            assert_eq!(language_model(code), expected, "{code}");
+            assert_eq!(choose_model(dir.path(), code), expected, "{code}");
+        }
+        // What a choice in Settings needs: its own model, both for Auto.
+        assert_eq!(needed_models(Some("en")), [&SMALL_EN]);
+        assert_eq!(needed_models(Some("de")), [&SMALL]);
+        assert_eq!(needed_models(Some("ja")), [&SMALL]);
+        assert_eq!(needed_models(None), [&SMALL_EN, &SMALL]);
+        // One model is enough for the takes in its language.
+        let english_only = models(&[&BASE, &SMALL_EN]);
+        assert_eq!(choose_model(english_only.path(), "en"), &SMALL_EN);
+        assert_eq!(choose_model(english_only.path(), "de"), &BASE);
     }
 
     #[test]
@@ -735,6 +794,7 @@ mod tests {
         let dir = models(&[&BASE]);
         assert_eq!(choose_model(dir.path(), "en"), &BASE);
         assert_eq!(choose_model(dir.path(), "de"), &BASE);
+        assert_eq!(choose_model(dir.path(), "fr"), &BASE);
         // A file of the wrong size, such as one cut off, is not installed.
         fs::File::create(SMALL_EN.path_in(dir.path()))
             .unwrap()
@@ -804,23 +864,37 @@ mod tests {
         }
     }
 
+    /// The state of each model `chosen` needs, in order.
+    fn states(models: &Path, chosen: Option<&str>, fetch: &Fetch) -> Vec<(String, String)> {
+        statuses_of(models, chosen, fetch)
+            .into_iter()
+            .map(|status| (status.model, status.state))
+            .collect()
+    }
+    fn pairs(states: &[(&str, &str)]) -> Vec<(String, String)> {
+        states
+            .iter()
+            .map(|&(model, state)| (model.to_owned(), state.to_owned()))
+            .collect()
+    }
+
     #[test]
     fn a_language_chosen_during_a_download_gets_its_model() {
         let dir = models(&[&BASE]);
         let state = Mutex::new(Fetch::default());
-        let language = std::cell::Cell::new("en");
+        let language = std::cell::Cell::new(Some("en"));
         let order = std::cell::RefCell::new(Vec::new());
         // German is chosen while small.en downloads: the start is refused but
         // tells the running download to move on.
         let during = |name: &'static str| {
             if name == "small.en" {
-                language.set("de");
-                assert!(!claim(&state, language_model("de")));
-                let status = status_of(dir.path(), "de", &locked(&state));
+                language.set(Some("de"));
+                assert!(!claim(&state, &needed_models(Some("de"))));
+                let status = status_of(dir.path(), &SMALL, &locked(&state));
                 assert_eq!(status.state, "downloading");
             }
         };
-        assert!(claim(&state, language_model("en")));
+        assert!(claim(&state, &needed_models(Some("en"))));
         let chosen = || language.get();
         fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small.en", "small"]);
@@ -831,8 +905,121 @@ mod tests {
         );
         let fetch = locked(&state).clone();
         assert!(!fetch.running);
-        assert_eq!(status_of(dir.path(), "de", &fetch).state, "ready");
-        assert_eq!(status_of(dir.path(), "en", &fetch).state, "missing");
+        assert_eq!(status_of(dir.path(), &SMALL, &fetch).state, "ready");
+        assert_eq!(status_of(dir.path(), &SMALL_EN, &fetch).state, "missing");
+    }
+
+    #[test]
+    fn auto_fetches_both_small_models_english_first() {
+        // An installation with only base, and no language ever chosen.
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let order = std::cell::RefCell::new(Vec::new());
+        assert_eq!(
+            states(dir.path(), None, &locked(&state)),
+            pairs(&[("small.en", "missing"), ("small", "missing")])
+        );
+        // While the English model downloads, the other one waits its turn.
+        let during = |name: &'static str| {
+            let fetch = locked(&state).clone();
+            let waiting = if name == "small.en" {
+                [("small.en", "downloading"), ("small", "downloading")]
+            } else {
+                [("small.en", "ready"), ("small", "downloading")]
+            };
+            assert_eq!(states(dir.path(), None, &fetch), pairs(&waiting));
+        };
+        assert!(claim(&state, &needed_models(None)));
+        fetch_loop(dir.path(), &|| None, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small.en", "small"]);
+        let fetch = locked(&state).clone();
+        assert!(!fetch.running);
+        assert_eq!(
+            states(dir.path(), None, &fetch),
+            pairs(&[("small.en", "ready"), ("small", "ready")])
+        );
+
+        // An installation that already has small.en fetches only the other.
+        let upgraded = models(&[&BASE, &SMALL_EN]);
+        let state = Mutex::new(Fetch::default());
+        let order = std::cell::RefCell::new(Vec::new());
+        assert!(claim(&state, &needed_models(None)));
+        fetch_loop(
+            upgraded.path(),
+            &|| None,
+            &installs(&order, &|_| ()),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(*order.borrow(), ["small"]);
+
+        // A fixed language fetches its own model only.
+        for (language, model) in [("en", "small.en"), ("de", "small"), ("fr", "small")] {
+            let dir = models(&[&BASE]);
+            let state = Mutex::new(Fetch::default());
+            let order = std::cell::RefCell::new(Vec::new());
+            assert!(claim(&state, &needed_models(Some(language))));
+            let chosen = || Some(language);
+            fetch_loop(dir.path(), &chosen, &installs(&order, &|_| ()), &state).unwrap();
+            assert_eq!(*order.borrow(), [model], "{language}");
+        }
+    }
+
+    #[test]
+    fn a_changed_choice_stops_only_a_download_nothing_needs() {
+        // Auto downloads small.en; choosing English keeps it and drops small.
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let language = std::cell::Cell::new(None);
+        let order = std::cell::RefCell::new(Vec::new());
+        let during = |name: &'static str| {
+            if name == "small.en" {
+                language.set(Some("en"));
+                assert!(!claim(&state, &needed_models(Some("en"))));
+                assert!(!locked(&state).cancel, "English still needs small.en");
+            }
+        };
+        assert!(claim(&state, &needed_models(None)));
+        let chosen = || language.get();
+        fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small.en"]);
+        assert!(!SMALL.installed_in(dir.path()));
+
+        // Auto downloads small.en; choosing German stops it for small.
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let language = std::cell::Cell::new(None);
+        let order = std::cell::RefCell::new(Vec::new());
+        let during = |name: &'static str| {
+            if name == "small.en" {
+                language.set(Some("de"));
+                assert!(!claim(&state, &needed_models(Some("de"))));
+                assert!(locked(&state).cancel, "German has no use for small.en");
+            }
+        };
+        assert!(claim(&state, &needed_models(None)));
+        let chosen = || language.get();
+        fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small.en", "small"]);
+        assert!(SMALL.installed_in(dir.path()) && !SMALL_EN.installed_in(dir.path()));
+        assert!(locked(&state).error.is_none());
+
+        // German downloads small; going back to Auto keeps it and adds small.en.
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let language = std::cell::Cell::new(Some("de"));
+        let order = std::cell::RefCell::new(Vec::new());
+        let during = |name: &'static str| {
+            if name == "small" && language.get().is_some() {
+                language.set(None);
+                assert!(!claim(&state, &needed_models(None)));
+                assert!(!locked(&state).cancel, "Auto needs small too");
+            }
+        };
+        assert!(claim(&state, &needed_models(Some("de"))));
+        let chosen = || language.get();
+        fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small", "small.en"]);
     }
 
     #[test]
@@ -843,12 +1030,13 @@ mod tests {
         // English, German, English again, all within one read of small.en.
         let during = |name: &'static str| {
             if name == "small.en" && order.borrow().len() == 1 {
-                assert!(!claim(&state, &SMALL));
-                assert!(!claim(&state, &SMALL_EN));
+                assert!(!claim(&state, &[&SMALL]));
+                assert!(!claim(&state, &[&SMALL_EN]));
             }
         };
-        assert!(claim(&state, &SMALL_EN));
-        fetch_loop(dir.path(), &|| "en", &installs(&order, &during), &state).unwrap();
+        assert!(claim(&state, &[&SMALL_EN]));
+        let english = || Some("en");
+        fetch_loop(dir.path(), &english, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small.en"]);
         assert!(SMALL_EN.installed_in(dir.path()));
         assert!(locked(&state).error.is_none());
@@ -864,9 +1052,9 @@ mod tests {
         let download = |model: &SpeechModel, models: &Path, progress: &dyn Fn(u64) -> bool| {
             calls.set(calls.get() + 1);
             if calls.get() == 1 {
-                assert!(!claim(&state, &SMALL));
+                assert!(!claim(&state, &[&SMALL]));
                 assert!(!progress(1000), "the stop reaches the download");
-                assert!(!claim(&state, &SMALL_EN));
+                assert!(!claim(&state, &[&SMALL_EN]));
                 return Err("The download was stopped.".into());
             }
             fs::File::create(model.path_in(models))
@@ -875,8 +1063,8 @@ mod tests {
                 .unwrap();
             Ok(())
         };
-        assert!(claim(&state, &SMALL_EN));
-        fetch_loop(dir.path(), &|| "en", &download, &state).unwrap();
+        assert!(claim(&state, &[&SMALL_EN]));
+        fetch_loop(dir.path(), &|| Some("en"), &download, &state).unwrap();
         assert_eq!(calls.get(), 2, "small.en is fetched again");
         assert!(locked(&state).error.is_none());
         assert!(SMALL_EN.installed_in(dir.path()));
@@ -885,13 +1073,16 @@ mod tests {
     #[test]
     fn choosing_an_installed_language_stops_the_other_download() {
         let state = Mutex::new(Fetch::default());
-        assert!(claim(&state, &SMALL));
-        stop_other(&state, &SMALL_EN);
+        assert!(claim(&state, &[&SMALL]));
+        stop_other(&state, &[&SMALL_EN]);
         assert!(locked(&state).cancel, "the German download stops");
-        stop_other(&state, &SMALL);
+        stop_other(&state, &[&SMALL]);
         assert!(!locked(&state).cancel, "German again keeps it");
+        stop_other(&state, &[&SMALL_EN]);
+        stop_other(&state, &[&SMALL_EN, &SMALL]);
+        assert!(!locked(&state).cancel, "Auto keeps it too");
         locked(&state).running = false;
-        stop_other(&state, &SMALL_EN);
+        stop_other(&state, &[&SMALL_EN]);
         assert!(!locked(&state).cancel, "nothing runs, nothing to stop");
     }
 
@@ -901,7 +1092,7 @@ mod tests {
         let idle = Fetch::default();
         let partial = dir.path().join("ggml-small.download");
         fs::write(&partial, b"part").unwrap();
-        let status = status_of(dir.path(), "de", &idle);
+        let status = status_of(dir.path(), &SMALL, &idle);
         assert_eq!(
             (status.state.as_str(), status.received_bytes),
             ("downloading", 4)
@@ -914,7 +1105,7 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        assert_eq!(status_of(dir.path(), "de", &idle).state, "missing");
+        assert_eq!(status_of(dir.path(), &SMALL, &idle).state, "missing");
     }
 
     #[test]
@@ -922,13 +1113,13 @@ mod tests {
         let dir = models(&[&BASE]);
         let state = Mutex::new(Fetch::default());
         assert_eq!(
-            status_of(dir.path(), "en", &locked(&state)).state,
+            status_of(dir.path(), &SMALL_EN, &locked(&state)).state,
             "missing"
         );
-        assert!(claim(&state, &SMALL_EN));
-        assert!(!claim(&state, &SMALL_EN), "one download at a time");
+        assert!(claim(&state, &[&SMALL_EN]));
+        assert!(!claim(&state, &[&SMALL_EN]), "one download at a time");
         locked(&state).received = 5;
-        let downloading = status_of(dir.path(), "en", &locked(&state));
+        let downloading = status_of(dir.path(), &SMALL_EN, &locked(&state));
         assert_eq!(
             (downloading.state.as_str(), downloading.received_bytes),
             ("downloading", 5)
@@ -936,21 +1127,27 @@ mod tests {
         let fail = |_: &SpeechModel, _: &Path, _: &dyn Fn(u64) -> bool| -> Result<(), String> {
             Err("The download was cut off.".into())
         };
-        let error = fetch_loop(dir.path(), &|| "en", &fail, &state).unwrap_err();
+        let english = || Some("en");
+        let error = fetch_loop(dir.path(), &english, &fail, &state).unwrap_err();
         assert_eq!(error, "The download was cut off.");
-        let failed = status_of(dir.path(), "en", &locked(&state));
+        let failed = status_of(dir.path(), &SMALL_EN, &locked(&state));
         assert_eq!(failed.state, "failed");
         assert_eq!(failed.error.as_deref(), Some("The download was cut off."));
         assert_eq!(
-            status_of(dir.path(), "de", &locked(&state)).state,
+            status_of(dir.path(), &SMALL, &locked(&state)).state,
             "missing",
-            "another language's failure is not this one's"
+            "another model's failure is not this one's"
+        );
+        // Under Auto the list says which of the two failed.
+        assert_eq!(
+            states(dir.path(), None, &locked(&state)),
+            pairs(&[("small.en", "failed"), ("small", "missing")])
         );
         // Try again claims it anew.
-        assert!(claim(&state, &SMALL_EN));
+        assert!(claim(&state, &[&SMALL_EN]));
         let order = std::cell::RefCell::new(Vec::new());
-        fetch_loop(dir.path(), &|| "en", &installs(&order, &|_| ()), &state).unwrap();
-        let ready = status_of(dir.path(), "en", &locked(&state));
+        fetch_loop(dir.path(), &english, &installs(&order, &|_| ()), &state).unwrap();
+        let ready = status_of(dir.path(), &SMALL_EN, &locked(&state));
         assert_eq!(
             (ready.state.as_str(), ready.received_bytes),
             ("ready", SMALL_EN.size)

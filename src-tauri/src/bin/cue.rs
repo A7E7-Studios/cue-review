@@ -92,7 +92,7 @@ fn execute(store: &Store, command: Command) -> Result<(), String> {
         }
         Command::Setup { install } => print_json(&if install {
             deps::install_transcription()?;
-            deps::fetch_language_model()?;
+            deps::fetch_language_models()?;
             deps::setup_status()
         } else {
             deps::setup_status()

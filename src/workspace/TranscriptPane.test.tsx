@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Transcript } from '../backend';
-import { transcript as phraseTranscript, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from '../stories/fixtures';
+import { germanChosenTranscript, germanRecordingTranscript, germanTwoTakeTranscript, transcript as phraseTranscript, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from '../stories/fixtures';
 import { LIVE_NOTE, TranscriptPane } from './TranscriptPane';
 import type { TranscriptPaneProps } from './types';
 
@@ -108,7 +108,7 @@ describe('TranscriptPane while recording', () => {
   it('shows the Recording chip, the live divider and the provisional tail with inert words', () => {
     render(<TranscriptPane {...props({ mode: 'recording', transcript: liveTranscript, timeMs: 88000, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs } })}/>);
     expect(screen.getByRole('status')).toHaveTextContent('Recording');
-    const divider = screen.getByText('Take 2 · recording');
+    const divider = screen.getByText('Take 2 · recording · detecting language');
     const tail = divider.nextElementSibling!.nextElementSibling!;
     expect(tail).toHaveClass('is-tail');
     expect(tail).toHaveTextContent('Right now it always opens in Documents, and');
@@ -170,10 +170,57 @@ describe('TranscriptPane while recording', () => {
     await waitFor(() => expect(screen.queryByRole('searchbox')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Find in transcript' })).toHaveAttribute('aria-expanded', 'false');
   });
-  it('treats a first recording as one live take without a divider', () => {
-    render(<TranscriptPane {...props({ mode: 'recording', transcript: takeTwoLiveTranscript, timeMs: 8000, status: 'recording' })}/>);
+  it('treats a first recording as one live take, divided only once it has words or a language', () => {
+    const first = (transcript: Transcript) => props({ mode: 'recording', transcript, timeMs: 8000, status: 'recording', languages: SPEECH_LANGUAGES });
+    const { rerender } = render(<TranscriptPane {...first({ segments: [] })}/>);
     expect(screen.queryByText(/Take \d/)).not.toBeInTheDocument();
+    rerender(<TranscriptPane {...first(takeTwoLiveTranscript)}/>);
+    expect(screen.getByText('Take 1 · recording · detecting language')).toBeVisible();
     expect(screen.getByText(LIVE_NOTE)).toBeVisible();
+    // A language chosen in Settings is known from the start.
+    rerender(<TranscriptPane {...first({ segments: [], language: 'de' })}/>);
+    expect(screen.getByText('Take 1 · recording · German')).toBeVisible();
+  });
+  it("names each take's language and whether it was detected", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<TranscriptPane {...props({ transcript: germanTwoTakeTranscript, languages: SPEECH_LANGUAGES })}/>);
+    // Detected by Auto: each take opens with its divider, take 1 included.
+    const first = screen.getByText('Take 1 · 0:00 · German, detected');
+    expect(first.nextElementSibling).toHaveTextContent('Die Bibliothek wirkt klar und leicht zu bedienen.');
+    const second = screen.getByText('Take 2 · 1:20 · English, detected');
+    expect(second.nextElementSibling).toHaveTextContent('Picking this up again: the export dialog needs a progress state.');
+    // The divider is no stop of the roving tab order: Down goes from take 1's last row to take 2's first.
+    expect(first).not.toHaveAttribute('tabindex');
+    expect(first.querySelector('[data-item]')).toBeNull();
+    screen.getByRole('button', { name: 'Seek to 1:10' }).focus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('button', { name: 'Seek to 1:21' })).toHaveFocus();
+
+    // Chosen in Settings: the language alone, on a session of one take too.
+    rerender(<TranscriptPane {...props({ transcript: germanChosenTranscript, languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.getByText('Take 1 · 0:00 · German')).toBeVisible();
+    expect(screen.getAllByText(/^Take \d/)).toHaveLength(1);
+    // A code the list does not name shows the code; a transcript without a language has no divider, as before.
+    rerender(<TranscriptPane {...props({ transcript: { ...phraseTranscript, language: 'xx', languageDetected: true }, languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.getByText('Take 1 · 0:00 · xx, detected')).toBeVisible();
+    rerender(<TranscriptPane {...props({ transcript: phraseTranscript, languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.queryByText(/Take \d/)).not.toBeInTheDocument();
+    // Takes without a language keep the plain "Take N · m:ss" divider.
+    rerender(<TranscriptPane {...props({ languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.getByText('Take 2 · 1:20')).toBeVisible();
+    expect(screen.queryByText(/Take 1/)).not.toBeInTheDocument();
+
+    // While take 2 records it is detecting until its language arrives, then names it in place.
+    const recording = (transcript: Transcript, language?: string) => props({ mode: 'recording', transcript, timeMs: 88000, status: 'recording', languages: SPEECH_LANGUAGES,
+      liveTake: { index: 2, startMs: takeTwoStartMs, language } });
+    rerender(<TranscriptPane {...recording(germanRecordingTranscript)}/>);
+    expect(screen.getByText('Take 1 · 0:00 · German, detected')).toBeVisible();
+    expect(screen.getByText('Take 2 · recording · detecting language')).toBeVisible();
+    rerender(<TranscriptPane {...recording({ ...germanRecordingTranscript, language: 'en', languageDetected: true })}/>);
+    expect(screen.getByText('Take 2 · recording · English, detected')).toBeVisible();
+    expect(screen.queryByText(/detecting language/)).not.toBeInTheDocument();
+    rerender(<TranscriptPane {...recording(germanRecordingTranscript, 'en')}/>);
+    expect(screen.getByText('Take 2 · recording · English')).toBeVisible();
   });
 });
 
