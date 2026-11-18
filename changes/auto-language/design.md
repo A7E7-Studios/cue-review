@@ -49,7 +49,7 @@ first 30 s of the file it is given, printing the top language and its probabilit
 | An unclear start does not decide the language | `src-tauri/src/stretches.rs::tests::an_unconfident_guess_waits_for_more_speech`, `::a_take_without_a_confident_guess_uses_the_likeliest_language`, new |
 | Each take has its own language | `src-tauri/src/transcribe.rs::tests::each_take_is_detected_on_its_own`, new |
 | A chosen language is used without detecting | `src-tauri/src/settings.rs::tests::a_chosen_language_is_used_without_detecting`, replaces `decoding_is_held_to_the_chosen_language` |
-| Transcribing again detects the language again | `src-tauri/src/agent.rs::tests::transcribing_again_detects_the_language_again`, new |
+| Transcribing again detects the language again | `src-tauri/src/agent.rs::tests::transcribing_again_detects_the_language_again`, new; `src-tauri/src/transcribe.rs::tests::a_whole_take_pass_detects_under_auto_and_never_under_a_chosen_language`, new |
 | An upgraded app fetches the models by itself | `src-tauri/src/deps.rs::tests::auto_fetches_both_small_models_english_first`, new; `::a_missing_language_model_falls_back_to_base`, existing |
 | The models are ready; Settings offers Auto and every language | `src/dialogs/SettingsDialog.test.tsx`, two new tests; `src-tauri/src/settings.rs::tests::every_language_of_the_speech_model_can_be_chosen`, new |
 | The transcript names a detected language | `src/workspace/TranscriptPane.test.tsx::names each take's language and whether it was detected`, new |
