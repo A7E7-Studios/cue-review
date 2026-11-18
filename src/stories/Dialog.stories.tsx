@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
 import { backend } from '../backend';
-import type { Settings as AppSettings, Language, SetupStatus } from '../backend';
+import type { Settings as AppSettings, SetupStatus, SpeechLanguage } from '../backend';
 import type { WindowTheme } from '../chrome/windowApi';
 import { SettingsDialog } from '../dialogs/SettingsDialog';
 import { Dialog } from '../ui/Dialog';
-import { configureLanguageModel, configureScenario } from './backend.fixture';
+import { configureLanguageModels, configureScenario } from './backend.fixture';
 
 type Props = { busy: boolean; error: boolean; destructive: boolean; initiallyOpen: boolean };
 function DialogExample({ busy, error, destructive, initiallyOpen }: Props) {
@@ -30,20 +30,23 @@ function DialogExample({ busy, error, destructive, initiallyOpen }: Props) {
     </Dialog>
   </div>;
 }
-type SettingsProps = { scenario?: 'fresh' | 'setup'; desktop?: boolean; installing?: boolean; error?: string; vocabulary?: string; language?: Language; model?: Parameters<typeof configureLanguageModel>[1] };
+/** `language` absent is Auto; `models` sets the states of the models it needs (a model not named is ready). */
+type SettingsProps = { scenario?: 'fresh' | 'setup'; desktop?: boolean; installing?: boolean; error?: string; vocabulary?: string; language?: string; models?: Parameters<typeof configureLanguageModels>[1] };
 // The real Settings dialog over the workshop backend: saving, setup checks,
-// installation and the language model's download change only in-memory fixtures.
-function SettingsExample({ scenario = 'fresh', desktop = true, installing: startInstalling = false, error, vocabulary, language, model }: SettingsProps) {
-  useState(() => { configureScenario(scenario); if (model) configureLanguageModel(language, model); return true; });
+// installation and the language models' downloads change only in-memory fixtures.
+function SettingsExample({ scenario = 'fresh', desktop = true, installing: startInstalling = false, error, vocabulary, language, models }: SettingsProps) {
+  useState(() => { configureScenario(scenario); configureLanguageModels(language, models); return true; });
   const [open, setOpen] = useState(true);
   const [theme, setTheme] = useState<WindowTheme>(() => document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [languages, setLanguages] = useState<SpeechLanguage[]>([]);
   const [installing, setInstalling] = useState(startInstalling);
   const [problem, setProblem] = useState(error ?? '');
   const launcher = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (desktop) void backend.setup().then(setSetup);
+    void backend.languages().then(setLanguages);
     void backend.settings().then(current => vocabulary === undefined ? current : backend.saveSettings({ ...current, vocabulary })).then(setSettings);
   }, [desktop, vocabulary]);
   const install = async () => {
@@ -54,13 +57,13 @@ function SettingsExample({ scenario = 'fresh', desktop = true, installing: start
   };
   return <div className="workshop-dialog-launcher">
     <button ref={launcher} className="primary" onClick={() => setOpen(true)}>Open settings</button>
-    <p>Appearance changes this workshop page. Language and vocabulary save to an in-memory sample; validation matches the desktop app, and a new language's model downloads in a few seconds.</p>
+    <p>Appearance changes this workshop page. Language and vocabulary save to an in-memory sample; validation matches the desktop app, and a model a new language needs downloads in a few seconds.</p>
     {settings && <p role="note">Saved vocabulary: {settings.vocabulary ?? 'none'}</p>}
     <SettingsDialog open={open} onClose={() => setOpen(false)} fallbackFocusRef={launcher}
       theme={theme} onTheme={next => { setTheme(next); document.documentElement.dataset.theme = next; }}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup)}
-      onPollLanguageModel={async () => { if (!desktop) return; const model = await backend.languageModel(); setSetup(current => current && { ...current, languageModel: model ?? undefined }); }}
-      onDownloadLanguageModel={backend.downloadLanguageModel}
+      onPollLanguageModels={async () => { if (!desktop) return; const models = await backend.languageModels(); setSetup(current => current && { ...current, languageModels: models }); }}
+      onDownloadLanguageModels={backend.downloadLanguageModels} languages={languages}
       settings={settings} onSaveSettings={async next => setSettings(await backend.saveSettings(next))} error={problem}/>
   </div>;
 }
@@ -101,12 +104,32 @@ export const SettingsInstalling: Story = settingsStory({ scenario: 'setup', inst
 export const SettingsInstallFailed: Story = settingsStory({ scenario: 'setup', error: 'Download failed. Check your connection and retry.' });
 export const SettingsWithVocabulary: Story = settingsStory({ vocabulary: 'CueReview, Tauri, Figtree, Nadia Okafor, Quest 3' });
 export const SettingsOutsideDesktop: Story = settingsStory({ desktop: false });
-export const SettingsModelReady: Story = settingsStory({ language: 'en', model: { state: 'ready', receivedBytes: 0 } });
-export const SettingsModelDownloading: Story = settingsStory({ language: 'de', model: { state: 'downloading', receivedBytes: 212_000_000 } });
-export const SettingsModelFailed: Story = settingsStory({ language: 'en', model: { state: 'failed', receivedBytes: 0, error: 'The download was cut off.' } });
-export const SettingsModelMissing: Story = settingsStory({ language: 'en', model: { state: 'missing', receivedBytes: 0 } });
-/** Before transcription is installed: no download to start, and installing fetches the model. */
-export const SettingsModelBeforeInstall: Story = settingsStory({ scenario: 'setup', language: 'de', model: { state: 'missing', receivedBytes: 0 } });
+/** Auto, the default: both small models ready. */
+export const SettingsModelReady: Story = settingsStory();
+/** Auto while the multilingual model downloads; the English one is ready. */
+export const SettingsModelDownloading: Story = settingsStory({ models: { small: { state: 'downloading', receivedBytes: 212_000_000 } } });
+/** German chosen while its model, the multilingual one, downloads. */
+export const SettingsGermanDownloading: Story = settingsStory({ language: 'de', models: { small: { state: 'downloading', receivedBytes: 212_000_000 } } });
+export const SettingsModelFailed: Story = settingsStory({ models: { small: { state: 'failed', receivedBytes: 0, error: 'The download was cut off.' } } });
+export const SettingsModelMissing: Story = settingsStory({ language: 'en', models: { 'small.en': { state: 'missing', receivedBytes: 0 } } });
+/** A language chosen in Settings: every take is held to it. */
+export const SettingsFixedLanguage: Story = settingsStory({ language: 'pl' });
+/** Before transcription is installed: no download to start, and installing fetches the models. */
+export const SettingsModelBeforeInstall: Story = settingsStory({ scenario: 'setup', language: 'de', models: { small: { state: 'missing', receivedBytes: 0 } } });
+/** The Language list: Auto first, then English and German, then every other language by name. */
+export const SettingsLanguageList: Story = {
+  ...settingsStory(),
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const select = await page.findByRole<HTMLSelectElement>('combobox', { name: 'Language' });
+    await waitFor(() => expect(select.options.length).toBeGreaterThan(90));
+    await expect([...select.options].slice(0, 6).map(option => option.label)).toEqual(['Auto', 'English', 'German', 'Afrikaans', 'Albanian', 'Amharic']);
+    await expect(select).toHaveValue('');
+    // Opening the list needs a real click; where the browser allows it without one, it opens here.
+    select.focus();
+    try { select.showPicker(); } catch { /* A user gesture is required: click the select to see the list. */ }
+  },
+};
 export const SettingsVocabularyValidation: Story = {
   ...settingsStory(),
   play: async ({ canvasElement }) => {

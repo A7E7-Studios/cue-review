@@ -72,8 +72,9 @@ export function liveTake(status: RecordingStatus): TakeMark | undefined {
 
 /**
  * What the transcript shows while recording. A first recording shows its live transcript.
- * A later take shows the saved takes before it, then its own live words, which the backend
- * already times on the session timeline.
+ * A later take shows the saved takes before it, each with its language (a saved session of
+ * one take carries its language on the transcript), then its own live words, which the backend
+ * already times on the session timeline. The transcript's own language is then the live take's.
  */
 export function recordingTranscript(saved: Transcript, status: RecordingStatus): Transcript {
   const live = status.liveTranscript;
@@ -84,7 +85,9 @@ export function recordingTranscript(saved: Transcript, status: RecordingStatus):
     ...saved,
     status: live?.status,
     error: live?.error,
-    takes: earlier?.length ? earlier : [{ index: 1, startMs: 0 }],
+    language: live?.language,
+    languageDetected: live?.languageDetected,
+    takes: earlier?.length ? earlier : [{ index: 1, startMs: 0, language: saved.language, languageDetected: saved.languageDetected }],
     segments: [...saved.segments.filter(segment => segment.startMs < take.startMs), ...(live?.segments ?? [])],
   };
 }

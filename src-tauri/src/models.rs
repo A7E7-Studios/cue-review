@@ -161,11 +161,31 @@ pub struct Take {
 /// Start of a take on the session timeline, used for the
 /// "Take N · m:ss" divider. A transcript lists one mark per take, in order,
 /// with take 1 at 0.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TakeMark {
     pub index: u32,
     pub start_ms: u64,
+    /// The language the take was transcribed in. `None` for a take without
+    /// words and in transcripts saved before takes kept their language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Whether Auto found `language`; false when it was chosen in Settings.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub language_detected: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A language the speech model knows, for the list in Settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Language {
+    /// Whisper's code, for example `"de"`.
+    pub code: String,
+    /// Its English name, for example `"German"`.
+    pub name: String,
 }
 
 /// App-wide preferences stored in `<root>/settings.json`, shared by the app
@@ -176,8 +196,9 @@ pub struct Settings {
     /// Terms passed to Whisper as a prompt. `None` keeps the prompt off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
-    /// The language every transcription is held to: `"en"` or `"de"`.
-    /// `None` means English.
+    /// The language every take is held to, one of the speech model's codes
+    /// (`"en"`, `"de"`, ...). `None` means Auto: each take's language is
+    /// detected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 }
@@ -205,7 +226,12 @@ pub struct Segment {
 #[serde(rename_all = "camelCase")]
 pub struct Transcript {
     pub segments: Vec<Segment>,
+    /// The language the words were transcribed in. In a session with takes
+    /// it is the first take's, and each take's own is on its [`TakeMark`].
     pub language: Option<String>,
+    /// Whether Auto found `language`; false when it was chosen in Settings.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub language_detected: bool,
     pub status: Option<String>,
     pub error: Option<String>,
     /// Where each take starts on the session timeline. Empty for sessions
@@ -279,18 +305,18 @@ pub struct SetupStatus {
     pub dependencies: Vec<Dependency>,
     pub model_ready: bool,
     pub model_path: Option<String>,
-    /// The chosen language's model; `None` when `CUEREVIEW_MODEL` replaces it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub language_model: Option<LanguageModel>,
+    /// The models the chosen language needs, in download order: both small
+    /// models for Auto. Empty when `CUEREVIEW_MODEL` replaces them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub language_models: Vec<LanguageModel>,
 }
 
-/// The state of the chosen language's speech model, for Settings and `cue setup`.
+/// The state of one speech model the chosen language needs, for Settings and
+/// `cue setup`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageModel {
-    /// `"en"` or `"de"`.
-    pub language: String,
-    /// The model's name, for example `"small.en"`.
+    /// The model's name: `"small.en"` or `"small"`.
     pub model: String,
     /// `"ready"`, `"downloading"`, `"failed"` or `"missing"`.
     pub state: String,
@@ -306,19 +332,43 @@ mod tests {
     use crate::store::Store;
     use serde_json::json;
     #[test]
-    fn the_language_model_is_reported_in_camel_case() {
-        let status = LanguageModel {
-            language: "de".into(),
-            model: "small".into(),
-            state: "downloading".into(),
-            received_bytes: 5,
-            total_bytes: 487_601_967,
+    fn the_language_models_are_reported_in_camel_case() {
+        let model = |model: &str, state: &str, received_bytes, total_bytes| LanguageModel {
+            model: model.into(),
+            state: state.into(),
+            received_bytes,
+            total_bytes,
             error: None,
         };
+        let mut status = SetupStatus {
+            ready: true,
+            issues: Vec::new(),
+            dependencies: Vec::new(),
+            model_ready: true,
+            model_path: None,
+            language_models: vec![
+                model("small.en", "ready", 487_614_201, 487_614_201),
+                model("small", "downloading", 5, 487_601_967),
+            ],
+        };
         assert_eq!(
-            serde_json::to_value(&status).unwrap(),
-            json!({"language":"de","model":"small","state":"downloading","receivedBytes":5,"totalBytes":487_601_967u64})
+            serde_json::to_value(&status).unwrap()["languageModels"],
+            json!([
+                {"model":"small.en","state":"ready","receivedBytes":487_614_201u64,"totalBytes":487_614_201u64},
+                {"model":"small","state":"downloading","receivedBytes":5,"totalBytes":487_601_967u64}
+            ])
         );
+        status.language_models[1].state = "failed".into();
+        status.language_models[1].error = Some("The download was cut off.".into());
+        let failed = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            failed["languageModels"][1]["error"],
+            json!("The download was cut off.")
+        );
+        // A custom model replaces them: the list is left out.
+        status.language_models.clear();
+        let custom = serde_json::to_value(&status).unwrap();
+        assert!(custom.get("languageModels").is_none() && custom.get("languageModel").is_none());
     }
 
     // Byte-for-byte what v0.1.0 writes through `store::write_json`
@@ -516,17 +566,40 @@ mod tests {
             assert_eq!(serde_json::to_value(status).unwrap(), json!(name));
         }
 
-        let transcript = Transcript {
+        let mut transcript = Transcript {
             takes: vec![TakeMark {
                 index: 2,
                 start_ms: 134000,
+                ..Default::default()
             }],
             ..Default::default()
         };
+        let value = serde_json::to_value(&transcript).unwrap();
+        assert_eq!(value["takes"], json!([{"index":2,"startMs":134000}]));
+        assert!(value.get("languageDetected").is_none());
+        // A take's language, and whether Auto found it.
+        transcript.language = Some("de".into());
+        transcript.language_detected = true;
+        transcript.takes[0].language = Some("en".into());
+        transcript.takes.push(TakeMark {
+            index: 3,
+            start_ms: 150000,
+            language: Some("de".into()),
+            language_detected: true,
+        });
+        let value = serde_json::to_value(&transcript).unwrap();
         assert_eq!(
-            serde_json::to_value(&transcript).unwrap()["takes"],
-            json!([{"index":2,"startMs":134000}])
+            (&value["language"], &value["languageDetected"]),
+            (&json!("de"), &json!(true))
         );
+        assert_eq!(
+            value["takes"],
+            json!([{"index":2,"startMs":134000,"language":"en"},
+                {"index":3,"startMs":150000,"language":"de","languageDetected":true}])
+        );
+        let restored: Transcript = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.takes, transcript.takes);
+        assert!(restored.language_detected);
 
         let mut status = RecordingStatus {
             state: "idle".into(),
@@ -556,6 +629,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
+        );
+        assert_eq!(
+            serde_json::to_value(Language {
+                code: "de".into(),
+                name: "German".into()
+            })
+            .unwrap(),
+            json!({"code":"de","name":"German"})
         );
     }
 }

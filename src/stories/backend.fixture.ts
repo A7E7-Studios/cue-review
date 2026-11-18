@@ -1,5 +1,5 @@
-import type { backend as RealBackend, CaptureSource, Language, LanguageModel, Marker, Microphone, Project, RecordingStatus, Session, Settings, SetupStatus } from '../backend';
-import { date, previewImage, sections, sessions, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript, WINDOW_CLOSED } from './fixtures';
+import type { backend as RealBackend, CaptureSource, LanguageModel, Marker, Microphone, Project, RecordingStatus, Session, Settings, SetupStatus } from '../backend';
+import { date, previewImage, sections, sessions, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, transcript, twoTakeSession, twoTakeTranscript, WINDOW_CLOSED } from './fixtures';
 
 const sampleVideo = new URL('./sample-capture.webm', import.meta.url).href;
 // 'takes' opens the library session with two takes; 'recording-take' records its take 2.
@@ -12,27 +12,45 @@ let settings: Settings = {};
 let status: RecordingStatus = { state: 'idle' };
 let scenario: Scenario = 'fresh';
 let sequence = 0;
-// The chosen language's model, as `get_setup_status` and `get_language_model` report it. A download
-// the workshop starts moves on with each read; a configured one stays where it is, for a steady look.
-// Before transcription is installed ('setup'), the model waits and its download is refused.
-const MODELS: Record<Language, { model: string; totalBytes: number }> = { en: { model: 'small.en', totalBytes: 487_614_201 }, de: { model: 'small', totalBytes: 487_601_967 } };
+// The models the chosen language needs, as `get_setup_status` and `get_language_models` report them:
+// Auto both, English small.en, any other language small. A download the workshop starts moves on with
+// each read, one model at a time in order; a configured one stays where it is, for a steady look.
+// Before transcription is installed ('setup'), a missing model waits and its download is refused.
+type ModelId = LanguageModel['model'];
+const TOTAL_BYTES: Record<ModelId, number> = { 'small.en': 487_614_201, small: 487_601_967 };
 type ModelState = Pick<LanguageModel, 'state' | 'receivedBytes' | 'error'> & { advancing?: boolean };
-let modelState: ModelState = { state: 'ready', receivedBytes: 0 };
-const languageModel = (): LanguageModel => {
-  const language = settings.language ?? 'en';
-  const { model, totalBytes } = MODELS[language];
-  if (modelState.state === 'downloading' && modelState.advancing) {
-    const receivedBytes = modelState.receivedBytes + 31_000_000;
-    modelState = receivedBytes >= totalBytes ? { state: 'ready', receivedBytes: totalBytes } : { ...modelState, receivedBytes };
+const READY: ModelState = { state: 'ready', receivedBytes: 0 };
+let modelStates: Record<ModelId, ModelState> = { 'small.en': READY, small: READY };
+const needed = (language?: string): ModelId[] => language === undefined ? ['small.en', 'small'] : language === 'en' ? ['small.en'] : ['small'];
+const languageModels = (): LanguageModel[] => {
+  const models = needed(settings.language);
+  const advancing = models.find(model => modelStates[model].state === 'downloading' && modelStates[model].advancing);
+  if (advancing) {
+    const receivedBytes = modelStates[advancing].receivedBytes + 31_000_000;
+    modelStates[advancing] = receivedBytes >= TOTAL_BYTES[advancing] ? READY : { ...modelStates[advancing], receivedBytes };
+    // The next missing model follows once one finishes.
+    const next = models.find(model => modelStates[model].state === 'missing');
+    if (modelStates[advancing].state === 'ready' && next && scenario !== 'setup') modelStates[next] = { state: 'downloading', receivedBytes: 0, advancing: true };
   }
-  const { state, receivedBytes, error } = modelState;
-  return { language, model, state, receivedBytes: state === 'ready' ? totalBytes : receivedBytes, totalBytes, error };
+  return models.map(model => {
+    const { state, receivedBytes, error } = modelStates[model];
+    return { model, state, receivedBytes: state === 'ready' ? TOTAL_BYTES[model] : receivedBytes, totalBytes: TOTAL_BYTES[model], error };
+  });
 };
-/** The Settings stories' language and its model: ready, downloading at `receivedBytes`, failed with `error`, or missing. */
-export function configureLanguageModel(language: Language | undefined, state: ModelState) {
+/** The Settings stories' language (undefined is Auto) and the states of the models it needs; a model not named is ready. */
+export function configureLanguageModels(language: string | undefined, states: Partial<Record<ModelId, ModelState>> = {}) {
   settings = { ...settings, language };
-  modelState = { ...state };
+  modelStates = { 'small.en': READY, small: READY, ...states };
 }
+/** Starts every model the language needs that is not ready, the first at once and the rest after it. */
+const fetchModels = () => {
+  const waiting = needed(settings.language).filter(model => modelStates[model].state !== 'ready');
+  const running = waiting.find(model => modelStates[model].state === 'downloading');
+  waiting.forEach((model, index) => {
+    if (model === running) modelStates[model] = { ...modelStates[model], advancing: true };
+    else modelStates[model] = !running && index === 0 ? { state: 'downloading', receivedBytes: 0, advancing: true } : { state: 'missing', receivedBytes: 0 };
+  });
+};
 let cameraAttempts = 0;
 const clone = <T,>(value: T): T => structuredClone(value);
 const find = (id: string) => {
@@ -53,7 +71,7 @@ export function configureScenario(next: Scenario) {
   recordings = clone(sessions);
   markers = [];
   settings = {};
-  modelState = { state: 'ready', receivedBytes: 0 };
+  modelStates = { 'small.en': READY, small: READY };
   sequence = 0;
   cameraAttempts = 0;
   status = { state: 'idle' };
@@ -101,7 +119,7 @@ export const backend = {
     { id: 'camera', name: 'Studio camera with a very long device name', kind: 'camera', available: false },
   ],
   microphones: async (): Promise<Microphone[]> => [{ id: 'microphone', name: 'Studio microphone' }, { id: 'headset', name: 'Headset microphone' }],
-  setup: async (): Promise<SetupStatus> => ({ ready: scenario !== 'setup', modelReady: scenario !== 'setup', issues: scenario === 'setup' ? ['Local speech model is missing.'] : [], dependencies: ['ffmpeg', 'ffprobe', 'whisper-cli', 'whisper-vad-speech-segments', 'adb', 'scrcpy'].map(name => ({ name, available: true })), languageModel: languageModel() }),
+  setup: async (): Promise<SetupStatus> => ({ ready: scenario !== 'setup', modelReady: scenario !== 'setup', issues: scenario === 'setup' ? ['Local speech model is missing.'] : [], dependencies: ['ffmpeg', 'ffprobe', 'whisper-cli', 'whisper-vad-speech-segments', 'adb', 'scrcpy'].map(name => ({ name, available: true })), languageModels: languageModels() }),
   preview: async (source: string, id: string) => {
     if (source === 'avfoundation:0' && cameraAttempts++ === 0) {
       if (scenario === 'camera-blocked') throw new Error('Camera access is blocked. Allow camera access in macOS System Settings, then retry.');
@@ -148,18 +166,21 @@ export const backend = {
   handoff: async () => 'Storybook sample only. No recording files are created or accessible.',
   openFolder: async () => { throw new Error('Sample recordings have no local folder.'); },
   retry: async () => {},
-  // As the app does, installing transcription goes on to fetch a missing language model.
-  installTranscription: async () => { scenario = 'fresh'; if (modelState.state !== 'ready') modelState = { state: 'downloading', receivedBytes: 0, advancing: true }; },
-  languageModel: async (): Promise<LanguageModel | null> => languageModel(),
-  downloadLanguageModel: async () => {
-    if (scenario === 'setup') throw new Error('Install transcription first, then the language model downloads by itself.');
-    modelState = { state: 'downloading', receivedBytes: 0, advancing: true };
+  // As the app does, installing transcription goes on to fetch the missing language models.
+  installTranscription: async () => { scenario = 'fresh'; fetchModels(); },
+  languages: async () => clone(SPEECH_LANGUAGES),
+  languageModels: async (): Promise<LanguageModel[]> => languageModels(),
+  downloadLanguageModels: async () => {
+    if (scenario === 'setup') throw new Error('Install transcription first, then the language models download by themselves.');
+    fetchModels();
   },
   settings: async () => clone(settings),
-  // As the app does, a new language starts fetching its model.
+  // As the app does, a new language starts fetching the models it needs that are not installed.
   saveSettings: async (next: Settings) => {
-    if ((next.language ?? 'en') !== (settings.language ?? 'en')) modelState = scenario === 'setup' ? { state: 'missing', receivedBytes: 0 } : { state: 'downloading', receivedBytes: 0, advancing: true };
-    settings = clone(next); return clone(settings);
+    const changed = next.language !== settings.language;
+    settings = clone(next);
+    if (changed && scenario !== 'setup') fetchModels();
+    return clone(settings);
   },
 } satisfies typeof RealBackend;
 export const videoUrl = (path: string) => path;

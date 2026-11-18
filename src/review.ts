@@ -1,4 +1,4 @@
-import type { Segment, TakeMark, Word } from './backend';
+import type { Segment, SpeechLanguage, TakeMark, Word } from './backend';
 export function formatTime(ms: number): string {
   const seconds = Math.floor(Math.max(0, Number.isFinite(ms) ? ms : 0) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -79,21 +79,48 @@ export function stillHeard(segment: Segment): boolean {
   return !!segment.id?.startsWith(LIVE_SEGMENT_PREFIX);
 }
 
+/** A take's language as a divider names it: its code and whether Auto detected it. */
+export interface TakeLanguage { language?: string; languageDetected?: boolean }
+/** A language code's English name, or the code itself when the speech model's list does not name it. */
+export function languageName(code: string, languages: SpeechLanguage[] = []): string {
+  return languages.find(item => item.code === code)?.name ?? code;
+}
+/** "German, detected" for a language Auto found, "German" for one chosen in Settings. */
+export function takeLanguageLabel({ language, languageDetected }: TakeLanguage, languages: SpeechLanguage[] = []): string | undefined {
+  if (!language) return undefined;
+  const name = languageName(language, languages);
+  return languageDetected ? `${name}, detected` : name;
+}
+
 export type TranscriptItem =
-  /** "Take N · m:ss", or "Take N · recording" for the take being recorded. */
-  | { kind: 'divider'; take: number; startMs: number; live: boolean }
+  /**
+   * "Take N · m:ss", or "Take N · recording" for the take being recorded, followed by the take's
+   * language when it is known; `detecting` while the take records with words and no language yet.
+   */
+  | { kind: 'divider'; take: number; startMs: number; live: boolean; language?: string; languageDetected?: boolean; detecting?: boolean }
   /** `live` rows belong to the take being recorded; `tail` is its words still being heard. */
   | { kind: 'segment'; index: number; live: boolean; tail: boolean };
+type Divider = Extract<TranscriptItem, { kind: 'divider' }>;
 /**
  * Segments in order with a divider before the first segment of each take after
- * take 1. While a take records, pass it as `liveTake`: its segments are live, its
- * segment of words still being heard (a last `live-` one, see `Segment`) is the tail, and
- * its divider is shown even before it has any words.
+ * take 1, and before take 1 too once its language is known. A session of one take
+ * (no marks after take 1) takes its language from `own`, the transcript's own.
+ * While a take records, pass it as `liveTake`: its segments are live, its
+ * segment of words still being heard (a last `live-` one, see `Segment`) is the tail;
+ * its language is its mark's or else `own`. A later take's divider is shown even
+ * before it has any words, a first recording's once it has words or a language.
  */
-export function transcriptItems(segments: Segment[], takes: TakeMark[] = [], liveTake?: TakeMark): TranscriptItem[] {
-  const dividers = takes.filter(take => take.index > 1 && take.index !== liveTake?.index)
-    .map(take => ({ kind: 'divider' as const, take: take.index, startMs: take.startMs, live: false }));
-  if (liveTake && liveTake.index > 1) dividers.push({ kind: 'divider', take: liveTake.index, startMs: liveTake.startMs, live: true });
+export function transcriptItems(segments: Segment[], takes: TakeMark[] = [], liveTake?: TakeMark, own: TakeLanguage = {}): TranscriptItem[] {
+  const single = !takes.some(take => take.index > 1);
+  const dividers: Divider[] = takes.filter(take => take.index !== liveTake?.index && (take.index > 1 || take.language))
+    .map(take => ({ kind: 'divider', take: take.index, startMs: take.startMs, live: false, language: take.language, languageDetected: take.language ? take.languageDetected : undefined }));
+  const markOne = takes.find(take => take.index === 1);
+  if (single && !liveTake && !markOne?.language && own.language) dividers.push({ kind: 'divider', take: 1, startMs: markOne?.startMs ?? 0, live: false, language: own.language, languageDetected: own.languageDetected });
+  if (liveTake) {
+    const { language, languageDetected } = liveTake.language ? liveTake : own;
+    const heard = segments.some(segment => segment.startMs >= liveTake.startMs);
+    if (liveTake.index > 1 || language || heard) dividers.push({ kind: 'divider', take: liveTake.index, startMs: liveTake.startMs, live: true, language, languageDetected: language ? languageDetected : undefined, detecting: !language && heard });
+  }
   dividers.sort((a, b) => a.startMs - b.startMs || a.take - b.take);
   const lastLive = liveTake ? segments.reduce((last, segment, index) => segment.startMs >= liveTake.startMs ? index : last, -1) : -1;
   const items: TranscriptItem[] = [];

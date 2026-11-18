@@ -59,6 +59,11 @@
   /* A tint of the text colour, so the row stands out on the light and the dark list alike. */
   .settings-dialog option:hover, .settings-dialog option:focus-visible { background: color-mix(in srgb, var(--color-text) 8%, transparent); outline: none; }
   .settings-dialog option::checkmark { order: 1; margin-left: auto; content: '✓'; color: var(--color-accent-text); }
+  /* The Language list: wider than its select and ending at its right edge, in groups (Auto, English and
+     German, every other language), with Auto's hint after its name. */
+  .settings-dialog .settings-language::picker(select) { width: 232px; max-height: min(420px, 60vh); position-area: block-end span-inline-start; }
+  .settings-dialog select hr { width: calc(100% - 16px); margin: 4px 8px; border: 0; border-top: 1px solid var(--color-divider); }
+  .settings-dialog option[data-hint]::after { content: attr(data-hint); color: var(--color-text-tertiary); font-size: var(--font-size-meta); }
 }
 .settings-dialog textarea::placeholder { color: var(--color-text-tertiary); opacity: 1; }
 .settings-dialog select:focus-visible,
