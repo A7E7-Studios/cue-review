@@ -2,16 +2,24 @@
 title: Speech runtime
 code:
   - scripts/build-speech-runtime.mjs
+  - scripts/package.mjs
   - scripts/verify-bundle.mjs
   - src-tauri/src/deps.rs
   - src-tauri/src/transcribe.rs
+  - src-tauri/src/settings.rs
+  - src-tauri/src/models.rs
+  - src-tauri/src/lib.rs
+  - src-tauri/src/bin/cue.rs
+  - src/backend.ts
+  - src/dialogs/SettingsDialog.tsx
 ---
 # Speech runtime
 
 ## Purpose
 
 The local speech engine that turns a recording's audio into words on the person's own computer:
-which build of it runs and how much of the processor it may use.
+which build of it runs, whether on the processor or a graphics card, and how much of the processor
+it may use.
 
 ## Requirements
 
@@ -52,3 +60,81 @@ a small processor must not get fewer threads than whisper's own defaults.
 - **THEN** a final transcription uses 2, 4, 4 or 8 threads
 - **AND** a live transcription uses 2, 2, 2 or 4 threads
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::thread_counts_follow_the_processor
+
+### Requirement: Transcription runs on the fastest device of the computer
+The app SHALL, on Windows, time a short speech sample once on each graphics card and on the
+processor, and transcribe on whichever was fastest, while recording and after Stop, because a fast
+graphics card transcribes several times sooner than the processor (ten minutes of German in 15 s
+against 57 s) while a weak integrated one is slower than it (148 s).
+
+#### Scenario: A fast graphics card transcribes
+- **GIVEN** a computer whose graphics card measured faster than its processor
+- **WHEN** a take is transcribed, while it records or after Stop
+- **THEN** the transcription runs on that graphics card
+- **PROOF** test: src-tauri/src/deps.rs::tests::the_fastest_measured_device_transcribes
+- **PROOF** test: src-tauri/src/transcribe.rs::tests::actual_graphics_card_transcribes_and_keeps_word_timing
+- **PROOF** desk: open
+
+#### Scenario: A slow graphics card is left alone
+- **GIVEN** a computer whose only graphics card measured slower than its processor
+- **WHEN** a take is transcribed
+- **THEN** the transcription runs on the processor, as fast as it does today
+- **PROOF** test: src-tauri/src/deps.rs::tests::the_fastest_measured_device_transcribes
+
+#### Scenario: The devices are measured once, in the background
+- **GIVEN** the first start after an install or update, or after the graphics card or its driver
+  changed
+- **WHEN** the app starts
+- **THEN** it measures the devices in the background while recording and transcription keep working
+  on the processor
+- **AND** later starts use the saved result without measuring again
+- **PROOF** test: src-tauri/src/deps.rs::tests::devices_are_measured_again_only_when_the_computer_changed
+- **PROOF** desk: open
+
+#### Scenario: A computer without a usable graphics card works as before
+- **GIVEN** a computer without a graphics card the speech runtime can use, or without the graphics
+  build of the runtime
+- **WHEN** the app starts and a take is transcribed
+- **THEN** the transcription runs on the processor with the build its processor supports, and
+  nothing reports an error
+- **PROOF** test: src-tauri/src/deps.rs::tests::no_usable_graphics_card_means_the_processor_build
+
+### Requirement: A graphics-card failure never costs a transcript
+The app SHALL transcribe the same audio again on the processor when a run on the graphics card
+fails or turns out not to have used the card, and keep to the processor until the devices are
+measured again, because graphics drivers crash in ways the app cannot foresee and a take must not
+lose its transcript to one.
+
+#### Scenario: A failed graphics-card run is repeated on the processor
+- **GIVEN** a computer that transcribes on its graphics card
+- **WHEN** a transcription on the graphics card crashes or ends with an error
+- **THEN** the same audio is transcribed on the processor and the take gets its transcript
+- **AND** the transcriptions after it run on the processor
+- **PROOF** test: src-tauri/src/transcribe.rs::tests::a_failed_graphics_card_run_is_repeated_on_the_processor
+
+### Requirement: The person sees where transcription runs and can keep it off the graphics card
+Settings SHALL name the device transcription runs on and offer a switch that keeps it on the
+processor, and `cue setup` SHALL report the device, because transcribing on the graphics card can
+disturb a game or headset app under review, and the person needs to see and undo that.
+
+#### Scenario: Settings names the device
+- **GIVEN** a computer that transcribes on its graphics card
+- **WHEN** the person opens Settings
+- **THEN** Settings names that graphics card as the device transcription runs on
+- **AND** on a computer that transcribes on the processor it names the processor
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::names the device transcription runs on
+- **PROOF** desk: open
+
+#### Scenario: The switch keeps transcription on the processor
+- **GIVEN** a computer that transcribes on its graphics card
+- **WHEN** the person turns the graphics card off for transcription in Settings
+- **THEN** every transcription from then on runs on the processor, while recording too, and the
+  choice is kept across restarts
+- **PROOF** test: src-tauri/src/deps.rs::tests::the_switch_keeps_transcription_on_the_processor
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::turns the graphics card off for transcription
+- **PROOF** desk: open
+
+#### Scenario: An agent reads the device
+- **WHEN** an agent runs `cue setup`
+- **THEN** the output names the device transcription runs on and whether it is a graphics card
+- **PROOF** test: src-tauri/src/models.rs::tests::the_transcription_device_is_reported_in_camel_case
