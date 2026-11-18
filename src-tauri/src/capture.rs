@@ -3,7 +3,7 @@
 use crate::cursor;
 use crate::{
     deps,
-    models::{CaptureConfig, CaptureSource, Microphone},
+    models::{CaptureConfig, CaptureSource, Microphone, Track},
     touch,
 };
 use base64::Engine;
@@ -1626,6 +1626,27 @@ struct AudioTrack {
     writer: Arc<Mutex<AudioWriter>>,
     path: PathBuf,
 }
+/// A track being recorded, as a snapshot reads it: which one, its file and
+/// the writer whose lock makes the file consistent.
+struct LiveTrack {
+    track: Track,
+    path: PathBuf,
+    writer: Arc<Mutex<AudioWriter>>,
+}
+/// Copies the live `track` of `tracks` from `from_ms` (at most 60 s of it)
+/// into `target`. Returns the copy's bounds in ms from the track's start.
+fn snapshot_live_track(
+    tracks: &[LiveTrack],
+    track: Track,
+    from_ms: u64,
+    target: &Path,
+) -> Result<(u64, u64), String> {
+    let live = tracks
+        .iter()
+        .find(|live| live.track == track)
+        .ok_or_else(|| format!("No live {} track is being recorded", track.name()))?;
+    snapshot_track(&live.path, &live.writer, target, Some(from_ms))
+}
 /// Copies the live track into `target`: from `from_ms` (at most 60 s of it),
 /// or the latest 30 s when `from_ms` is `None`. Returns the copy's bounds in
 /// ms from the track's start.
@@ -1806,7 +1827,8 @@ fn audio_track(
 struct AudioWorker {
     stop: mpsc::Sender<Duration>,
     join: Option<JoinHandle<Result<(), String>>>,
-    snapshot_source: Option<(PathBuf, Arc<Mutex<AudioWriter>>)>,
+    /// The tracks being recorded, the microphone first.
+    live: Vec<LiveTrack>,
 }
 impl AudioWorker {
     fn start(
@@ -1822,7 +1844,7 @@ impl AudioWorker {
         let (stop, rx) = mpsc::channel();
         let (ready, ready_rx) = mpsc::sync_channel(1);
         let join = thread::spawn(move || {
-            let initialize = || -> Result<Vec<AudioTrack>, String> {
+            let initialize = || -> Result<Vec<(Track, AudioTrack)>, String> {
                 let host = cpal::default_host();
                 let mut tracks = Vec::new();
                 if let Some(id) = config.microphone_id.as_deref() {
@@ -1834,42 +1856,54 @@ impl AudioWorker {
                             .find(|d| d.name().ok().as_deref() == Some(id))
                     }
                     .ok_or("Selected microphone is unavailable")?;
-                    tracks.push(audio_track(
-                        device,
-                        &folder.join("mic.wav"),
-                        false,
-                        epoch,
-                        muted.clone(),
-                        level.clone(),
-                        error.clone(),
-                    )?);
+                    tracks.push((
+                        Track::Microphone,
+                        audio_track(
+                            device,
+                            &folder.join(Track::Microphone.file()),
+                            false,
+                            epoch,
+                            muted.clone(),
+                            level.clone(),
+                            error.clone(),
+                        )?,
+                    ));
                 }
                 if config.system_audio && !config.source_id.starts_with("android:") {
                     let device = host
                         .default_output_device()
                         .ok_or("No default playback device for system audio")?;
                     // WASAPI transparently enables loopback for an output device used as input.
-                    tracks.push(audio_track(
-                        device,
-                        &folder.join("system.wav"),
-                        true,
-                        epoch,
-                        muted.clone(),
-                        if config.microphone_id.is_none() {
-                            level.clone()
-                        } else {
-                            Arc::new(AtomicU32::new(0))
-                        },
-                        error.clone(),
-                    )?);
+                    tracks.push((
+                        Track::System,
+                        audio_track(
+                            device,
+                            &folder.join(Track::System.file()),
+                            true,
+                            epoch,
+                            muted.clone(),
+                            if config.microphone_id.is_none() {
+                                level.clone()
+                            } else {
+                                Arc::new(AtomicU32::new(0))
+                            },
+                            error.clone(),
+                        )?,
+                    ));
                 }
                 Ok(tracks)
             };
             let tracks = match initialize() {
                 Ok(t) => {
-                    let _ = ready.send(Ok(t
-                        .first()
-                        .map(|track| (track.path.clone(), track.writer.clone()))));
+                    let live = t
+                        .iter()
+                        .map(|(track, audio)| LiveTrack {
+                            track: *track,
+                            path: audio.path.clone(),
+                            writer: audio.writer.clone(),
+                        })
+                        .collect();
+                    let _ = ready.send(Ok(live));
                     t
                 }
                 Err(e) => {
@@ -1879,7 +1913,7 @@ impl AudioWorker {
             };
             let duration = rx.recv().unwrap_or_else(|_| epoch.elapsed());
             let mut failures = Vec::new();
-            for track in tracks {
+            for (_, track) in tracks {
                 drop(track.stream);
                 if let Ok(mut writer) = track.writer.lock() {
                     if let Err(e) = writer.finish(duration) {
@@ -1894,10 +1928,10 @@ impl AudioWorker {
             }
         });
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(snapshot_source)) => Ok(Self {
+            Ok(Ok(live)) => Ok(Self {
                 stop,
                 join: Some(join),
-                snapshot_source,
+                live,
             }),
             Ok(Err(e)) => {
                 let _ = join.join();
@@ -2119,32 +2153,32 @@ impl ActiveCapture {
     /// Returns the included sample range on the session clock as (start_ms, end_ms).
     /// Only flush + header parsing hold the callback mutex; sample copying does not.
     pub fn snapshot_audio(&self, target: &Path) -> Result<(u64, u64), String> {
-        let (path, writer) = self
+        let live = self
             .audio
             .as_ref()
-            .and_then(|a| a.snapshot_source.as_ref())
+            .and_then(|a| a.live.first())
             .ok_or("No live microphone or desktop audio track is available")?;
-        snapshot_track(path, writer, target, None)
+        snapshot_track(&live.path, &live.writer, target, None)
     }
-    /// Copies the live track from `from_ms` (at most 60 s) into `target`, for
-    /// the stretches of [`crate::stretches`]. Returns the bounds and the
-    /// track's file name, for example `mic.wav`.
+    /// The tracks being recorded that a snapshot can be made of: the
+    /// microphone, the system audio, both or neither.
+    pub fn audio_tracks(&self) -> Vec<Track> {
+        self.audio
+            .iter()
+            .flat_map(|audio| audio.live.iter().map(|live| live.track))
+            .collect()
+    }
+    /// Copies the live `track` from `from_ms` (at most 60 s) into `target`,
+    /// for the stretches of [`crate::stretches`]. Returns the copy's bounds
+    /// in ms from the track's start.
     pub fn snapshot_audio_from(
         &self,
+        track: Track,
         from_ms: u64,
         target: &Path,
-    ) -> Result<(u64, u64, String), String> {
-        let (path, writer) = self
-            .audio
-            .as_ref()
-            .and_then(|a| a.snapshot_source.as_ref())
-            .ok_or("No live microphone or desktop audio track is available")?;
-        let (start, end) = snapshot_track(path, writer, target, Some(from_ms))?;
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Ok((start, end, name))
+    ) -> Result<(u64, u64), String> {
+        let tracks = self.audio.as_ref().map_or(&[][..], |audio| &audio.live);
+        snapshot_live_track(tracks, track, from_ms, target)
     }
     pub fn elapsed_ms(&self) -> u64 {
         self.stopped
@@ -4644,6 +4678,62 @@ mod tests {
         state.finish(Duration::from_secs(41)).unwrap();
         assert_eq!(hound::WavReader::open(target).unwrap().duration(), 30_000);
         assert_eq!(hound::WavReader::open(path).unwrap().duration(), 41_000);
+    }
+    #[test]
+    fn either_live_track_is_copied_from_a_point() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two tracks of a take, recorded at different rates: each sample
+        // of the microphone holds 1, each of the system audio 2.
+        let live = |track: Track, rate: u32, value: f32| {
+            let path = dir.path().join(track.file());
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: rate,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+            let mut wav = hound::WavWriter::create(&path, spec).unwrap();
+            for _ in 0..rate * 70 {
+                wav.write_sample(value).unwrap();
+            }
+            let mut state = AudioWriter::new(wav, &path, rate);
+            state.frames = rate as u64 * 70;
+            LiveTrack {
+                track,
+                path,
+                writer: Arc::new(Mutex::new(state)),
+            }
+        };
+        let tracks = [
+            live(Track::Microphone, 1000, 1.0),
+            live(Track::System, 800, 2.0),
+        ];
+        let copy = dir.path().join("copy.wav");
+        let copied = |track: Track, from_ms: u64| {
+            let bounds = snapshot_live_track(&tracks, track, from_ms, &copy)?;
+            let mut reader = hound::WavReader::open(&copy).unwrap();
+            let rate = reader.spec().sample_rate;
+            let samples: Vec<f32> = reader.samples().map(Result::unwrap).collect();
+            Ok::<_, String>((bounds, rate, samples.len(), samples[0]))
+        };
+        // Each track from the same point of the take, in its own rate.
+        assert_eq!(
+            copied(Track::Microphone, 65_000).unwrap(),
+            ((65_000, 70_000), 1000, 5_000, 1.0)
+        );
+        assert_eq!(
+            copied(Track::System, 65_000).unwrap(),
+            ((65_000, 70_000), 800, 4_000, 2.0)
+        );
+        // Never more than 60 s of either.
+        assert_eq!(
+            copied(Track::System, 2_000).unwrap(),
+            ((2_000, 62_000), 800, 48_000, 2.0)
+        );
+        // A take recording one track has no copy of the other.
+        let error = snapshot_live_track(&tracks[..1], Track::System, 0, &copy).unwrap_err();
+        assert!(error.contains("system"), "{error}");
+        assert!(snapshot_live_track(&[], Track::Microphone, 0, &copy).is_err());
     }
     #[test]
     #[ignore = "Records the actual Windows display, microphone and system audio for 3 seconds"]

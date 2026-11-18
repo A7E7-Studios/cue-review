@@ -108,6 +108,27 @@
   position: relative; z-index: 1; outline: 2px solid var(--color-focus); outline-offset: 1px;
 }
 
+/* A take transcribed from two tracks: computer-audio rows sit as every row does, microphone rows are
+   inset 48px with their time in a right-hand gutter, and a change of side adds 6px. Rows without a
+   track are untouched. The track tag names a row's track over the boundary above it while the row is
+   hovered or holds keyboard focus; it is positioned, so it takes no room and nothing moves. */
+.cr-row[data-track] { position: relative; }
+.cr-row[data-track='microphone'] { grid-template-columns: minmax(0, 1fr) 36px; margin-left: 48px; }
+.cr-row[data-track='microphone'] > .cr-row-time { order: 2; text-align: right; }
+.cr-row[data-track='microphone'] > .cr-row-body { order: 1; }
+.cr-row[data-track='microphone'] + .cr-row[data-track='system'], .cr-row[data-track='system'] + .cr-row[data-track='microphone'] { margin-top: 6px; }
+.cr-row[data-track]:hover:not(.is-current):not(.is-tail) { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+.cr-track-tag {
+  position: absolute; z-index: 2; top: -10px; left: 10px; height: 20px; box-sizing: border-box;
+  display: inline-flex; align-items: center; gap: 5px; max-width: calc(100% - 20px); padding: 0 8px 0 6px;
+  border-radius: var(--radius-pill); background: var(--color-dialog-menu); box-shadow: 0 0 0 1px var(--color-sheet-edge), 0 2px 6px rgba(0, 0, 0, .14);
+  color: var(--color-text-secondary); font-size: var(--font-size-meta); font-weight: var(--font-weight-strong); line-height: 20px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+}
+.cr-row[data-track='microphone'] > .cr-track-tag { left: auto; right: 10px; max-width: calc(100% + 28px); }
+.cr-track-tag > svg { width: 12px; height: 12px; flex-shrink: 0; }
+.cr-track-tag > b { font-weight: 500; color: var(--color-text-tertiary); }
+
 /* Takes and the live tail */
 .cr-take-divider {
   flex-shrink: 0; margin: 6px 10px; display: flex; align-items: center; gap: 10px;
@@ -116,6 +137,14 @@
 .cr-take-divider > span { flex: 1; height: 1px; background: var(--color-divider); }
 .cr-take-divider[data-live] { color: var(--color-status-recording-text); }
 .cr-take-divider[data-live] > span { background: var(--color-live-divider); }
+/* Two languages: the computer audio's at the left end, the microphone's at the right. Where the
+   column is too narrow for one line, the take's own text wraps, centred, rather than being cut. */
+.cr-take-divider[data-split] { gap: 8px; white-space: normal; line-height: 1.35; }
+.cr-take-divider[data-split] > span { min-width: 8px; }
+.cr-take-divider[data-split] > b { color: var(--color-text-secondary); font-weight: var(--font-weight-strong); }
+.cr-take-divider[data-split][data-live] > b { color: inherit; }
+.cr-take-divider[data-split] > i { font-style: normal; text-align: center; }
+.cr-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .cr-row.is-tail { background: var(--color-live-tail); border-radius: var(--radius-current-row); }
 .cr-row.is-tail .cr-row-time, .cr-row.is-tail .cr-row-time:disabled { color: var(--color-status-recording-text); font-weight: 700; }
 .cr-row.is-tail .cr-row-text { color: var(--color-text-tertiary); }

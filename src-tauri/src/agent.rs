@@ -832,6 +832,7 @@ mod tests {
                         end_ms: 10,
                         seek_ms: Some(5),
                     }],
+                    track: None,
                 },
                 Segment {
                     id: "2".into(),
@@ -844,6 +845,7 @@ mod tests {
                         end_ms: 20,
                         seek_ms: None,
                     }],
+                    track: None,
                 },
             ],
             ..Default::default()
@@ -948,6 +950,7 @@ mod tests {
                             seek_ms: None,
                         })
                         .collect(),
+                    track: None,
                 },
                 Segment {
                     id: "segment-1".into(),
@@ -980,6 +983,7 @@ mod tests {
                             seek_ms: None,
                         },
                     ],
+                    track: None,
                 },
             ],
             ..Default::default()
@@ -1238,6 +1242,7 @@ mod tests {
                     end_ms: 600,
                     seek_ms: Some(250),
                 }],
+                track: None,
             }],
             status: Some("complete".into()),
             ..Default::default()
@@ -1323,6 +1328,7 @@ mod tests {
                     end_ms: 600,
                     seek_ms: Some(250),
                 }],
+                track: None,
             }],
             language: Some(language.into()),
             language_detected: detected,
@@ -1497,6 +1503,201 @@ mod tests {
     }
 
     #[test]
+    fn transcribing_again_reads_both_tracks() {
+        use crate::{
+            models::Track,
+            stretches::{self, Stretches},
+            transcribe::FakePass,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        // A take recorded with both tracks whose transcript was made from
+        // the microphone alone, with the stretches of that one track.
+        let id = session_in(&store, Vec::new());
+        let folder = store.session_dir(&id).unwrap();
+        fs::write(folder.join("mic.wav"), b"").unwrap();
+        fs::write(folder.join("system.wav"), b"").unwrap();
+        store
+            .save_transcript(&id, &said("garbled", "en", true))
+            .unwrap();
+        let earlier = store.transcript(&id).unwrap();
+        assert!(earlier.track_languages.is_none());
+        assert!(earlier.segments.iter().all(|row| row.track.is_none()));
+        let mut alone = Stretches::new("mic.wav", Some("en"));
+        alone.push(
+            said("garbled", "en", false),
+            1000,
+            "en",
+            "ggml-small.en.bin",
+            None,
+        );
+        stretches::save(&folder, &alone).unwrap();
+        // `cue transcribe`, or Retry, which runs the same whole-take pass:
+        // only FFmpeg, the speech detector and Whisper are faked. The call
+        // is German, the reviewer English.
+        let pass = FakePass {
+            heard: Some("en"),
+            heard_on_system: Some("de"),
+            ..Default::default()
+        };
+        let transcript = transcribe_existing_with(
+            &store,
+            &id,
+            |_, _| Ok(()),
+            attached,
+            |store, id| {
+                crate::transcribe::transcribe_with(store, id, &|take, duration_ms, _| {
+                    pass.run(&store.root, take, duration_ms, true)
+                })
+            },
+        )
+        .unwrap();
+        // Both tracks were read whole, the system track first, and the
+        // microphone was compared with it.
+        assert_eq!(
+            *pass.work.borrow(),
+            [
+                "convert system.wav",
+                "whisper whisper-system.json de",
+                "convert mic.wav",
+                "convert system.wav",
+                "echo",
+                "whisper whisper.json en",
+            ]
+        );
+        assert_eq!(*pass.converted.borrow(), [(None, Some(3500)); 3]);
+        assert!(!stretches::any_saved(&folder));
+        let rows = |transcript: &Transcript| -> Vec<(Option<Track>, String)> {
+            transcript
+                .segments
+                .iter()
+                .map(|row| (row.track, row.text.clone()))
+                .collect()
+        };
+        let both = [
+            (Some(Track::System), "de-words".to_owned()),
+            (Some(Track::Microphone), "en-words".to_owned()),
+        ];
+        assert_eq!(rows(&transcript), both);
+        // The saved transcript is made from both tracks now.
+        let saved = store.transcript(&id).unwrap();
+        assert_eq!(rows(&saved), both);
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["trackLanguages"],
+            serde_json::json!({"microphone":{"language":"en","languageDetected":true},
+                "system":{"language":"de","languageDetected":true}})
+        );
+        assert_eq!(
+            (saved.language.as_deref(), saved.language_detected),
+            (Some("en"), true)
+        );
+        assert_eq!(store.session(&id).unwrap().status, "ready");
+    }
+
+    #[test]
+    fn the_transcript_reports_each_row_s_track() {
+        use crate::{
+            models::{Take, TakeStatus},
+            transcribe::FakePass,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let take = |index, offset_ms, duration_ms| Take {
+            index,
+            offset_ms,
+            duration_ms,
+            status: TakeStatus::Error,
+            folder: takes::folder_label(index),
+            source_id: None,
+            microphone_id: Some("mic:Studio".into()),
+            system_audio: index == 1,
+        };
+        // Take 1 recorded a German call and the English reviewer; take 2
+        // only the microphone.
+        let id = session_in(&store, vec![take(1, 0, 2000), take(2, 2000, 1500)]);
+        let folder = store.session_dir(&id).unwrap();
+        let second = takes::take_dir(&folder, 2);
+        fs::create_dir_all(&second).unwrap();
+        for file in [
+            folder.join("mic.wav"),
+            folder.join("system.wav"),
+            second.join("mic.wav"),
+        ] {
+            fs::write(file, b"").unwrap();
+        }
+        let pass = FakePass {
+            heard: Some("en"),
+            heard_on_system: Some("de"),
+            ..Default::default()
+        };
+        transcribe_existing_with(
+            &store,
+            &id,
+            |_, _| Ok(()),
+            attached,
+            |store, id| {
+                crate::transcribe::transcribe_with(store, id, &|take, duration_ms, _| {
+                    pass.run(&store.root, take, duration_ms, true)
+                })
+            },
+        )
+        .unwrap();
+        let transcript = store.transcript(&id).unwrap();
+        // `cue transcript ID --json`: each row of the two-track take names
+        // its track, the rows of the other take carry none.
+        let both = serde_json::json!({"microphone":{"language":"en","languageDetected":true},
+            "system":{"language":"de","languageDetected":true}});
+        for printed in [
+            serde_json::to_value(&transcript).unwrap(),
+            transcript_with_cursor(&transcript, &CursorTrack::default()),
+        ] {
+            let rows = printed["segments"].as_array().unwrap();
+            let tracks: Vec<_> = rows.iter().map(|row| row.get("track")).collect();
+            assert_eq!(
+                tracks,
+                [
+                    Some(&serde_json::json!("system")),
+                    Some(&serde_json::json!("microphone")),
+                    None
+                ]
+            );
+            assert_eq!(rows[2]["id"], serde_json::json!("t2-segment-0"));
+            // Each track's language is on the take, and the first take's on
+            // the transcript, beside the one language older readers know.
+            assert_eq!(printed["takes"][0]["trackLanguages"], both);
+            assert_eq!(printed["takes"][0]["language"], serde_json::json!("en"));
+            assert!(printed["takes"][1].get("trackLanguages").is_none());
+            assert_eq!(printed["trackLanguages"], both);
+            assert_eq!(printed["language"], serde_json::json!("en"));
+        }
+        // `cue transcript ID`: the track at the start of each row of the
+        // two-track take.
+        assert_eq!(
+            crate::cli::format_text(&transcript),
+            "system: de-words\nmic: en-words\nen-words\n"
+        );
+        // `cue transcript ID --segments`: the track after the time.
+        assert_eq!(
+            crate::cli::format_segments(&transcript),
+            "── Take 1 · 0:00 ──\n\
+             [00:00 | 150] system: de-words\n\
+             [00:00 | 150] mic: en-words\n\
+             ── Take 2 · 0:02 ──\n\
+             [00:02 | 2150] en-words\n"
+        );
+        // A transcript without tracks prints as it always did.
+        let plain = said("Open the library.", "en", false);
+        assert_eq!(crate::cli::format_text(&plain), "Open the library.\n");
+        assert_eq!(
+            crate::cli::format_segments(&plain),
+            "[00:00 | 250] Open the library.\n"
+        );
+        assert!(serde_json::to_value(&plain).unwrap()["segments"][0]
+            .get("track")
+            .is_none());
+    }
+
+    #[test]
     fn a_failed_frame_batch_removes_the_frames_it_wrote() {
         let dir = tempfile::tempdir().unwrap();
         let export = |at: &u64| {
@@ -1599,6 +1800,7 @@ mod tests {
                         seek_ms: None,
                     },
                 ],
+                track: None,
             }],
             ..Default::default()
         };
@@ -1913,6 +2115,7 @@ mod tests {
                     end_ms: 1200,
                     text: "Click here.".into(),
                     words: words(&[("Click", 500), ("here.", 900)]),
+                    track: None,
                 },
                 Segment {
                     id: "segment-1".into(),
@@ -1920,6 +2123,7 @@ mod tests {
                     end_ms: 3400,
                     text: "Now look at this.".into(),
                     words: words(&[("Now", 2500), ("look", 2800), ("at", 3000), ("this.", 3200)]),
+                    track: None,
                 },
                 // Alignment can place the last words past the final frame; they are clamped.
                 Segment {
@@ -1928,6 +2132,7 @@ mod tests {
                     end_ms: 4500,
                     text: "Over there.".into(),
                     words: words(&[("Over", 4100), ("there.", 4300)]),
+                    track: None,
                 },
             ],
             ..Default::default()

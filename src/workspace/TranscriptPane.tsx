@@ -1,8 +1,8 @@
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FocusEvent, KeyboardEvent, ReactNode } from 'react';
-import type { Segment, SpeechLanguage } from '../backend';
+import type { AudioTrack, Segment, SpeechLanguage } from '../backend';
 import { Icon } from '../icons';
-import { activeSegment, activeWord, findMatches, formatTime, playheadSegment, segmentSeekMs, takeLanguageLabel, transcriptItems, wordSeekMs } from '../review';
+import { activeSegment, activeWord, findMatches, formatTime, languageName, playheadSegment, segmentSeekMs, splitLanguages, takeLanguageLabel, transcriptItems, wordSeekMs } from '../review';
 import type { TranscriptItem } from '../review';
 import { prefersReducedMotion, usePresence } from '../ui/usePresence';
 import { NAMES } from './types';
@@ -12,6 +12,15 @@ import './transcript.css';
 
 /** Under the live box: only its words are still being heard (a `live-` segment, see `Segment`). */
 export const LIVE_NOTE = 'Grey words are still being heard and may change.';
+/** A row's track in a take transcribed from two tracks: its tag's icon and name, and the name a screen reader hears with its time. */
+const TRACKS: Record<AudioTrack, { icon: 'mic' | 'volume'; label: string; spoken: string }> = {
+  microphone: { icon: 'mic', label: 'Microphone', spoken: 'microphone' },
+  system: { icon: 'volume', label: 'Computer audio', spoken: 'computer audio' },
+};
+/** Focus the browser would draw a ring for: from the keyboard, not from a click. */
+function keyboardFocus(target: EventTarget): boolean {
+  try { return target instanceof Element && target.matches(':focus-visible'); } catch { return true; }
+}
 /** A jump this large between two time updates is a seek, which resumes following. */
 const SEEK_JUMP_MS = 2000;
 /** How long scroll events after an automatic scroll are treated as ours. */
@@ -48,7 +57,12 @@ interface RowProps {
   segment: Segment;
   index: number;
   live: boolean;
+  /** Words still being heard: the live box with its caret. */
   tail: boolean;
+  /** The live note under the box, shown once under the last one. */
+  note: boolean;
+  /** The name of the row's track's language when its take's two tracks differ in language. */
+  trackLanguage?: string;
   inert: boolean;
   current: boolean;
   past: boolean;
@@ -62,8 +76,18 @@ interface RowProps {
   seek: (ms: number) => void;
 }
 
-const Row = memo(function Row({ segment, index, live, tail, inert, current, past, spoken, entry, needle, match, matchCurrent, seek }: RowProps) {
+const Row = memo(function Row({ segment, index, live, tail, note, trackLanguage, inert, current, past, spoken, entry, needle, match, matchCurrent, seek }: RowProps) {
   const at = segmentSeekMs(segment);
+  // A row of a two-track take names its track in a tag above it while hovered or holding keyboard focus.
+  const track = segment.track ? TRACKS[segment.track] : undefined;
+  const [hovered, setHovered] = useState(false);
+  const [keyboard, setKeyboard] = useState(false);
+  const trackEvents = track && {
+    onMouseEnter: () => setHovered(true),
+    onMouseLeave: () => setHovered(false),
+    onFocus: (event: FocusEvent<HTMLDivElement>) => setKeyboard(keyboardFocus(event.target)),
+    onBlur: (event: FocusEvent<HTMLDivElement>) => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setKeyboard(false); },
+  };
   const tab = (item: string) => entry === item ? 0 : -1;
   // Words are role=button spans: Enter and Space activate them as they would a <button>.
   const activate = (event: KeyboardEvent<HTMLSpanElement>, ms: number) => {
@@ -72,8 +96,9 @@ const Row = memo(function Row({ segment, index, live, tail, inert, current, past
     if (!event.repeat) seek(ms);
   };
   const className = ['cr-row', current && 'is-current', past && 'is-past', live && 'is-live', tail && 'is-tail', match && 'is-match', matchCurrent && 'is-match-current'].filter(Boolean).join(' ');
-  return <div className={className} data-row={index}>
-    <button type="button" className="cr-row-time" data-item={`${index}:t`} tabIndex={tab('t')} disabled={inert} aria-label={NAMES.seekTo(formatTime(at))} onClick={() => seek(at)}>{formatTime(at)}</button>
+  return <div className={className} data-row={index} data-track={segment.track} {...trackEvents}>
+    {track && (hovered || keyboard) && <span className="cr-track-tag" aria-hidden="true"><Icon name={track.icon} strokeWidth={1.8}/>{track.label}{trackLanguage && <b> · {trackLanguage}</b>}</span>}
+    <button type="button" className="cr-row-time" data-item={`${index}:t`} tabIndex={tab('t')} disabled={inert} aria-label={NAMES.seekTo(formatTime(at), track?.spoken)} onClick={() => seek(at)}>{formatTime(at)}</button>
     <div className="cr-row-body">
       <p className="cr-row-text">
         {segment.words.length
@@ -96,19 +121,34 @@ const Row = memo(function Row({ segment, index, live, tail, inert, current, past
           </button>}
         {tail && segment.words.length > 0 && <span className="cr-live-caret" aria-hidden="true"/>}
       </p>
-      {tail && <span className="cr-live-note">{LIVE_NOTE}</span>}
+      {note && <span className="cr-live-note">{LIVE_NOTE}</span>}
     </div>
   </div>;
 });
 
+type DividerItem = Extract<TranscriptItem, { kind: 'divider' }>;
 /** "Take 2 · 1:20 · German, detected", "Take 1 · 0:00 · German", "Take 2 · recording · detecting language". */
-function dividerText(item: Extract<TranscriptItem, { kind: 'divider' }>, languages?: SpeechLanguage[]): string {
+function dividerText(item: DividerItem, languages?: SpeechLanguage[]): string {
   const language = takeLanguageLabel(item, languages) ?? (item.detecting ? 'detecting language' : undefined);
   return [`Take ${item.take}`, item.live ? 'recording' : formatTime(item.startMs), language].filter(Boolean).join(' · ');
 }
 
-function Divider({ text, live }: { text: string; live: boolean }) {
-  return <p className="cr-take-divider" data-live={live || undefined}><span aria-hidden="true"/>{text}<span aria-hidden="true"/></p>;
+/**
+ * The take line. When the take's two tracks differ in language it names each at its side,
+ * "German ── Take 1 · 0:00 · detected ── English": the computer audio's on the left, the microphone's on the right.
+ */
+function Divider({ item, languages }: { item: DividerItem; languages?: SpeechLanguage[] }) {
+  const live = item.live || undefined;
+  const split = splitLanguages(item);
+  if (!split) return <p className="cr-take-divider" data-live={live}><span aria-hidden="true"/>{dividerText(item, languages)}<span aria-hidden="true"/></p>;
+  const detected = split.system.languageDetected || split.microphone.languageDetected;
+  const text = [`Take ${item.take}`, item.live ? 'recording' : formatTime(item.startMs), detected && 'detected'].filter(Boolean).join(' · ');
+  // The spaces keep the words apart for a screen reader; a flex container lays out no white space.
+  return <p className="cr-take-divider" data-live={live} data-split="">
+    <b><span className="cr-sr-only">{TRACKS.system.label}: </span>{languageName(split.system.language, languages)}</b>{' '}
+    <span aria-hidden="true"/><i>{text}</i>{' '}<span aria-hidden="true"/>
+    <b><span className="cr-sr-only">{TRACKS.microphone.label}: </span>{languageName(split.microphone.language, languages)}</b>
+  </p>;
 }
 
 function visibleIn(element: Element, box: Element) {
@@ -127,11 +167,12 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
   const liveDetected = recording ? liveTake?.languageDetected : undefined;
   const items = useMemo(() => transcriptItems(segments, transcript.takes,
     liveIndex === undefined ? undefined : { index: liveIndex, startMs: liveStart ?? 0, language: liveLanguage, languageDetected: liveDetected },
-    { language: transcript.language, languageDetected: transcript.languageDetected }),
-  [segments, transcript.takes, transcript.language, transcript.languageDetected, liveIndex, liveStart, liveLanguage, liveDetected]);
+    { language: transcript.language, languageDetected: transcript.languageDetected, trackLanguages: transcript.trackLanguages }),
+  [segments, transcript.takes, transcript.language, transcript.languageDetected, transcript.trackLanguages, liveIndex, liveStart, liveLanguage, liveDetected]);
   const current = activeSegment(segments, timeMs);
   const spoken = current >= 0 ? activeWord(segments[current].words, timeMs) : -1;
   const hasLiveRows = items.some(item => item.kind === 'segment' && item.live);
+  const lastTail = items.reduce((last, item, at) => item.kind === 'segment' && item.tail ? at : last, -1);
 
   const scroller = useRef<HTMLDivElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
@@ -278,9 +319,10 @@ export function TranscriptPane({ mode, transcript, timeMs, onSeek, status, liveT
       <button type="button" className="cr-btn cr-find-step" aria-label="Next match" disabled={!matches.length} onClick={() => step(1)}><Icon name="chevron" strokeWidth={2} style={{ transform: 'rotate(90deg)' }}/></button>
     </div></div></div>}
     <div ref={scroller} className="cr-transcript-scroll" onScroll={scrolled} onWheel={reading} onTouchMove={reading} onKeyDown={keyDown} onFocus={focused} onBlur={blurred}>
-      {items.length ? items.map(item => item.kind === 'divider'
-        ? <Divider key={`take-${item.take}`} text={dividerText(item, languages)} live={item.live}/>
-        : <Row key={segments[item.index].id ?? item.index} segment={segments[item.index]} index={item.index} live={item.live} tail={item.tail} inert={recording}
+      {items.length ? items.map((item, at) => item.kind === 'divider'
+        ? <Divider key={`take-${item.take}`} item={item} languages={languages}/>
+        : <Row key={segments[item.index].id ?? item.index} segment={segments[item.index]} index={item.index} live={item.live} tail={item.tail} note={at === lastTail}
+            trackLanguage={item.trackLanguage && languageName(item.trackLanguage, languages)} inert={recording}
             current={current === item.index} past={current !== item.index && segments[item.index].endMs <= timeMs} spoken={current === item.index ? spoken : -1}
             entry={entryRow === String(item.index) ? entryItem : null} needle={needle} match={matchSet.has(item.index)} matchCurrent={matchRow === item.index} seek={seek}/>)
         : !error && emptyMessage && <p className="cr-transcript-empty">{emptyMessage}</p>}

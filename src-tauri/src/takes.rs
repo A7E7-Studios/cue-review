@@ -184,10 +184,11 @@ pub fn marks(takes: &[Take]) -> Vec<TakeMark> {
         Vec::new()
     }
 }
-/// `marks` with each take's language as `transcript` has it: from its mark
-/// of the same take. A transcript none of whose marks names a language, one
-/// take alone or one saved before takes kept their language, has only its
-/// own language, which is take 1's.
+/// `marks` with each take's language, and each of its tracks' when it was
+/// transcribed from two, as `transcript` has it: from its mark of the same
+/// take. A transcript none of whose marks names a language, one take alone
+/// or one saved before takes kept their language, has only its own
+/// language, which is take 1's.
 pub fn with_languages(mut marks: Vec<TakeMark>, transcript: &Transcript) -> Vec<TakeMark> {
     let unmarked = transcript.takes.iter().all(|old| old.language.is_none());
     for mark in &mut marks {
@@ -195,12 +196,18 @@ pub fn with_languages(mut marks: Vec<TakeMark>, transcript: &Transcript) -> Vec<
             .takes
             .iter()
             .find(|old| old.index == mark.index && old.language.is_some());
-        (mark.language, mark.language_detected) = match known {
-            Some(old) => (old.language.clone(), old.language_detected),
-            None if unmarked && mark.index == 1 => {
-                (transcript.language.clone(), transcript.language_detected)
-            }
-            None => (None, false),
+        (mark.language, mark.language_detected, mark.track_languages) = match known {
+            Some(old) => (
+                old.language.clone(),
+                old.language_detected,
+                old.track_languages.clone(),
+            ),
+            None if unmarked && mark.index == 1 => (
+                transcript.language.clone(),
+                transcript.language_detected,
+                transcript.track_languages.clone(),
+            ),
+            None => (None, false, None),
         };
     }
     marks
@@ -249,9 +256,9 @@ pub fn place(transcript: Transcript, index: u32, offset_ms: u64) -> Vec<Segment>
 }
 /// Replaces take `index`'s segments in `existing` with `update`, which is
 /// timed relative to the take, and sets the take dividers to `marks`. Each
-/// take keeps its own language on its mark: `update`'s for take `index`,
-/// what `existing` has for the others. The transcript's own language is its
-/// first take's.
+/// take keeps its own language on its mark, and each of its tracks' when
+/// it was transcribed from two: `update`'s for take `index`, what `existing`
+/// has for the others. The transcript's own language is its first take's.
 pub fn merge_take(
     existing: &Transcript,
     update: Transcript,
@@ -263,15 +270,32 @@ pub fn merge_take(
     if let Some(mark) = marks.iter_mut().find(|mark| mark.index == index) {
         mark.language = update.language.clone();
         mark.language_detected = update.language_detected;
+        mark.track_languages = update.track_languages.clone();
     }
-    let (language, language_detected) = marks
+    let (language, language_detected, track_languages) = marks
         .iter()
-        .find_map(|mark| Some((mark.language.clone()?, mark.language_detected)))
+        .find_map(|mark| {
+            Some((
+                mark.language.clone()?,
+                mark.language_detected,
+                mark.track_languages.clone(),
+            ))
+        })
         // One take on the timeline has no marks: the language is its own.
-        .or_else(|| Some((update.language.clone()?, update.language_detected)))
+        .or_else(|| {
+            Some((
+                update.language.clone()?,
+                update.language_detected,
+                update.track_languages.clone(),
+            ))
+        })
         .map_or(
-            (existing.language.clone(), existing.language_detected),
-            |found| (Some(found.0), found.1),
+            (
+                existing.language.clone(),
+                existing.language_detected,
+                existing.track_languages.clone(),
+            ),
+            |found| (Some(found.0), found.1, found.2),
         );
     let mut segments: Vec<_> = existing
         .segments
@@ -286,6 +310,7 @@ pub fn merge_take(
         segments,
         language,
         language_detected,
+        track_languages,
         status: Some("complete".into()),
         error: None,
         takes: marks,
@@ -906,6 +931,7 @@ mod tests {
                 end_ms,
                 seek_ms: Some(start_ms + 10),
             }],
+            track: None,
         }
     }
     fn ids(transcript: &Transcript) -> Vec<&str> {
@@ -934,6 +960,84 @@ mod tests {
     }
 
     #[test]
+    fn each_take_keeps_the_languages_of_its_tracks() {
+        use crate::models::TrackLanguages;
+        let mark = |index, start_ms| TakeMark {
+            index,
+            start_ms,
+            ..Default::default()
+        };
+        let marks = vec![mark(1, 0), mark(2, 2000)];
+        // Take 1 was transcribed from the microphone alone, in English.
+        let existing = Transcript {
+            segments: vec![segment("segment-0", 100, 900)],
+            language: Some("en".into()),
+            status: Some("complete".into()),
+            ..Default::default()
+        };
+        // Take 2 from two tracks: a German call, an English reviewer.
+        let both = TrackLanguages::of(Some(("en".into(), true)), Some(("de".into(), true)));
+        let two_tracks = || Transcript {
+            segments: vec![segment("segment-0", 50, 400)],
+            language: Some("en".into()),
+            language_detected: true,
+            track_languages: both.clone(),
+            ..Default::default()
+        };
+        let merged = merge_take(&existing, two_tracks(), 2, 2000, marks.clone());
+        assert_eq!(merged.takes[0].track_languages, None);
+        assert_eq!(merged.takes[1].track_languages, both);
+        assert_eq!(
+            (
+                merged.takes[1].language.as_deref(),
+                merged.takes[1].language_detected
+            ),
+            (Some("en"), true)
+        );
+        // The transcript's own are its first take's, as its language is.
+        assert_eq!(merged.track_languages, None);
+        // They stay on the take when another take is transcribed again,
+        assert_eq!(with_languages(marks.clone(), &merged), merged.takes);
+        let again = merge_take(
+            &merged,
+            Transcript {
+                segments: vec![segment("segment-0", 10, 90)],
+                language: Some("fr".into()),
+                ..Default::default()
+            },
+            1,
+            0,
+            marks.clone(),
+        );
+        assert_eq!(again.takes[1].track_languages, both);
+        // and go when the take itself is transcribed from one track.
+        let one = merge_take(
+            &again,
+            Transcript {
+                segments: vec![segment("segment-0", 10, 90)],
+                language: Some("de".into()),
+                ..Default::default()
+            },
+            2,
+            2000,
+            marks.clone(),
+        );
+        assert_eq!(one.takes[1].track_languages, None);
+        // The first take's are the transcript's own, with marks and, for
+        // one take alone, without.
+        let first = merge_take(&again, two_tracks(), 1, 0, marks);
+        assert_eq!(first.track_languages, both);
+        assert_eq!(first.takes[0].track_languages, both);
+        let only = merge_take(&existing, two_tracks(), 1, 0, Vec::new());
+        assert_eq!(only.track_languages, both);
+        // A transcript of one take, saved before it had marks, gives its
+        // tracks' languages to take 1's mark.
+        let marked = with_languages(vec![mark(1, 0), mark(2, 2000)], &only);
+        assert_eq!(marked[0].track_languages, both);
+        assert_eq!(marked[1].track_languages, None);
+    }
+
+    #[test]
     fn merge_shifts_prefixes_and_replaces_only_that_take() {
         let existing = Transcript {
             segments: vec![
@@ -946,6 +1050,7 @@ mod tests {
             status: Some("complete".into()),
             error: None,
             takes: Vec::new(),
+            track_languages: None,
         };
         let update = Transcript {
             segments: vec![
@@ -990,6 +1095,7 @@ mod tests {
             start_ms,
             language: Some(language.into()),
             language_detected,
+            track_languages: None,
         };
         assert_eq!(
             merged.takes,

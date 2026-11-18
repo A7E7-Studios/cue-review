@@ -3,6 +3,7 @@ pub mod capture;
 pub mod cli;
 pub mod cursor;
 pub mod deps;
+pub mod echo;
 pub mod models;
 pub mod preview;
 pub mod settings;
@@ -157,6 +158,36 @@ fn publish_live(s: &Shared, id: &str, cancel: &AtomicBool, result: Result<Transc
         });
     }
 }
+/// One live track of the take being recorded, as the live worker keeps it.
+struct LiveTrack {
+    track: Track,
+    stretches: stretches::Stretches,
+    redo: stretches::Redo,
+    /// The words still being heard as last guessed, timed from the end of
+    /// the last finished stretch, and how much audio lies after that end.
+    guess: Transcript,
+    guess_ms: u64,
+}
+/// The live transcript of the take's tracks as they stand, on the session
+/// timeline: one track's own, or both tracks' rows merged by time.
+fn live_transcript(tracks: &[LiveTrack], offset_ms: u64) -> Transcript {
+    let live = |track: &LiveTrack| {
+        track
+            .stretches
+            .live(track.guess.clone(), track.guess_ms, offset_ms)
+    };
+    let of = |wanted: Track| {
+        tracks
+            .iter()
+            .find(|track| track.track == wanted)
+            .map(live)
+            .unwrap_or_default()
+    };
+    match tracks {
+        [one] => live(one),
+        _ => stretches::live_of_tracks(of(Track::System), of(Track::Microphone)),
+    }
+}
 /// The live transcript covers only the capture in progress: a whole first
 /// recording, or just the take being recorded, timed on the session timeline.
 ///
@@ -167,9 +198,16 @@ fn publish_live(s: &Shared, id: &str, cancel: &AtomicBool, result: Result<Transc
 /// lock and under the shared inference lock. Stop cancels a stretch in
 /// progress, and Stop's transcription covers its audio instead.
 ///
-/// The take is held to the language chosen in Settings. Under Auto each
+/// A take recording a microphone and system audio has stretches of each
+/// track. Every cycle serves the system track first, then the microphone
+/// ([`stretches::turns`]), whose copy is compared with a copy of the system
+/// track over the same span, so what the microphone heard from the
+/// loudspeakers is silenced before it is guessed or cut into stretches
+/// ([`echo`]). The live transcript holds both tracks' rows.
+///
+/// Each track is held to the language chosen in Settings. Under Auto each
 /// finished stretch's language is detected until one guess is confident,
-/// which holds the take from then on; the stretches before it that were made
+/// which holds the track from then on; the stretches before it that were made
 /// in another language are transcribed again from the take's audio before
 /// newer ones are handled ([`redo_provisional`]).
 fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
@@ -193,10 +231,37 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
     let models = deps::TakeModels::now();
     let offset = take.map_or(0, |take| take.offset_ms);
     let snapshot = folder.join("snapshot.wav");
+    let system_snapshot = folder.join("system-snapshot.wav");
     stretches::forget(&take_folder);
-    let mut saved: Option<stretches::Stretches> = None;
-    let mut redo = stretches::Redo::default();
+    let recorded = match s.runtime.lock() {
+        Ok(runtime) if accepts_live_update(&runtime, &id, &cancel) => {
+            runtime.active.as_ref().unwrap().1.audio_tracks()
+        }
+        _ => return,
+    };
+    let two = recorded.len() > 1;
+    // In the order they are served.
+    let mut tracks: Vec<LiveTrack> = stretches::turns(&recorded, 0)
+        .into_iter()
+        .map(|turn| LiveTrack {
+            track: turn.track,
+            stretches: if two {
+                stretches::Stretches::of_track(turn.track, chosen)
+            } else {
+                stretches::Stretches::new(turn.track.file(), chosen)
+            },
+            redo: stretches::Redo::default(),
+            guess: Transcript::default(),
+            guess_ms: 0,
+        })
+        .collect();
+    if tracks.is_empty() {
+        let error = "No live microphone or desktop audio track is available";
+        publish_live(&s, &id, &cancel, Err(error.into()));
+        return;
+    }
     let mut next = Instant::now() + stretches::LIVE_CYCLE;
+    let mut cycle = 0;
     loop {
         while Instant::now() < next {
             if cancel.load(Ordering::Acquire) {
@@ -205,102 +270,123 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             std::thread::sleep(Duration::from_millis(50));
         }
         next = Instant::now() + stretches::LIVE_CYCLE;
-        let from = saved.as_ref().map_or(0, |saved| saved.until_ms);
-        // Copying is bounded to 60 s. Never hold runtime during inference.
-        let copied = {
-            let runtime = match s.runtime.lock() {
-                Ok(runtime) => runtime,
-                Err(_) => return,
-            };
-            if !accepts_live_update(&runtime, &id, &cancel) {
-                return;
-            }
-            runtime
-                .active
-                .as_ref()
-                .unwrap()
-                .1
-                .snapshot_audio_from(from, &snapshot)
-        };
-        let result = copied.and_then(|(start, end, source)| {
-            let stretches = saved.get_or_insert_with(|| stretches::Stretches::new(&source, chosen));
-            let (guess, guess_ms) = {
-                let _inference = s.inference.lock().map_err(|e| e.to_string())?;
-                if cancel.load(Ordering::Acquire) {
-                    return Err("Live transcription cancelled.".into());
+        let mut failure = None;
+        for (at, turn) in stretches::turns(&recorded, cycle).into_iter().enumerate() {
+            let from = tracks[at].stretches.until_ms;
+            // The microphone's echo is recognised by the system audio of
+            // the same span.
+            let echo = two && turn.track == Track::Microphone;
+            // Copying is bounded to 60 s. Never hold runtime during inference.
+            let copied = {
+                let runtime = match s.runtime.lock() {
+                    Ok(runtime) => runtime,
+                    Err(_) => return,
+                };
+                if !accepts_live_update(&runtime, &id, &cancel) {
+                    return;
                 }
-                // The guess shows at once; finishing stretches takes longer.
-                let length = end - start;
-                let language = stretches.language.clone();
-                let (guess, audio) = transcribe::live_guess(
-                    &root,
-                    &folder,
-                    &snapshot,
-                    length,
-                    language.as_deref(),
-                    &cancel,
-                )?;
-                publish_live(
-                    &s,
-                    &id,
-                    &cancel,
-                    Ok(stretches.live(guess.clone(), length, offset)),
-                );
-                match audio {
-                    Some(audio) => transcribe::live_commit(
+                let active = &runtime.active.as_ref().unwrap().1;
+                active
+                    .snapshot_audio_from(turn.track, from, &snapshot)
+                    .and_then(|bounds| {
+                        if echo {
+                            active.snapshot_audio_from(Track::System, from, &system_snapshot)?;
+                        }
+                        Ok(bounds)
+                    })
+            };
+            let result = copied.and_then(|(start, end)| {
+                {
+                    let _inference = s.inference.lock().map_err(|e| e.to_string())?;
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("Live transcription cancelled.".into());
+                    }
+                    // The guess shows at once; finishing stretches takes longer.
+                    let length = end - start;
+                    let language = tracks[at].stretches.language.clone();
+                    let (guess, audio) = transcribe::live_guess(
                         &root,
+                        &folder,
+                        &snapshot,
+                        length,
+                        language.as_deref(),
+                        echo.then_some(system_snapshot.as_path()),
+                        turn.guess,
+                        &cancel,
+                    )?;
+                    // Without a new guess the last one stays.
+                    let guess = guess.unwrap_or_else(|| tracks[at].guess.clone());
+                    tracks[at].guess = guess.clone();
+                    tracks[at].guess_ms = length;
+                    publish_live(&s, &id, &cancel, Ok(live_transcript(&tracks, offset)));
+                    if let Some(audio) = audio {
+                        let (guess, guess_ms) = transcribe::live_commit(
+                            &root,
+                            &take_folder,
+                            &folder,
+                            &models,
+                            &mut tracks[at].stretches,
+                            &audio,
+                            guess,
+                            &cancel,
+                        )?;
+                        tracks[at].guess = guess;
+                        tracks[at].guess_ms = guess_ms;
+                    }
+                }
+                if tracks[at].redo.pending(&tracks[at].stretches) {
+                    // The track is decided: show that, then catch up.
+                    publish_live(&s, &id, &cancel, Ok(live_transcript(&tracks, offset)));
+                    let LiveTrack {
+                        stretches, redo, ..
+                    } = &mut tracks[at];
+                    let redone = redo_provisional(
+                        &s,
+                        &id,
+                        &cancel,
                         &take_folder,
                         &folder,
                         &models,
                         stretches,
-                        &audio,
-                        guess,
-                        &cancel,
-                    )?,
-                    None => (guess, length),
-                }
-            };
-            if redo.pending(stretches) {
-                // The take is decided: show that, then catch up.
-                publish_live(
-                    &s,
-                    &id,
-                    &cancel,
-                    Ok(stretches.live(guess.clone(), guess_ms, offset)),
-                );
-                let redone = redo_provisional(
-                    &s,
-                    &id,
-                    &cancel,
-                    &take_folder,
-                    &folder,
-                    &models,
-                    stretches,
-                    &mut redo,
-                );
-                if cancel.load(Ordering::Acquire) {
-                    return Err("Live transcription cancelled.".into());
-                }
-                match redone {
-                    stretches::Redone::Done => (),
-                    // The words stay as first heard meanwhile.
-                    stretches::Redone::Later(error) => {
-                        eprintln!("A stretch of {id} is transcribed again later: {error}")
+                        redo,
+                    );
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("Live transcription cancelled.".into());
                     }
-                    stretches::Redone::LeftToStop(error) => {
-                        eprintln!("A stretch of {id} is left for Stop to transcribe again: {error}")
+                    match redone {
+                        stretches::Redone::Done => (),
+                        // The words stay as first heard meanwhile.
+                        stretches::Redone::Later(error) => {
+                            eprintln!("A stretch of {id} is transcribed again later: {error}")
+                        }
+                        stretches::Redone::LeftToStop(error) => {
+                            eprintln!(
+                                "A stretch of {id} is left for Stop to transcribe again: {error}"
+                            )
+                        }
                     }
                 }
+                Ok(())
+            });
+            if let Err(error) = result {
+                failure.get_or_insert(error);
             }
-            Ok(stretches.live(guess, guess_ms, offset))
-        });
-        publish_live(&s, &id, &cancel, result);
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+        }
+        let shown = match failure {
+            Some(error) => Err(error),
+            None => Ok(live_transcript(&tracks, offset)),
+        };
+        publish_live(&s, &id, &cancel, shown);
         if cancel.load(Ordering::Acquire) {
             return;
         }
+        cycle += 1;
     }
 }
-/// Transcribes again, in the language the take was just held to, the
+/// Transcribes again, in the language the track was just held to, the
 /// stretches made before that in another language, each from a fresh copy of
 /// the take's live audio ([`transcribe::redo_provisional`]). A copy that
 /// cannot be made is tried again at the next update; a stretch whose
@@ -328,13 +414,15 @@ fn redo_provisional(
         redo,
         cancel,
         // As for a snapshot: the copy is made under the runtime lock.
-        &mut |from_ms, target| {
+        &mut |track, from_ms, target| {
             let runtime = s.runtime.lock().map_err(|e| e.to_string())?;
             if !accepts_live_update(&runtime, id, cancel) {
                 return Err("Live transcription cancelled.".into());
             }
             let (_, active) = runtime.active.as_ref().ok_or("No recording is active.")?;
-            active.snapshot_audio_from(from_ms, target).map(|_| ())
+            active
+                .snapshot_audio_from(track, from_ms, target)
+                .map(|_| ())
         },
     )
 }
@@ -1539,6 +1627,7 @@ mod orchestration_tests {
                 end_ms: 500,
                 text: "here".into(),
                 words: vec![word("here", 100, 500)],
+                track: None,
             }],
             ..Default::default()
         };
@@ -1556,6 +1645,84 @@ mod orchestration_tests {
             ),
             (85_100, 85_500)
         );
+    }
+    #[test]
+    fn the_live_transcript_shows_every_live_track() {
+        let said = |text: &str| Transcript {
+            segments: vec![Segment {
+                id: "segment-0".into(),
+                start_ms: 100,
+                end_ms: 500,
+                text: text.into(),
+                words: vec![word(text, 100, 500)],
+                track: None,
+            }],
+            ..Default::default()
+        };
+        let live = |track: Track, two: bool, heard: &str| LiveTrack {
+            track,
+            stretches: if two {
+                stretches::Stretches::of_track(track, Some("en"))
+            } else {
+                stretches::Stretches::new(track.file(), Some("en"))
+            },
+            redo: stretches::Redo::default(),
+            guess: said(heard),
+            guess_ms: 3000,
+        };
+        let rows = |transcript: &Transcript| -> Vec<(String, Option<Track>, String, u64)> {
+            transcript
+                .segments
+                .iter()
+                .map(|row| (row.id.clone(), row.track, row.text.clone(), row.start_ms))
+                .collect()
+        };
+        // A take recording one track: its own live transcript, without tracks.
+        let one = [live(Track::System, false, "call")];
+        let shown = live_transcript(&one, 80_000);
+        assert_eq!(
+            rows(&shown),
+            [("live-0".to_owned(), None, "call".to_owned(), 80_100)]
+        );
+        assert!(shown.track_languages.is_none());
+        // Both tracks: each has finished a stretch and still hears words.
+        let mut two = [
+            live(Track::System, true, "call"),
+            live(Track::Microphone, true, "reviewer"),
+        ];
+        two[0]
+            .stretches
+            .push(said("asked"), 5000, "en", "ggml-small.en.bin", None);
+        two[1]
+            .stretches
+            .push(said("answered"), 7000, "en", "ggml-small.en.bin", None);
+        let shown = live_transcript(&two, 80_000);
+        let row = |id: &str, track: Track, text: &str, start_ms: u64| {
+            (id.to_owned(), Some(track), text.to_owned(), start_ms)
+        };
+        assert_eq!(
+            rows(&shown),
+            [
+                row("stretch-system-0-0", Track::System, "asked", 80_100),
+                row(
+                    "stretch-microphone-0-0",
+                    Track::Microphone,
+                    "answered",
+                    80_100
+                ),
+                row("live-system-5000", Track::System, "call", 85_100),
+                row(
+                    "live-microphone-7000",
+                    Track::Microphone,
+                    "reviewer",
+                    87_100
+                ),
+            ]
+        );
+        let languages = shown.track_languages.unwrap();
+        assert_eq!(languages.microphone.unwrap().language, "en");
+        assert_eq!(languages.system.unwrap().language, "en");
+        assert_eq!(shown.status.as_deref(), Some("provisional"));
     }
     #[test]
     fn processing_status_reports_the_take_until_the_job_ends() {
@@ -1815,6 +1982,7 @@ mod orchestration_tests {
             end_ms: 900,
             text: "Take one".into(),
             words: vec![word("Take", 100, 400), word("one", 500, 900)],
+            track: None,
         };
         state
             .store

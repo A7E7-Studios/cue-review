@@ -1,4 +1,4 @@
-import type { Segment, SpeechLanguage, TakeMark, Word } from './backend';
+import type { Segment, SpeechLanguage, TakeMark, TrackLanguages, Word } from './backend';
 export function formatTime(ms: number): string {
   const seconds = Math.floor(Math.max(0, Number.isFinite(ms) ? ms : 0) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -79,8 +79,11 @@ export function stillHeard(segment: Segment): boolean {
   return !!segment.id?.startsWith(LIVE_SEGMENT_PREFIX);
 }
 
-/** A take's language as a divider names it: its code and whether Auto detected it. */
-export interface TakeLanguage { language?: string; languageDetected?: boolean }
+/**
+ * A take's language as a divider names it: its code and whether Auto detected it, and in a take
+ * transcribed from two tracks each track's (`language` is the microphone's).
+ */
+export interface TakeLanguage { language?: string; languageDetected?: boolean; trackLanguages?: TrackLanguages }
 /** A language code's English name, or the code itself when the speech model's list does not name it. */
 export function languageName(code: string, languages: SpeechLanguage[] = []): string {
   return languages.find(item => item.code === code)?.name ?? code;
@@ -92,14 +95,28 @@ export function takeLanguageLabel({ language, languageDetected }: TakeLanguage, 
   return languageDetected ? `${name}, detected` : name;
 }
 
+/**
+ * A take's two languages when its two tracks were heard in different languages, else undefined:
+ * then the take is named by its one language as before.
+ */
+export function splitLanguages({ trackLanguages }: TakeLanguage): Required<TrackLanguages> | undefined {
+  const { microphone, system } = trackLanguages ?? {};
+  return microphone && system && microphone.language !== system.language ? { microphone, system } : undefined;
+}
+const hasLanguage = (take: TakeLanguage) => !!(take.language || take.trackLanguages?.microphone || take.trackLanguages?.system);
+
 export type TranscriptItem =
   /**
    * "Take N · m:ss", or "Take N · recording" for the take being recorded, followed by the take's
    * language when it is known; `detecting` while the take records with words and no language yet.
    */
-  | { kind: 'divider'; take: number; startMs: number; live: boolean; language?: string; languageDetected?: boolean; detecting?: boolean }
-  /** `live` rows belong to the take being recorded; `tail` is its words still being heard. */
-  | { kind: 'segment'; index: number; live: boolean; tail: boolean };
+  | { kind: 'divider'; take: number; startMs: number; live: boolean; language?: string; languageDetected?: boolean; trackLanguages?: TrackLanguages; detecting?: boolean }
+  /**
+   * `live` rows belong to the take being recorded; `tail` is its words still being heard, one per
+   * track in a take with two. `trackLanguage` is the code of the row's track's language when its
+   * take's two tracks differ in language.
+   */
+  | { kind: 'segment'; index: number; live: boolean; tail: boolean; trackLanguage?: string };
 type Divider = Extract<TranscriptItem, { kind: 'divider' }>;
 /**
  * Segments in order with a divider before the first segment of each take after
@@ -109,26 +126,32 @@ type Divider = Extract<TranscriptItem, { kind: 'divider' }>;
  * segment of words still being heard (a last `live-` one, see `Segment`) is the tail;
  * its language is its mark's or else `own`. A later take's divider is shown even
  * before it has any words, a first recording's once it has words or a language.
+ * A take recorded with two tracks has a tail per track: each `live-` segment with a `track`.
  */
 export function transcriptItems(segments: Segment[], takes: TakeMark[] = [], liveTake?: TakeMark, own: TakeLanguage = {}): TranscriptItem[] {
   const single = !takes.some(take => take.index > 1);
-  const dividers: Divider[] = takes.filter(take => take.index !== liveTake?.index && (take.index > 1 || take.language))
-    .map(take => ({ kind: 'divider', take: take.index, startMs: take.startMs, live: false, language: take.language, languageDetected: take.language ? take.languageDetected : undefined }));
+  const dividers: Divider[] = takes.filter(take => take.index !== liveTake?.index && (take.index > 1 || hasLanguage(take)))
+    .map(take => ({ kind: 'divider', take: take.index, startMs: take.startMs, live: false, language: take.language, languageDetected: take.language ? take.languageDetected : undefined, trackLanguages: take.trackLanguages }));
   const markOne = takes.find(take => take.index === 1);
-  if (single && !liveTake && !markOne?.language && own.language) dividers.push({ kind: 'divider', take: 1, startMs: markOne?.startMs ?? 0, live: false, language: own.language, languageDetected: own.languageDetected });
+  if (single && !liveTake && !(markOne && hasLanguage(markOne)) && hasLanguage(own)) dividers.push({ kind: 'divider', take: 1, startMs: markOne?.startMs ?? 0, live: false, language: own.language, languageDetected: own.language ? own.languageDetected : undefined, trackLanguages: own.trackLanguages });
   if (liveTake) {
     const { language, languageDetected } = liveTake.language ? liveTake : own;
+    const trackLanguages = liveTake.trackLanguages ?? own.trackLanguages;
     const heard = segments.some(segment => segment.startMs >= liveTake.startMs);
-    if (liveTake.index > 1 || language || heard) dividers.push({ kind: 'divider', take: liveTake.index, startMs: liveTake.startMs, live: true, language, languageDetected: language ? languageDetected : undefined, detecting: !language && heard });
+    if (liveTake.index > 1 || language || trackLanguages || heard) dividers.push({ kind: 'divider', take: liveTake.index, startMs: liveTake.startMs, live: true, language, languageDetected: language ? languageDetected : undefined, trackLanguages, detecting: !language && heard });
   }
   dividers.sort((a, b) => a.startMs - b.startMs || a.take - b.take);
   const lastLive = liveTake ? segments.reduce((last, segment, index) => segment.startMs >= liveTake.startMs ? index : last, -1) : -1;
   const items: TranscriptItem[] = [];
   let next = 0;
+  let take: Divider | undefined;
   segments.forEach((segment, index) => {
-    while (next < dividers.length && dividers[next].startMs <= segment.startMs) items.push(dividers[next++]);
+    while (next < dividers.length && dividers[next].startMs <= segment.startMs) items.push(take = dividers[next++]);
+    // Live segments come last, so a take with two tracks may end with one still being heard per track.
     const live = !!liveTake && segment.startMs >= liveTake.startMs;
-    items.push({ kind: 'segment', index, live, tail: live && index === lastLive && stillHeard(segment) });
+    const tail = live && stillHeard(segment) && (index === lastLive || !!segment.track);
+    const split = segment.track && take ? splitLanguages(take) : undefined;
+    items.push(split && segment.track ? { kind: 'segment', index, live, tail, trackLanguage: split[segment.track].language } : { kind: 'segment', index, live, tail });
   });
   while (next < dividers.length) items.push(dividers[next++]);
   return items;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeSegment, activeWord, errorMessage, findMatches, formatTime, formatTimer, playheadSegment, seekTime, segmentSeekMs, segmentText, transcriptItems, wordSeekMs } from './review';
+import { activeSegment, activeWord, errorMessage, findMatches, formatTime, formatTimer, playheadSegment, seekTime, segmentSeekMs, segmentText, splitLanguages, transcriptItems, wordSeekMs } from './review';
 import type { Segment } from './backend';
 describe('transcript and video synchronization', () => {
   it('uses a bounded point highlight for alignment anchors without treating coarse raw bounds as speech',()=>{
@@ -125,6 +125,37 @@ describe('takes and transcript layout', () => {
     expect(transcriptItems(segments.slice(0, 2), undefined, undefined, { language: 'de' })[0]).toEqual({ kind: 'divider', take: 1, startMs: 0, live: false, language: 'de' });
     // With later takes, the transcript's own language names no take: each mark carries its own.
     expect(transcriptItems(segments, [{ index: 1, startMs: 0 }, { index: 2, startMs: 80000 }], undefined, { language: 'de' })[0]).toEqual({ kind: 'segment', index: 0, live: false, tail: false });
+  });
+  it("names a take's two languages only when its tracks differ, and each row's own", () => {
+    const de = { language: 'de', languageDetected: true }, en = { language: 'en', languageDetected: true };
+    expect(splitLanguages({ trackLanguages: { system: de, microphone: en } })).toEqual({ system: de, microphone: en });
+    expect(splitLanguages({ trackLanguages: { system: en, microphone: en } })).toBeUndefined();
+    expect(splitLanguages({ trackLanguages: { system: de } })).toBeUndefined();
+    expect(splitLanguages({ language: 'en' })).toBeUndefined();
+    const call = [{ ...line(0, 'Hallo'), track: 'system' as const }, { ...line(2000, 'Hello'), track: 'microphone' as const }, line(81000, 'Later, one track')];
+    const marks = [{ index: 1, startMs: 0, ...en, trackLanguages: { system: de, microphone: en } }, { index: 2, startMs: 80000, ...en }];
+    expect(transcriptItems(call, marks)).toEqual([
+      { kind: 'divider', take: 1, startMs: 0, live: false, ...en, trackLanguages: { system: de, microphone: en } },
+      { kind: 'segment', index: 0, live: false, tail: false, trackLanguage: 'de' },
+      { kind: 'segment', index: 1, live: false, tail: false, trackLanguage: 'en' },
+      { kind: 'divider', take: 2, startMs: 80000, live: false, ...en },
+      { kind: 'segment', index: 2, live: false, tail: false },
+    ]);
+    // A single take's transcript names both from its own; one known track divides it as one language does.
+    expect(transcriptItems(call.slice(0, 2), undefined, undefined, { trackLanguages: { system: de, microphone: en } })[1]).toEqual({ kind: 'segment', index: 0, live: false, tail: false, trackLanguage: 'de' });
+    expect(transcriptItems(call.slice(0, 2), undefined, undefined, { trackLanguages: { system: de } })[0]).toEqual({ kind: 'divider', take: 1, startMs: 0, live: false, trackLanguages: { system: de } });
+  });
+  it('keeps one tail per track while a take with two tracks records', () => {
+    const live = [{ ...line(0, 'Finished'), track: 'system' as const }, { ...line(4000, 'Still heard'), id: 'live-system-4000', track: 'system' as const },
+      { ...line(5000, 'Me too'), id: 'live-microphone-5000', track: 'microphone' as const }];
+    expect(transcriptItems(live, undefined, { index: 1, startMs: 0 }).filter(item => item.kind === 'segment')).toEqual([
+      { kind: 'segment', index: 0, live: true, tail: false },
+      { kind: 'segment', index: 1, live: true, tail: true },
+      { kind: 'segment', index: 2, live: true, tail: true },
+    ]);
+    // A one-track take keeps a single tail: only its last segment.
+    const one = [{ ...line(0, 'Old guess'), id: 'live-0' }, { ...line(4000, 'Still heard'), id: 'live-4000' }];
+    expect(transcriptItems(one, undefined, { index: 1, startMs: 0 }).filter(item => item.kind === 'segment' && item.tail)).toEqual([{ kind: 'segment', index: 1, live: true, tail: true }]);
   });
   it('finds segments by their words or text, ignoring case and surrounding space', () => {
     const worded: Segment = { startMs: 0, endMs: 1000, text: 'stale text', words: [{ text: 'Push', startMs: 0, endMs: 500 }, { text: 'the grid', startMs: 500, endMs: 1000 }] };

@@ -66,6 +66,11 @@ and cannot tell who said what.
   today changes shape.
 - The audio in the video and the mix stays as it is: the call is still heard twice on playback when
   the speakers were on. Only the transcript changes.
+- A recording's automatic name comes from its first row, which in a two-track take can be the
+  call's words rather than the reviewer's; and `transcript.txt` in the recording's folder stays
+  plain text without tracks.
+- `rustfft` is compiled into the app and named in README.md; its licence text is not added to the
+  bundled `public/licenses/`, a protected path that holds only the font's licence today.
 - The app does not follow the mute of a call app such as Teams; its own mute is what silences the
   microphone track.
 - How alike two stretches of audio must be to count as the speakers, and over what delay, is set in
