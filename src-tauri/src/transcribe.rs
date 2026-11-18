@@ -30,7 +30,8 @@ fn live_threads(logical: usize) -> usize {
 /// transcriptions run at the same time: [`final_threads`] where the two
 /// together fit the processor, which is from 8 logical threads on (4 each
 /// there, 8 each from 16), and half the logical threads below that, so the
-/// two never ask for more threads than there are.
+/// two never ask for more threads than there are; on a single thread each
+/// still gets one.
 fn track_threads(logical: usize) -> usize {
     final_threads(logical).min((logical / 2).max(1))
 }

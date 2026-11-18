@@ -49,7 +49,8 @@ a small processor must not get fewer threads than whisper's own defaults. The tw
 recorded with a microphone and system audio are transcribed at the same time, each with a final
 transcription's threads where the processor has eight or more and with half the processor's threads
 below that, because one after the other they keep the person waiting after Stop, when nothing is
-captured any more, and together they must not ask for more threads than the processor has.
+captured any more, and together they must not ask for more threads than a processor with two or
+more has, each keeping at least one.
 
 #### Scenario: Thread counts follow the processor
 - **WHEN** a final or a live transcription starts on a processor with 2, 4, 8 or 32 logical threads
