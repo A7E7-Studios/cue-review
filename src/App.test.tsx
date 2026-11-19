@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import App from './App';
 import type { AppProps } from './App';
-import type { CaptureSource, LanguageModel, Microphone, Project, RecordingStatus, Session, SetupStatus, Transcript } from './backend';
+import type { CaptureSource, LanguageModel, Microphone, Project, RecordingStatus, Session, SetupStatus, SpeechDevice, Transcript } from './backend';
 import { WINDOW_CLOSED } from './stories/fixtures';
 import { NAMES, RETIRED_NAMES } from './workspace/types';
 
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     projects: vi.fn(), sessions: vi.fn(), session: vi.fn(), transcript: vi.fn(), markers: vi.fn(), addMarker: vi.fn(), setup: vi.fn(), status: vi.fn(),
     sources: vi.fn(), microphones: vi.fn(), preview: vi.fn(), stopPreview: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), renameSession: vi.fn(),
     moveSession: vi.fn(), reorderProjects: vi.fn(), deleteProject: vi.fn(), deleteSession: vi.fn(), start: vi.fn(), stop: vi.fn(), recordMore: vi.fn(),
-    handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), languages: vi.fn(), languageModels: vi.fn(), downloadLanguageModels: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
+    handoff: vi.fn(), openFolder: vi.fn(), mute: vi.fn(), retry: vi.fn(), installTranscription: vi.fn(), languages: vi.fn(), languageModels: vi.fn(), downloadLanguageModels: vi.fn(), getSpeechDevice: vi.fn(), testSpeechDevices: vi.fn(), settings: vi.fn(), saveSettings: vi.fn(),
   },
   windowApi: {
     minimize: vi.fn(), toggleMaximize: vi.fn(), isMaximized: vi.fn(), onResized: vi.fn(), close: vi.fn(), startDragging: vi.fn(),
@@ -2025,6 +2025,35 @@ describe('local setup recovery and request races', () => {
     await act(async () => full({ ...readySetup, languageModels: [{ ...model, receivedBytes: 200_000_000 }] }));
     expect(screen.queryByRole('button', { name: NAMES.installTranscription })).not.toBeInTheDocument();
     expect(screen.getByText('English model').parentElement).toHaveTextContent('Downloading · 300 of 488 MB');
+  });
+  it('tests the graphics card again and reads the device until the measurement ends', async () => {
+    const card = { name: 'NVIDIA GeForce RTX 5090', stopped: true };
+    const stopped: SpeechDevice = { state: 'ready', kind: 'processor', card, largeOffered: true, largeSlow: false, measurable: true };
+    const measuring: SpeechDevice = { ...stopped, state: 'measuring' };
+    const measured: SpeechDevice = { state: 'ready', kind: 'graphicsCard', name: card.name, card: { ...card, stopped: false }, largeOffered: true, largeSlow: false, measurable: true };
+    setup = { ...readySetup, speechDevice: stopped };
+    const user = await ready();
+    backend.testSpeechDevices.mockResolvedValue(measuring);
+    backend.getSpeechDevice.mockResolvedValueOnce(measuring).mockResolvedValue(measured);
+    await user.click(screen.getByRole('button', { name: NAMES.settings }));
+    const line = () => screen.getByText('Runs on').closest('summary');
+    await waitFor(() => expect(line()).toHaveTextContent('Runs on the processor · the graphics card stopped'));
+    // Check again's full read is slow; the test answers first, and the older reply does not undo it.
+    let full!: (value: SetupStatus) => void;
+    backend.setup.mockImplementation(() => new Promise<SetupStatus>(resolve => { full = resolve; }));
+    await user.click(screen.getByRole('button', { name: NAMES.checkAgain }));
+    await user.click(screen.getByRole('button', { name: NAMES.testGraphicsCard }));
+    expect(backend.testSpeechDevices).toHaveBeenCalledOnce();
+    await waitFor(() => expect(line()).toHaveTextContent('Runs on the processor · testing the graphics card…'));
+    await act(async () => full({ ...readySetup, speechDevice: stopped }));
+    expect(line()).toHaveTextContent('Runs on the processor · testing the graphics card…');
+    // The light read follows about each second until the measurement ends; the full status is not read again.
+    const fullReads = backend.setup.mock.calls.length;
+    await waitFor(() => expect(line()).toHaveTextContent(/^Runs on NVIDIA GeForce RTX 5090$/), { timeout: 4000 });
+    expect(backend.getSpeechDevice).toHaveBeenCalledTimes(2);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1200)); });
+    expect(backend.getSpeechDevice).toHaveBeenCalledTimes(2);
+    expect(backend.setup).toHaveBeenCalledTimes(fullReads);
   });
   it('ignores an old source preview that arrives after the user selects another source', async () => {
     let resolveOld!: (value: { id: string; url: string }) => void;

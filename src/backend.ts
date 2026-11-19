@@ -57,17 +57,49 @@ export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 
 export interface SpeechLanguage { code: string; name: string }
 /**
  * A speech model the chosen language needs: `small.en` for English, the multilingual `small` for every other language.
- * Base transcribes until it is `ready`. A failed or missing one is fetched with `downloadLanguageModels`.
+ * Base transcribes until it is `ready`. A failed or missing one is fetched with `downloadLanguageModels`. With Large
+ * chosen, `large-v3-turbo` comes first: it transcribes every language, on the graphics card only, and the small models
+ * transcribe until it is ready and whenever the card is not used.
  */
-export interface LanguageModel { model: 'small.en' | 'small'; state: 'ready' | 'downloading' | 'failed' | 'missing'; receivedBytes: number; totalBytes: number; error?: string }
+export interface LanguageModel { model: 'small.en' | 'small' | 'large-v3-turbo'; state: 'ready' | 'downloading' | 'failed' | 'missing'; receivedBytes: number; totalBytes: number; error?: string }
 /**
- * `languageModels`: one per model the chosen language needs, in download order (Auto: small.en then small). Absent or
- * empty when the environment names a custom model.
+ * Where final transcription runs, from the last measurement of the devices. `measuring` while the devices are timed in
+ * the background; the processor transcribes meanwhile. `kind` is where it runs now, and `name` the graphics card's name
+ * as Vulkan gives it ("NVIDIA GeForce RTX 5090") when that is a graphics card.
  */
-export interface SetupStatus { ready: boolean; issues: string[]; dependencies?: {name:string;available:boolean;path?:string;detail?:string}[]; modelReady?:boolean; modelPath?:string; languageModels?: LanguageModel[] }
+export interface SpeechDevice {
+  state: 'measuring' | 'ready';
+  kind: 'graphicsCard' | 'processor';
+  name?: string;
+  /**
+   * The card that measured faster than the processor, kept while the switch is off or the card is stopped; absent when
+   * no card beat the processor, there is none, or the runtime has no graphics build. `stopped` when a run on it failed
+   * or turned out to use the processor: the processor transcribes until a new measurement.
+   */
+  card?: { name: string; stopped: boolean };
+  /** The card ran the sample in two thirds of the processor's time or less, so Settings offers Large. While measuring, the previous result's. */
+  largeOffered: boolean;
+  /** Large is installed and was timed on the card slower than the processor with the small model, so the small models transcribe. */
+  largeSlow: boolean;
+  /**
+   * The runtime has its graphics-card build (Windows x64), so the devices are measured and can be tested again. False on
+   * macOS, Linux and a Windows runtime without it: Settings offers no test, and the line has nothing to unfold.
+   */
+  measurable: boolean;
+}
+/**
+ * `languageModels`: one per model the chosen language needs, in download order (Auto: small.en then small), after the
+ * large one when Large is chosen. Absent or empty when the environment names a custom model. `speechDevice`: where
+ * transcription runs; Settings shows no device without it.
+ */
+export interface SetupStatus { ready: boolean; issues: string[]; dependencies?: {name:string;available:boolean;path?:string;detail?:string}[]; modelReady?:boolean; modelPath?:string; languageModels?: LanguageModel[]; speechDevice?: SpeechDevice }
 export interface Marker { id: string; timeMs: number; label: string }
-/** App-wide preferences in `<data root>/settings.json`, shared with the `cue` CLI. An absent `language` is Auto: each take's language is detected. */
-export interface Settings { vocabulary?: string; language?: string }
+/**
+ * App-wide preferences in `<data root>/settings.json`, shared with the `cue` CLI. An absent `language` is Auto: each
+ * take's language is detected. `model: 'large'` chooses Large; absent is Standard. `graphicsCard: false` keeps
+ * transcription on the processor; absent uses the graphics card where it is faster.
+ */
+export interface Settings { vocabulary?: string; language?: string; model?: 'large'; graphicsCard?: false }
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error('Open CueReview as a desktop app to access your recordings and capture devices. Run npm run tauri dev.');
@@ -99,6 +131,10 @@ export const backend = {
   languageModels: () => call<LanguageModel[]>('get_language_models'),
   /** Starts the downloads of the models the chosen language needs in the background, or starts them again after a failure; a model reads `downloading` once it returns. Rejects with a message to show, e.g. while transcription is not installed. */
   downloadLanguageModels: () => call<void>('download_language_models'),
+  /** Where transcription runs, as `setup().speechDevice` reports it, without checking the tools: read each second while it is `measuring`. */
+  getSpeechDevice: () => call<SpeechDevice>('get_speech_device'),
+  /** Starts measuring the devices again in the background and returns the status, now `measuring`. Rejects with a message to show while a recording runs. */
+  testSpeechDevices: () => call<SpeechDevice>('test_speech_devices'),
   status: () => call<RecordingStatus>('get_recording_status'),
   start: (projectId: string|null, name: string|null, sourceId: string, microphoneId: string | null, systemAudio: boolean, muted: boolean) => call<Session>('start_recording', { projectId, name, sourceId, microphoneId, systemAudio, muted }),
   stop: () => call<Session>('stop_recording'),

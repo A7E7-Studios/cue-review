@@ -1,0 +1,38 @@
+/* The switch (docs/DESIGN.md): label and help on the left, a 36×20 track with a 16px thumb on the
+   right. Off, the track is a pill ringed in tertiary text with a secondary-text thumb; on, it is the
+   accent with a white thumb. The thumb slides over --motion-fast, which reduced motion sets to 0. */
+.ui-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.ui-switch-text { display: grid; min-width: 0; }
+.ui-switch-label { font-weight: var(--font-weight-strong); cursor: pointer; }
+.ui-switch-help { margin-top: 2px; font-size: var(--font-size-meta); color: var(--color-text-tertiary); }
+.ui-switch-row[data-disabled] .ui-switch-label { cursor: default; }
+.ui-switch-row[data-disabled] .ui-switch-text { opacity: .55; }
+
+.ui-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  background: var(--color-pill);
+  box-shadow: inset 0 0 0 1px var(--color-text-tertiary);
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
+}
+.ui-switch:hover:not(:disabled) { background: var(--color-pill); box-shadow: inset 0 0 0 1px var(--color-text-secondary); }
+.ui-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-text-secondary);
+  transition: transform var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out);
+}
+.ui-switch[aria-checked='true'],
+.ui-switch[aria-checked='true']:hover:not(:disabled) { background: var(--color-accent); box-shadow: none; }
+.ui-switch[aria-checked='true']:hover:not(:disabled) { filter: brightness(1.08); }
+.ui-switch[aria-checked='true'] .ui-switch-thumb { transform: translateX(16px); background: var(--color-on-accent); }
+.ui-switch:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.ui-switch:disabled { opacity: .55; cursor: default; }

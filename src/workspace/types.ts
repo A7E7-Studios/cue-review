@@ -228,7 +228,7 @@ export interface TranscriptPaneProps {
   retryBusy?: boolean;
 }
 
-/** Settings → Appearance, capability statuses, technical details, the transcription language and its models, and the vocabulary (decision 14, C5). */
+/** Settings → Appearance, capability statuses, technical details, the transcription language, model, device and models, and the vocabulary (decision 14, C5). */
 export interface SettingsDialogProps {
   open: boolean;
   onClose: () => void;
@@ -248,6 +248,14 @@ export interface SettingsDialogProps {
   onPollLanguageModels: () => Promise<void>;
   /** Starts the language models' downloads, or starts them again after a failure; rejects with a message to show (e.g. while transcription is not installed). */
   onDownloadLanguageModels: () => Promise<void>;
+  /**
+   * Reads the speech device alone and puts it into `setup.speechDevice`: right after the graphics card
+   * is switched on or off, then about each second while it is measuring, the next read only after the
+   * last reply. Settles once the reply is applied or ignored.
+   */
+  onPollSpeechDevice: () => Promise<void>;
+  /** Starts measuring the devices again and puts the returned status, now measuring, into `setup.speechDevice`; rejects with a message to show (e.g. while recording). */
+  onTestSpeechDevices: () => Promise<void>;
   /** Every language the speech model knows, offered after Auto; empty until loaded. */
   languages: SpeechLanguage[];
   /** null until loaded. */
@@ -373,6 +381,10 @@ export const NAMES = {
   checkAgain: 'Check again',
   reviewSetup: 'Review setup',
   language: 'Language',
+  /** The Model select, Standard or Large, shown on a graphics card fast enough for Large. */
+  model: 'Model',
+  useGraphicsCard: 'Use the graphics card',
+  testGraphicsCard: 'Test the graphics card again',
   modelDownload: (model: string) => `${model} download`,
   retryModelDownload: 'Try again',
   downloadModel: 'Download',

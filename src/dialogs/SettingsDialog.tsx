@@ -5,6 +5,7 @@ import { platform, shortcut } from '../chrome/windowApi';
 import type { Platform, WindowTheme } from '../chrome/windowApi';
 import { Icon } from '../icons';
 import { Dialog } from '../ui/Dialog';
+import { Switch } from '../ui/Switch';
 import { NAMES } from '../workspace/types';
 import type { SettingsDialogProps } from '../workspace/types';
 import './SettingsDialog.css';
@@ -84,15 +85,47 @@ export function languageGroups(languages: SpeechLanguage[], chosen?: string): Sp
   if (chosen && !common.some(item => item.code === chosen) && !others.some(item => item.code === chosen)) others.push({ code: chosen, name: chosen });
   return [common, others.sort((a, b) => a.name.localeCompare(b.name, 'en'))];
 }
-/** "English model" for small.en, "Multilingual model" for the multilingual small model. */
-export const modelName = (model: LanguageModel) => model.model === 'small.en' ? 'English model' : 'Multilingual model';
+/** The large model, listed first among the models while Large is chosen. */
+const LARGE = 'large-v3-turbo';
+/** The Model select's values: Standard saves no `model`, Large saves `model: 'large'`. */
+const STANDARD = '';
+const LARGE_CHOICE = 'large';
+/** The large model's file (`ggml-large-v3-turbo.bin` in deps.rs), named in the offer before Large is chosen. */
+const LARGE_BYTES = 1_624_555_275;
+const LARGE_OFFER = `Large reads every language more clearly on this graphics card; a ${(LARGE_BYTES / 1e9).toFixed(1)} GB download.`;
+const CARD_HELP = 'Turn it off if a game or headset app stutters while you record.';
+/** "English model" for small.en, "Multilingual model" for the multilingual small model, "Large model" for large-v3-turbo. */
+export const modelName = (model: LanguageModel) => model.model === 'small.en' ? 'English model' : model.model === LARGE ? 'Large model' : 'Multilingual model';
 const megabytes = (bytes: number) => Math.round(bytes / 1e6);
+/** Megabytes as a row writes them, thousands separated: "488", "1,625". */
+const mb = (bytes: number) => megabytes(bytes).toLocaleString('en-US');
 const sentence = (text: string) => /[.!?]$/.test(text) ? text : `${text}.`;
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const INSTALL_FIRST = 'Install transcription first; this model then downloads by itself.';
 const AUTO_NOTE = "Auto detects each take's language: English takes use the English model, every other language the multilingual one.";
-/** How long the dialog waits after one reply before it reads the downloading models again. */
+/** How long the dialog waits after one reply before it reads the downloading models or the measuring device again. */
 const POLL_MS = 1000;
+
+/** "the English and multilingual models transcribe" or "the multilingual model transcribes": the small models Large falls back on. */
+function smallModelsTranscribe(models: LanguageModel[]): string {
+  const names = models.map(model => model.model === 'small.en' ? 'English' : 'multilingual');
+  if (!names.length) return 'the small models transcribe';
+  return names.length > 1 ? `the ${names.join(' and ')} models transcribe` : `the ${names[0]} model transcribes`;
+}
+
+/** Calls `read` about each second while `active`: the next call waits for the last reply, so replies never pile up. */
+function useEverySecond(active: boolean, read: () => Promise<unknown>) {
+  const latest = useRef(read);
+  useEffect(() => { latest.current = read; });
+  useEffect(() => {
+    if (!active) return;
+    let stopped = false;
+    let timer = 0;
+    const next = () => { timer = window.setTimeout(() => void latest.current().then(() => { if (!stopped) next(); }), POLL_MS); };
+    next();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [active]);
+}
 
 /**
  * Which takes base transcribes while some models are not ready: every recording under a fixed
@@ -107,7 +140,7 @@ function baseScope(auto: boolean, waiting: LanguageModel[]): string {
 export function modelState(model: LanguageModel): string {
   switch (model.state) {
     case 'ready': return 'Ready';
-    case 'downloading': return model.totalBytes > 0 ? `Downloading · ${megabytes(model.receivedBytes)} of ${megabytes(model.totalBytes)} MB` : 'Downloading';
+    case 'downloading': return model.totalBytes > 0 ? `Downloading · ${mb(model.receivedBytes)} of ${mb(model.totalBytes)} MB` : 'Downloading';
     case 'failed': return 'Download failed';
     default: return 'Not downloaded yet';
   }
@@ -126,8 +159,8 @@ export function shortcutRows(os: Platform): ShortcutRow[] {
   ];
 }
 
-/** Settings → Appearance, capability statuses, technical details, the transcription language and its models, vocabulary and shortcuts (decision 14, C5). */
-export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme, setup, installing, onInstall, onCheckAgain, onPollLanguageModels, onDownloadLanguageModels, languages, settings, onSaveSettings, error }: SettingsDialogProps) {
+/** Settings → Appearance, capability statuses, technical details, the transcription language, model, device and models, vocabulary and shortcuts (decision 14, C5). */
+export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme, setup, installing, onInstall, onCheckAgain, onPollLanguageModels, onDownloadLanguageModels, onPollSpeechDevice, onTestSpeechDevices, languages, settings, onSaveSettings, error }: SettingsDialogProps) {
   const stored = settings?.vocabulary ?? '';
   const [draft, setDraft] = useState(stored);
   const [problem, setProblem] = useState('');
@@ -136,34 +169,50 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   const [saved, setSaved] = useState('');
   const pending = useRef(false);
   const field = useRef<HTMLTextAreaElement>(null);
-  const ids = { help: useId(), problem: useId(), field: useId(), tools: useId(), transcription: useId(), languageProblem: useId(), shortcuts: useId() };
+  const ids = { help: useId(), problem: useId(), field: useId(), tools: useId(), transcription: useId(), languageProblem: useId(), modelProblem: useId(), shortcuts: useId() };
   const chosen = settings?.language ?? AUTO;
   /** Shown at once while the choice saves; the stored language again if saving fails. */
   const [language, setLanguage] = useState<string>(chosen);
   const [languageProblem, setLanguageProblem] = useState('');
+  const storedModel = settings?.model === 'large' ? LARGE_CHOICE : STANDARD;
+  /** The Model select, likewise shown at once and restored if saving fails. */
+  const [modelChoice, setModelChoice] = useState(storedModel);
+  const [modelProblem, setModelProblem] = useState('');
+  const storedCardOn = settings?.graphicsCard !== false;
+  /** The graphics-card switch, likewise. */
+  const [cardOn, setCardOn] = useState(storedCardOn);
+  /** A refused switch or test, shown in the device's fold. */
+  const [deviceProblem, setDeviceProblem] = useState('');
+  const [testing, setTesting] = useState(false);
   const [starting, setStarting] = useState(false);
   const pollModel = useRef(onPollLanguageModels);
-  useEffect(() => { pollModel.current = onPollLanguageModels; });
+  const pollDevice = useRef(onPollSpeechDevice);
+  useEffect(() => { pollModel.current = onPollLanguageModels; pollDevice.current = onPollSpeechDevice; });
   /** One read of the models' states; a failed read only waits for the next. */
   const readModel = () => pollModel.current().catch(() => {});
+  /** One read of the speech device, likewise. */
+  const readDevice = () => pollDevice.current().catch(() => {});
+
+  const device = setup?.speechDevice;
+  const card = device?.card;
+  const measuring = device?.state === 'measuring';
+  /** The card stopped during a transcription: the line warns, and its fold opens by itself to say so. */
+  const stopped = !!card?.stopped && !measuring;
+  const [unfolded, setUnfolded] = useState(stopped);
 
   // Opening, loading or saving shows the stored value.
   useEffect(() => { setDraft(stored); setProblem(''); }, [stored, open]);
   useEffect(() => { setLanguage(chosen); }, [chosen, open]);
-  useEffect(() => { if (open) { setSaved(''); setLanguageProblem(''); } }, [open]);
+  useEffect(() => { setModelChoice(storedModel); }, [storedModel, open]);
+  useEffect(() => { setCardOn(storedCardOn); }, [storedCardOn, open]);
+  useEffect(() => { if (open) { setSaved(''); setLanguageProblem(''); setModelProblem(''); setDeviceProblem(''); setUnfolded(stopped); } }, [open]);
+  useEffect(() => { if (stopped) setUnfolded(true); }, [stopped]);
 
-  // While a language model downloads, the states are read about each second so its progress moves:
-  // the next read waits for the last reply, so replies never pile up.
+  // While a language model downloads, the states are read about each second so its progress moves;
+  // while the devices are measured, the device is, so the line changes once the measurement ends.
   const models = setup?.languageModels ?? [];
-  const downloading = open && models.some(model => model.state === 'downloading');
-  useEffect(() => {
-    if (!downloading) return;
-    let stopped = false;
-    let timer = 0;
-    const next = () => { timer = window.setTimeout(() => void readModel().then(() => { if (!stopped) next(); }), POLL_MS); };
-    next();
-    return () => { stopped = true; window.clearTimeout(timer); };
-  }, [downloading]);
+  useEverySecond(open && models.some(model => model.state === 'downloading'), readModel);
+  useEverySecond(open && measuring, readDevice);
 
   // Choosing saves at once and keeps the vocabulary as stored; Auto saves no language. The backend
   // has marked the language's models downloading by the time it returns, so one read starts the progress.
@@ -172,6 +221,28 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
     setLanguage(next); setLanguageProblem('');
     try { await onSaveSettings({ ...settings, language: next === AUTO ? undefined : next } satisfies Settings); void readModel(); }
     catch (failure) { setLanguage(chosen); setLanguageProblem(message(failure)); }
+  };
+  // Large starts its download the way a language does; Standard saves no model.
+  const chooseModel = async (next: string) => {
+    if (!settings) return;
+    setModelChoice(next); setModelProblem('');
+    try { await onSaveSettings({ ...settings, model: next === LARGE_CHOICE ? 'large' : undefined } satisfies Settings); void readModel(); }
+    catch (failure) { setModelChoice(storedModel); setModelProblem(message(failure)); }
+  };
+  // Off saves `graphicsCard: false`, on removes it; one read of the device then shows where transcription runs.
+  const switchCard = async (next: boolean) => {
+    if (!settings) return;
+    setCardOn(next); setDeviceProblem('');
+    try { await onSaveSettings({ ...settings, graphicsCard: next ? undefined : false } satisfies Settings); void readDevice(); }
+    catch (failure) { setCardOn(storedCardOn); setDeviceProblem(message(failure)); }
+  };
+  // The button stays focusable but inert while the devices are measured, so focus stays on it.
+  const testDevices = async () => {
+    if (testing || measuring) return;
+    setTesting(true); setDeviceProblem('');
+    try { await onTestSpeechDevices(); }
+    catch (failure) { setDeviceProblem(message(failure)); }
+    finally { setTesting(false); }
   };
   const download = async () => {
     if (starting) return;
@@ -206,10 +277,85 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   const auto = chosen === AUTO;
   const groups = languageGroups(languages, auto ? undefined : chosen);
   const named = groups.flat().find(item => item.code === chosen)?.name ?? chosen;
+  const large = models.find(model => model.model === LARGE);
+  const small = models.filter(model => model.model !== LARGE);
   const waiting = models.filter(model => model.state !== 'ready');
+  const waitingSmall = small.filter(model => model.state !== 'ready');
   const failed = waiting.some(model => model.state === 'failed');
   const fetching = waiting.some(model => model.state === 'downloading');
-  const scope = baseScope(auto, waiting);
+  const scope = baseScope(auto, waitingSmall);
+  const smallTranscribe = smallModelsTranscribe(small);
+
+  /** Transcription runs on the graphics card now; the switch counts at once, before the device is read again. */
+  const onCard = cardOn && device?.kind === 'graphicsCard';
+  /** The Model select: offered on a card fast enough for Large, and kept while Large is saved so Standard can be chosen again. */
+  const modelOffered = !!device?.largeOffered || storedModel === LARGE_CHOICE;
+  const largeInUse = large?.state === 'ready' && onCard && !device?.largeSlow;
+  /** With Large in use, the small models move into the device's fold as the fallback. */
+  const fallbackFolded = largeInUse && small.length > 0 && !waitingSmall.length;
+  const rows = fallbackFolded ? models.filter(model => model.model === LARGE) : models;
+  /**
+   * The test is offered where the runtime can measure the devices and no card works: none measured faster, it
+   * stopped, or the devices are being measured.
+   */
+  const offerTest = !!device?.measurable && (!card || stopped || measuring);
+  /** The line unfolds only onto something; otherwise it is a plain line. */
+  const foldHolds = stopped || !!card || fallbackFolded || offerTest || !!deviceProblem;
+
+  /** The one note that ends the models: what transcribes, or what waits for a download. */
+  const note = (() => {
+    if (!waiting.length) {
+      if (large) {
+        if (largeInUse) return 'The large model transcribes every language on the graphics card.';
+        if (device?.largeSlow && onCard) return `On this graphics card the large model is slower than the processor with the small models, so ${smallTranscribe}.`;
+        if (!cardOn) return `With the graphics card off, ${smallTranscribe}.`;
+        if (stopped) return `With the graphics card stopped, ${smallTranscribe}.`;
+        return `Without the graphics card, ${smallTranscribe}.`;
+      }
+      const fixed = auto ? AUTO_NOTE : `Every take is transcribed as ${named}, whatever is spoken.`;
+      const offer = modelChoice === STANDARD && !!device?.largeOffered && !!card && !stopped && cardOn;
+      return offer ? `${fixed} ${LARGE_OFFER}` : fixed;
+    }
+    // Without transcription installed there is no base model to fall back on, and the backend refuses the download.
+    if (needsInstall) return fetching ? undefined : INSTALL_FIRST;
+    if (failed) return undefined;
+    if (waitingSmall.length) {
+      const several = waitingSmall.length > 1;
+      return fetching ? `Until ${several ? 'they finish' : 'it finishes'}, ${scope} are transcribed with the base model.`
+        : `${capital(scope)} are transcribed with the base model until ${several ? 'they are' : 'it is'} installed.`;
+    }
+    // Only the large model waits: the small models transcribe meanwhile.
+    return fetching ? `Until it finishes, ${smallTranscribe}.` : `${capital(smallTranscribe)} until it is installed.`;
+  })();
+
+  /** "Runs on NVIDIA GeForce RTX 5090", with what the measurement or a stopped card adds. */
+  const deviceLine = device && <>
+    {stopped && <Icon name="warning"/>}
+    <span className="settings-device-label">Runs on</span> <span className="settings-device-name">{onCard ? device.name ?? card?.name : 'the processor'}</span>
+    {measuring ? <span className="settings-device-label"> · testing the graphics card…</span>
+      : stopped && <span className="settings-device-label"> · the graphics card stopped</span>}
+  </>;
+
+  const modelRow = (model: LanguageModel) => {
+    /** Large, installed, waiting for the graphics card: switched off, stopped or not measured faster. */
+    const idle = model.model === LARGE && model.state === 'ready' && !onCard;
+    const ready = model.state === 'ready' && !idle;
+    /** What transcribes until a failed model is installed. */
+    const meanwhile = model.model === LARGE ? `${capital(smallTranscribe)} until it is installed.` : `${capital(scope)} are transcribed with the base model until it is installed.`;
+    return <Fragment key={model.model}>
+      <div className="settings-status" data-available={ready || undefined}>
+        <span>{modelName(model)}</span>
+        <span>{ready && <Icon name="check"/>}{idle ? 'Needs the graphics card' : modelState(model)}</span>
+      </div>
+      {model.state === 'downloading' && <div className="settings-progress" role="progressbar" aria-label={NAMES.modelDownload(modelName(model))}
+        aria-valuemin={0} aria-valuemax={model.totalBytes > 0 ? megabytes(model.totalBytes) : undefined}
+        aria-valuenow={model.totalBytes > 0 ? Math.min(megabytes(model.receivedBytes), megabytes(model.totalBytes)) : undefined}
+        aria-valuetext={model.totalBytes > 0 ? `${mb(model.receivedBytes)} of ${mb(model.totalBytes)} MB` : undefined}>
+        <span style={{ width: `${model.totalBytes > 0 ? Math.min(100, model.receivedBytes / model.totalBytes * 100) : 0}%` }}/>
+      </div>}
+      {model.state === 'failed' && <p className="settings-issue">{sentence(model.error?.trim() || 'The download did not finish')}{needsInstall ? '' : ` ${meanwhile}`}</p>}
+    </Fragment>;
+  };
 
   return <Dialog open={open} onClose={onClose} title={NAMES.settingsDialog} className="settings-dialog" closeLabel={NAMES.closeSettings} fallbackFocusRef={fallbackFocusRef}>
     <div className="settings-row settings-appearance">
@@ -253,25 +399,17 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
           </Fragment>)}
         </select>
       </div>
-      {models.map(model => <Fragment key={model.model}>
-        <div className="settings-status" data-available={model.state === 'ready' || undefined}>
-          <span>{modelName(model)}</span>
-          <span>{model.state === 'ready' && <Icon name="check"/>}{modelState(model)}</span>
-        </div>
-        {model.state === 'downloading' && <div className="settings-progress" role="progressbar" aria-label={NAMES.modelDownload(modelName(model))}
-          aria-valuemin={0} aria-valuemax={model.totalBytes > 0 ? megabytes(model.totalBytes) : undefined}
-          aria-valuenow={model.totalBytes > 0 ? Math.min(megabytes(model.receivedBytes), megabytes(model.totalBytes)) : undefined}
-          aria-valuetext={model.totalBytes > 0 ? `${megabytes(model.receivedBytes)} of ${megabytes(model.totalBytes)} MB` : undefined}>
-          <span style={{ width: `${model.totalBytes > 0 ? Math.min(100, model.receivedBytes / model.totalBytes * 100) : 0}%` }}/>
-        </div>}
-        {model.state === 'failed' && <p className="settings-issue">{sentence(model.error?.trim() || 'The download did not finish')}{needsInstall ? '' : ` ${capital(scope)} are transcribed with the base model until it is installed.`}</p>}
-      </Fragment>)}
+      {modelOffered && <div className="settings-row">
+        <label htmlFor={`${ids.field}-model`}>{NAMES.model}</label>
+        <select id={`${ids.field}-model`} value={modelChoice} disabled={!settings || installing}
+          aria-describedby={modelProblem ? ids.modelProblem : undefined} onChange={event => void chooseModel(event.target.value)}>
+          <option value={STANDARD}>Standard</option>
+          <option value={LARGE_CHOICE}>Large</option>
+        </select>
+      </div>}
+      {rows.map(modelRow)}
       {models.length > 0 && <>
-        {!waiting.length && <p className="settings-note">{auto ? AUTO_NOTE : `Every take is transcribed as ${named}, whatever is spoken.`}</p>}
-        {!needsInstall && !failed && fetching && <p className="settings-note">Until {waiting.length > 1 ? 'they finish' : 'it finishes'}, {scope} are transcribed with the base model.</p>}
-        {!needsInstall && !failed && !fetching && waiting.length > 0 && <p className="settings-note">{capital(scope)} are transcribed with the base model until {waiting.length > 1 ? 'they are' : 'it is'} installed.</p>}
-        {/* Without transcription installed there is no base model to fall back on, and the backend refuses the download. */}
-        {needsInstall && waiting.length > 0 && !fetching && <p className="settings-note">{INSTALL_FIRST}</p>}
+        {note && <p className="settings-note">{note}</p>}
         {!needsInstall && waiting.length > 0 && !fetching && <div className="settings-actions">
           <button type="button" className="settings-pill" disabled={installing} aria-disabled={starting || undefined} onClick={() => void download()}>
             {failed ? NAMES.retryModelDownload : NAMES.downloadModel}
@@ -279,6 +417,26 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
         </div>}
       </>}
       {languageProblem && <p id={ids.languageProblem} className="settings-field-error" role="alert">{languageProblem}</p>}
+      {modelProblem && <p id={ids.modelProblem} className="settings-field-error" role="alert">{modelProblem}</p>}
+      {/* Where transcription runs: one folded line, which unfolds onto the switch, the test and the fallback models. */}
+      {device && !foldHolds && <p className="settings-device settings-device-line">{deviceLine}</p>}
+      {device && foldHolds && <details className="settings-device" open={unfolded} data-warning={stopped || undefined}
+        onToggle={event => setUnfolded(event.currentTarget.open)}>
+        <summary>{deviceLine}</summary>
+        {stopped && <p className="settings-issue">The {card?.name} stopped during a transcription, so the processor transcribes until it is tested again.</p>}
+        {card && <Switch label={NAMES.useGraphicsCard} help={CARD_HELP} checked={cardOn}
+          disabled={!settings || installing} onChange={next => void switchCard(next)}/>}
+        {fallbackFolded && <>
+          <p className="settings-note settings-fallback">Fallback when the graphics card is off:</p>
+          {small.map(modelRow)}
+        </>}
+        {offerTest && <div className="settings-actions">
+          <button type="button" className="settings-pill" disabled={installing} aria-disabled={testing || measuring || undefined} onClick={() => void testDevices()}>
+            <Icon name="refresh"/>{NAMES.testGraphicsCard}
+          </button>
+        </div>}
+        {deviceProblem && <p className="settings-field-error" role="alert">{deviceProblem}</p>}
+      </details>}
     </section>
 
     <form className="settings-section settings-vocabulary" onSubmit={event => void save(event)} noValidate>
