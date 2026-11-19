@@ -1,16 +1,22 @@
 use crate::{
-    models::{Dependency, LanguageModel, SetupStatus},
+    models::{
+        Dependency, DeviceKind, DeviceState, LanguageModel, SetupStatus, SpeechCard, SpeechDevice,
+    },
     settings,
-    store::data_root,
+    store::{data_root, read_json, write_json},
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Mutex, OnceLock},
-    time::Duration,
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
 };
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub fn set_resource_dir(path: PathBuf) {
@@ -96,7 +102,10 @@ pub(crate) fn locate(name: &str) -> Result<PathBuf, String> {
     ))
 }
 pub fn command(name: &str) -> Result<Command, String> {
-    let cmd = Command::new(tool(name)?);
+    Ok(windowless(Command::new(tool(name)?)))
+}
+/// `cmd`, opening no console window on Windows.
+fn windowless(cmd: Command) -> Command {
     #[cfg(windows)]
     let cmd = {
         use std::os::windows::process::CommandExt;
@@ -104,7 +113,27 @@ pub fn command(name: &str) -> Result<Command, String> {
         cmd.creation_flags(0x08000000);
         cmd
     };
-    Ok(cmd)
+    cmd
+}
+/// The Vulkan build of `whisper-cli`, which runs on a graphics card: in the
+/// `vulkan` subfolder of the runtime folder, on Windows only. `None` where
+/// it is missing, and the processor builds transcribe as ever.
+pub fn card_build() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    card_build_beside(&locate("whisper-cli").ok()?)
+}
+/// The Vulkan build beside the processor build `binary`, when it is there.
+fn card_build_beside(binary: &Path) -> Option<PathBuf> {
+    let vulkan = binary.parent()?.join("vulkan").join(binary.file_name()?);
+    vulkan.is_file().then_some(vulkan)
+}
+/// A command running the Vulkan build of `whisper-cli`.
+pub fn card_command() -> Result<Command, String> {
+    let build =
+        card_build().ok_or("The graphics card build of the speech runtime is not installed.")?;
+    Ok(windowless(Command::new(build)))
 }
 /// A Whisper model the app installs: its file in `<root>/models`, its exact
 /// size and SHA-256, and its alignment heads preset.
@@ -139,6 +168,14 @@ pub const SMALL: SpeechModel = SpeechModel {
     sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
     dtw: "small",
 };
+/// The larger model, offered on a fast graphics card and run only there.
+pub const LARGE: SpeechModel = SpeechModel {
+    name: "large-v3-turbo",
+    file: "ggml-large-v3-turbo.bin",
+    size: 1_624_555_275,
+    sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    dtw: "large.v3.turbo",
+};
 impl SpeechModel {
     fn url(&self) -> String {
         format!(
@@ -172,6 +209,24 @@ pub fn needed_models(chosen: Option<&str>) -> Vec<&'static SpeechModel> {
         Some(language) => vec![language_model(language)],
     }
 }
+/// Every model the choices in Settings need, in download order: the small
+/// models of the language ([`needed_models`]), which transcribe on the
+/// processor and until the larger one is there, then the larger model when
+/// Large is chosen.
+pub fn wanted_models(chosen: Option<&str>, large: bool) -> Vec<&'static SpeechModel> {
+    let mut wanted = needed_models(chosen);
+    if large {
+        wanted.push(&LARGE);
+    }
+    wanted
+}
+/// The same models as Settings and `cue setup` list them: the larger model
+/// first.
+fn listed_models(chosen: Option<&str>, large: bool) -> Vec<&'static SpeechModel> {
+    let mut listed = wanted_models(chosen, large);
+    listed.rotate_right(usize::from(large));
+    listed
+}
 /// The model file a transcription runs, and its alignment preset (`None`
 /// for a custom model without `CUEREVIEW_DTW_MODEL`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,8 +234,9 @@ pub struct ModelChoice {
     pub path: PathBuf,
     pub dtw: Option<String>,
 }
-/// The model for a final transcription in `language`: its own model once
-/// installed, else base. `CUEREVIEW_MODEL` replaces both.
+/// The small model for a final transcription in `language`: its own model
+/// once installed, else base. `CUEREVIEW_MODEL` replaces both. It is what
+/// the processor transcribes with.
 pub fn final_model(language: &str) -> ModelChoice {
     custom_model().unwrap_or_else(|| {
         let models = data_root().join("models");
@@ -191,27 +247,89 @@ pub fn final_model(language: &str) -> ModelChoice {
         }
     })
 }
+fn large_model() -> ModelChoice {
+    ModelChoice {
+        path: LARGE.path_in(&models_dir()),
+        dtw: Some(LARGE.dtw.into()),
+    }
+}
+/// How one final transcription runs: on the graphics card `card` of the
+/// Vulkan build, or on the processor build with `None`, with `model`; and
+/// `small`, the small model of its language, which does it again on the
+/// processor when the card fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalRun {
+    pub card: Option<u32>,
+    pub model: ModelChoice,
+    pub small: ModelChoice,
+}
+impl FinalRun {
+    /// On the processor build with `small`.
+    pub fn processor(small: ModelChoice) -> Self {
+        Self {
+            card: None,
+            model: small.clone(),
+            small,
+        }
+    }
+    /// On `card` when there is one, with `large` when it is given, else
+    /// `small`; on the processor with `small` otherwise. The larger model
+    /// never runs on the processor.
+    pub(crate) fn on(card: Option<u32>, large: Option<ModelChoice>, small: ModelChoice) -> Self {
+        match card {
+            Some(_) => Self {
+                card,
+                model: large.unwrap_or_else(|| small.clone()),
+                small,
+            },
+            None => Self::processor(small),
+        }
+    }
+}
+/// How a final transcription in `language` runs now ([`Facts::card`],
+/// [`Facts::large`]): Stop's pass, Retry, `cue transcribe` and the refining
+/// pass.
+pub fn final_run(language: &str) -> FinalRun {
+    let facts = Facts::now();
+    let large = (facts.large() && custom_model().is_none()).then(large_model);
+    FinalRun::on(facts.card(), large, final_model(language))
+}
 /// The final models of one take, chosen once when it starts, so every
 /// stretch of the take in one language comes from the same model whatever
 /// finishes downloading meanwhile.
 pub struct TakeModels {
     english: ModelChoice,
     other: ModelChoice,
+    /// The larger model, when it may transcribe the take on the card.
+    large: Option<ModelChoice>,
 }
 impl TakeModels {
     pub fn now() -> Self {
+        let large = Facts::now().large_fits() && custom_model().is_none();
         Self {
             english: final_model("en"),
             // Any other code: they all use the multilingual model.
             other: final_model("de"),
+            large: large.then(large_model),
         }
     }
+    /// The small model of `language`.
     pub fn of(&self, language: &str) -> &ModelChoice {
         if language_model(language).name == SMALL_EN.name {
             &self.english
         } else {
             &self.other
         }
+    }
+    /// How a stretch in `language` runs: on the card in use now, which the
+    /// switch or a failure can stop during the take, with the take's larger
+    /// model when it has one; else with the small model on the processor.
+    pub fn run_of(&self, language: &str) -> FinalRun {
+        self.run_on(Facts::now().card(), language)
+    }
+    /// [`TakeModels::run_of`] on `card`, or on the processor with `None`.
+    fn run_on(&self, card: Option<u32>, language: &str) -> FinalRun {
+        FinalRun::on(card, self.large.clone(), self.of(language).clone())
     }
 }
 /// The model for live words while recording, and for detecting a take's
@@ -257,9 +375,13 @@ fn fetch_state() -> &'static Mutex<Fetch> {
 fn locked(state: &Mutex<Fetch>) -> std::sync::MutexGuard<'_, Fetch> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
-/// The language chosen in Settings; `None` is Auto.
-fn chosen_language() -> Option<&'static str> {
-    settings::chosen_language(&settings::load(&data_root()))
+/// The models the choices saved in Settings need, in download order.
+fn wanted_now() -> Vec<&'static SpeechModel> {
+    let settings = settings::load(&data_root());
+    wanted_models(
+        settings::chosen_language(&settings),
+        settings::large_chosen(&settings),
+    )
 }
 fn needs(wanted: &[&SpeechModel], name: &str) -> bool {
     wanted.iter().any(|model| model.name == name)
@@ -295,18 +417,18 @@ fn stop_other(state: &Mutex<Fetch>, wanted: &[&SpeechModel]) {
         fetch.cancel = !needs(wanted, fetch.model);
     }
 }
-/// Downloads every model the chosen language needs, in order, until all are
-/// installed, asking `chosen` again after each download, so a language
-/// chosen meanwhile gets its models too. Stops at the first failure of a
-/// model still needed, and releases the fetch.
+/// Downloads every model the choices need, in order, until all are
+/// installed, asking `wanted` for them again after each download, so a
+/// language or model chosen meanwhile gets its models too. Stops at the
+/// first failure of a model still needed, and releases the fetch.
 fn fetch_loop(
     models: &Path,
-    chosen: &dyn Fn() -> Option<&'static str>,
+    wanted: &dyn Fn() -> Vec<&'static SpeechModel>,
     download: Downloader<'_>,
     state: &Mutex<Fetch>,
 ) -> Result<(), String> {
     let missing = || {
-        needed_models(chosen())
+        wanted()
             .into_iter()
             .find(|model| !model.installed_in(models))
     };
@@ -339,7 +461,7 @@ fn fetch_loop(
             let mut fetch = locked(state);
             // A download stopped for another language is no failure, even
             // when that language is taken back before this point.
-            if !stopped.get() && needs(&needed_models(chosen()), model.name) {
+            if !stopped.get() && needs(&wanted(), model.name) {
                 fetch.error = Some(error.clone());
                 fetch.running = false;
                 return Err(error);
@@ -396,24 +518,26 @@ fn sweep_partial(models: &Path) {
         }
     }
 }
-/// Downloads every model the chosen language needs that is not installed,
-/// blocking, with the progress in [`setup_status`]. Used by
+/// Downloads every model the choices in Settings need that is not
+/// installed, blocking, with the progress in [`setup_status`]: the chosen
+/// language's, and the larger model when Large is chosen. Used by
 /// `cue setup --install`.
 pub fn fetch_language_models() -> Result<(), String> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return Ok(());
     }
     let models = models_dir();
-    if !claim(fetch_state(), &needed_models(chosen_language())) {
+    if !claim(fetch_state(), &wanted_now()) {
         return Err("The language models are already being downloaded.".into());
     }
     sweep_partial(&models);
-    fetch_loop(&models, &chosen_language, &download_model, fetch_state())
+    fetch_loop(&models, &wanted_now, &download_model, fetch_state())
 }
-/// Starts downloading the models the chosen language needs on their own
+/// Starts downloading the models the choices in Settings need on their own
 /// thread, unless they are installed. A download already running moves on to
 /// them. Refused until Install transcription has put base and the speech
-/// tools in place.
+/// tools in place. Once they are installed the app's measurement worker is
+/// woken, which times the larger model on the card after its download.
 pub fn start_language_models_download() -> Result<(), String> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return Ok(());
@@ -424,7 +548,7 @@ pub fn start_language_models_download() -> Result<(), String> {
         );
     }
     let models = models_dir();
-    let wanted = needed_models(chosen_language());
+    let wanted = wanted_now();
     if wanted.iter().all(|model| model.installed_in(&models)) {
         stop_other(fetch_state(), &wanted);
         return Ok(());
@@ -434,23 +558,31 @@ pub fn start_language_models_download() -> Result<(), String> {
     }
     sweep_partial(&models);
     std::thread::spawn(move || {
-        let _ = fetch_loop(&models, &chosen_language, &download_model, fetch_state());
+        if fetch_loop(&models, &wanted_now, &download_model, fetch_state()).is_ok() {
+            wake_measuring();
+        }
     });
     Ok(())
 }
-/// The models the chosen language needs and their download, in download
-/// order, for Settings and `cue setup`. Empty when `CUEREVIEW_MODEL`
+/// The models the choices in Settings need and their download, for
+/// Settings and `cue setup`: the larger model first when Large is chosen,
+/// then the small models in download order. Empty when `CUEREVIEW_MODEL`
 /// replaces them.
 pub fn language_models_status() -> Vec<LanguageModel> {
     if std::env::var_os("CUEREVIEW_MODEL").is_some() {
         return Vec::new();
     }
     let fetch = locked(fetch_state()).clone();
-    statuses_of(&models_dir(), chosen_language(), &fetch)
+    let settings = settings::load(&data_root());
+    let listed = listed_models(
+        settings::chosen_language(&settings),
+        settings::large_chosen(&settings),
+    );
+    statuses_of(&models_dir(), &listed, &fetch)
 }
-fn statuses_of(models: &Path, chosen: Option<&str>, fetch: &Fetch) -> Vec<LanguageModel> {
-    needed_models(chosen)
-        .into_iter()
+fn statuses_of(models: &Path, listed: &[&SpeechModel], fetch: &Fetch) -> Vec<LanguageModel> {
+    listed
+        .iter()
         .map(|model| status_of(models, model, fetch))
         .collect()
 }
@@ -553,6 +685,7 @@ pub fn setup_status() -> SetupStatus {
         model_ready,
         model_path: model_ready.then(|| model_path().to_string_lossy().into()),
         language_models: language_models_status(),
+        speech_device: speech_device_status(),
     }
 }
 fn download(url: &str, target: &Path, expected: Option<&str>) -> Result<(), String> {
@@ -730,6 +863,805 @@ fn vad_model_ready() -> bool {
     fs::read(path).is_ok_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == VAD_MODEL_SHA256)
 }
 
+// The graphics card. The Vulkan build names the cards it can use in every
+// run's log; a run that cannot use the card it was given falls back to the
+// processor inside the same process and still exits with 0, so only its log
+// tells where it ran.
+
+/// A graphics card the Vulkan build lists: its number for `-dev` and its
+/// name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Card {
+    pub index: u32,
+    pub name: String,
+}
+/// The cards a Vulkan run's log lists, in its order, from lines like
+/// `ggml_vulkan: 0 = NVIDIA GeForce RTX 5090 (NVIDIA) | uma: 0 | ...`: the
+/// name is what comes before the first ` | ` without its last bracketed
+/// group, the driver's, so `AMD Radeon(TM) Graphics` keeps its `(TM)`.
+/// Empty for the processor build's log, which has no such lines.
+pub(crate) fn listed_cards(log: &str) -> Vec<Card> {
+    let mut cards: Vec<Card> = Vec::new();
+    for line in log.lines() {
+        let Some((index, rest)) = line
+            .trim()
+            .strip_prefix("ggml_vulkan: ")
+            .and_then(|rest| rest.split_once(" = "))
+        else {
+            continue;
+        };
+        let Ok(index) = index.parse() else {
+            continue;
+        };
+        let described = rest.split(" | ").next().unwrap_or_default().trim();
+        let name = match described.rfind(" (") {
+            Some(at) if described.ends_with(')') => &described[..at],
+            _ => described,
+        };
+        if !name.is_empty() && cards.iter().all(|card| card.index != index) {
+            cards.push(Card {
+                index,
+                name: name.trim().into(),
+            });
+        }
+    }
+    cards
+}
+/// The card a run's log shows in use: `N` for
+/// `whisper_backend_init_gpu: using VulkanN backend`. `None` when the run
+/// was on the processor: `no GPU found`, or the processor build's log.
+pub(crate) fn card_in_use(log: &str) -> Option<u32> {
+    const MARK: &str = "whisper_backend_init_gpu: using Vulkan";
+    let rest = &log[log.find(MARK)? + MARK.len()..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if !rest[digits..].starts_with(" backend") {
+        return None;
+    }
+    rest[..digits].parse().ok()
+}
+
+/// The last measurement of the devices, saved as
+/// `<data root>/speech-device.json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Measured {
+    /// The computer it was made on: when that changes, the devices are
+    /// measured again.
+    pub computer: Computer,
+    /// The model the sample was transcribed with: `small`, or `base` where
+    /// small was missing.
+    pub model: String,
+    /// The processor build's counted time for the sample, in ms.
+    pub processor_ms: u64,
+    /// Each card the Vulkan build listed, with its counted time.
+    pub cards: Vec<CardTime>,
+    /// The card that transcribes: the fastest one, when it beat the
+    /// processor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<u32>,
+    /// A run on the chosen card failed or turned out to use the processor:
+    /// the processor transcribes until the devices are measured again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stopped: bool,
+    /// The larger model's time for the sample on the chosen card, once it
+    /// was timed after its download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large: Option<LargeTime>,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+/// One card of a measurement: its number for `-dev`, its name, and its
+/// counted time in ms, `None` when its runs failed or used the processor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardTime {
+    pub index: u32,
+    pub name: String,
+    pub ms: Option<u64>,
+}
+/// The larger model's run of the sample on the chosen card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LargeTime {
+    /// It took this many ms.
+    Ms(u64),
+    /// It failed, or the log shows the processor.
+    Failed,
+}
+/// What decides whether the devices are measured again: the app's version,
+/// the speech runtime's builds, and the display adapters with their driver
+/// versions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Computer {
+    pub app: String,
+    /// Each build of `whisper-cli` that is timed: its path, size and the
+    /// time it was written.
+    pub runtime: Vec<String>,
+    pub adapters: Vec<Adapter>,
+}
+/// A display adapter, from the registry's display class: `DriverDesc` and
+/// `DriverVersion`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Adapter {
+    pub name: String,
+    pub driver: String,
+}
+impl Measured {
+    fn chosen_card(&self) -> Option<&CardTime> {
+        let chosen = self.chosen?;
+        self.cards.iter().find(|card| card.index == chosen)
+    }
+    /// Whether the larger model is offered: the chosen card ran the sample
+    /// in two thirds of the processor's time or less ([`offers_large`]).
+    fn large_offered(&self) -> bool {
+        self.chosen_card()
+            .and_then(|card| card.ms)
+            .is_some_and(|ms| offers_large(self.processor_ms, ms))
+    }
+    /// Whether the larger model, timed on the card, was slower than the
+    /// processor with the small model, or failed there.
+    fn large_slow(&self) -> bool {
+        match self.large {
+            Some(LargeTime::Ms(ms)) => ms > self.processor_ms,
+            Some(LargeTime::Failed) => true,
+            None => false,
+        }
+    }
+    /// Whether the larger model may run on the card: offered, and timed
+    /// there no slower than the processor with the small model.
+    fn large_fits(&self) -> bool {
+        self.large_offered()
+            && matches!(self.large, Some(LargeTime::Ms(ms)) if ms <= self.processor_ms)
+    }
+}
+/// A card that runs the sample in two thirds of the processor's time or less
+/// runs the larger model no slower than the processor runs the small one:
+/// on the RTX 5090 the large model took 1.5 times the small one's time.
+fn offers_large(processor_ms: u64, card_ms: u64) -> bool {
+    card_ms * 3 <= processor_ms * 2
+}
+/// Whether the devices are to be measured: nothing was saved, or it was
+/// saved on another computer than `now`.
+fn needs_measuring(saved: Option<&Measured>, now: &Computer) -> bool {
+    saved.is_none_or(|saved| saved.computer != *now)
+}
+/// Whether the larger model waits to be timed on the chosen card: it is
+/// installed and offered, and the card has not stopped.
+fn large_due(measured: &Measured, installed: bool) -> bool {
+    installed && measured.large.is_none() && !measured.stopped && measured.large_offered()
+}
+
+/// Where one run of the sample goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum On {
+    Processor,
+    Card(u32),
+}
+/// One timed run of the sample.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Run {
+    /// It exited with success.
+    pub ok: bool,
+    pub ms: u64,
+    /// What it wrote to stderr.
+    pub log: String,
+}
+/// A measurement stopped before its end, because a recording started.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Cut;
+/// Runs the sample once on a device with a model.
+type Sampler<'a> = &'a dyn Fn(On, &'static SpeechModel) -> Result<Run, Cut>;
+
+/// A device's counted time from its two runs: the second one's, when both
+/// ended well and, on a card, each log shows that card in use. The first
+/// carries a card's one-time warm-up.
+fn counted(runs: [&Run; 2], card: Option<u32>) -> Option<u64> {
+    let fine = |run: &&Run| run.ok && card.is_none_or(|card| card_in_use(&run.log) == Some(card));
+    runs.iter().all(fine).then_some(runs[1].ms)
+}
+/// The card that transcribes: the fastest measured one, when it beat the
+/// processor. A tie goes to the processor.
+fn fastest(processor_ms: u64, cards: &[CardTime]) -> Option<u32> {
+    cards
+        .iter()
+        .filter_map(|card| Some((card.ms?, card.index)))
+        .filter(|&(ms, _)| ms < processor_ms)
+        .min()
+        .map(|(_, index)| index)
+}
+/// Times the sample with `model`, twice each, on the processor build and on
+/// every card the Vulkan build lists, which the first run on card 0 shows,
+/// and chooses the fastest. `None` when the processor's runs failed.
+fn measure_with(
+    computer: Computer,
+    model: &'static SpeechModel,
+    sample: Sampler<'_>,
+) -> Result<Option<Measured>, Cut> {
+    let processor = [sample(On::Processor, model)?, sample(On::Processor, model)?];
+    let Some(processor_ms) = counted([&processor[0], &processor[1]], None) else {
+        return Ok(None);
+    };
+    let mut first = Some(sample(On::Card(0), model)?);
+    let listed = first
+        .as_ref()
+        .map_or_else(Vec::new, |run| listed_cards(&run.log));
+    let mut cards = Vec::new();
+    for card in listed {
+        let one = match first.take().filter(|_| card.index == 0) {
+            Some(run) => run,
+            None => sample(On::Card(card.index), model)?,
+        };
+        let two = sample(On::Card(card.index), model)?;
+        cards.push(CardTime {
+            ms: counted([&one, &two], Some(card.index)),
+            index: card.index,
+            name: card.name,
+        });
+    }
+    Ok(Some(Measured {
+        computer,
+        model: model.name.into(),
+        processor_ms,
+        chosen: fastest(processor_ms, &cards),
+        cards,
+        stopped: false,
+        large: None,
+    }))
+}
+/// Times the larger model on `card`, once after its download: twice, the
+/// second run counted as in the measurement ([`counted`]), so a first run
+/// that builds the card's pipelines does not count.
+fn time_large(card: u32, sample: Sampler<'_>) -> Result<LargeTime, Cut> {
+    let first = sample(On::Card(card), &LARGE)?;
+    let second = sample(On::Card(card), &LARGE)?;
+    Ok(counted([&first, &second], Some(card)).map_or(LargeTime::Failed, LargeTime::Ms))
+}
+/// Measures the devices into `root`'s saved measurement when they are due
+/// (`asked`, or [`needs_measuring`]), then times the larger model when it
+/// waits for that ([`large_due`]).
+fn measure_into(
+    root: &Path,
+    computer: Computer,
+    asked: bool,
+    models: &Path,
+    sample: Sampler<'_>,
+) -> Result<(), Cut> {
+    let mut saved = load_measured(root);
+    if asked || needs_measuring(saved.as_ref(), &computer) {
+        let Some(model) = sample_model(models) else {
+            return Ok(());
+        };
+        saved = measure_with(computer, model, sample)?;
+        if let Some(measured) = &saved {
+            save_measured(root, measured);
+        }
+    }
+    let large = LARGE.installed_in(models);
+    if let Some(measured) = saved.as_mut().filter(|saved| large_due(saved, large)) {
+        if let Some(card) = measured.chosen {
+            measured.large = Some(time_large(card, sample)?);
+            save_measured(root, measured);
+        }
+    }
+    Ok(())
+}
+
+/// What decides where a final transcription runs and with which model.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Facts {
+    /// The Vulkan build is installed.
+    pub card_build: bool,
+    /// The saved measurement.
+    pub saved: Option<Measured>,
+    /// It was made on this computer as it is now.
+    pub current: bool,
+    /// A measurement is queued or runs.
+    pub measuring: bool,
+    /// The switch "Use the graphics card" is on.
+    pub switch_on: bool,
+    pub large_chosen: bool,
+    pub large_installed: bool,
+}
+impl Facts {
+    fn now() -> Self {
+        let root = data_root();
+        let settings = settings::load(&root);
+        let card_build = card_build().is_some();
+        let saved = if card_build {
+            load_measured(&root)
+        } else {
+            None
+        };
+        Self {
+            card_build,
+            current: saved
+                .as_ref()
+                .is_some_and(|saved| saved.computer == this_computer()),
+            saved,
+            measuring: locked_measuring(measuring_state()).running,
+            switch_on: settings::graphics_card_on(&settings),
+            large_chosen: settings::large_chosen(&settings),
+            large_installed: LARGE.installed_in(&models_dir()),
+        }
+    }
+    /// The card a final transcription runs on: the one the measurement of
+    /// this computer chose, when the Vulkan build is there, the switch is on,
+    /// no measurement runs and the card has not stopped. `None` is the
+    /// processor build.
+    pub fn card(&self) -> Option<u32> {
+        if !self.card_build || !self.switch_on || self.measuring || !self.current {
+            return None;
+        }
+        let saved = self.saved.as_ref()?;
+        saved.chosen.filter(|_| !saved.stopped)
+    }
+    /// Whether the larger model may transcribe on the card: chosen,
+    /// installed, offered by the measurement and timed on the card no slower
+    /// than the processor with the small model.
+    pub fn large_fits(&self) -> bool {
+        self.large_chosen
+            && self.large_installed
+            && self.current
+            && self.saved.as_ref().is_some_and(Measured::large_fits)
+    }
+    /// Whether the larger model transcribes a final run now: it fits and
+    /// the run is on the card. It never runs on the processor.
+    pub fn large(&self) -> bool {
+        self.card().is_some() && self.large_fits()
+    }
+    /// Where transcription runs, for Settings and `cue setup`. While
+    /// measuring, the card and the offer are the last measurement's.
+    pub fn device(&self) -> SpeechDevice {
+        let card = self.card();
+        let measured = self.saved.as_ref().filter(|_| self.card_build);
+        let chosen = measured.and_then(Measured::chosen_card);
+        SpeechDevice {
+            state: if self.measuring {
+                DeviceState::Measuring
+            } else {
+                DeviceState::Ready
+            },
+            kind: if card.is_some() {
+                DeviceKind::GraphicsCard
+            } else {
+                DeviceKind::Processor
+            },
+            name: card.and(chosen).map(|chosen| chosen.name.clone()),
+            card: chosen.map(|chosen| SpeechCard {
+                name: chosen.name.clone(),
+                stopped: measured.is_some_and(|measured| measured.stopped),
+            }),
+            large_offered: measured.is_some_and(Measured::large_offered),
+            large_slow: self.large_installed && measured.is_some_and(Measured::large_slow),
+            measurable: self.card_build,
+        }
+    }
+}
+/// Where transcription runs now, for Settings and `cue setup`, from the
+/// saved measurement. It never measures.
+pub fn speech_device_status() -> SpeechDevice {
+    Facts::now().device()
+}
+
+fn device_file(root: &Path) -> PathBuf {
+    root.join("speech-device.json")
+}
+/// Serializes the writes of the saved measurement.
+fn device_file_lock() -> std::sync::MutexGuard<'static, ()> {
+    static WRITING: Mutex<()> = Mutex::new(());
+    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+}
+pub(crate) fn load_measured(root: &Path) -> Option<Measured> {
+    let file = device_file(root);
+    file.is_file().then(|| read_json(&file).ok()).flatten()
+}
+fn save_measured(root: &Path, measured: &Measured) {
+    let _writing = device_file_lock();
+    if let Err(error) = write_json(&device_file(root), measured) {
+        eprintln!("The measurement of the devices was not saved: {error}");
+    }
+}
+/// Marks the chosen card of the saved measurement as stopped, because a run
+/// on it failed or turned out to use the processor: the processor
+/// transcribes until the devices are measured again.
+pub fn stop_card(why: &str) {
+    stop_card_in(&data_root(), why);
+}
+pub(crate) fn stop_card_in(root: &Path, why: &str) {
+    let _writing = device_file_lock();
+    let Some(mut measured) = load_measured(root) else {
+        return;
+    };
+    if measured.chosen.is_some() && !measured.stopped {
+        eprintln!("The graphics card stopped transcribing: {why}");
+        measured.stopped = true;
+        if let Err(error) = write_json(&device_file(root), &measured) {
+            eprintln!("The stopped graphics card was not saved: {error}");
+        }
+    }
+}
+
+/// The measurement in the background.
+#[derive(Default)]
+struct Measuring {
+    /// One is queued or runs.
+    running: bool,
+    /// Stops the one that runs.
+    cancel: Option<Arc<AtomicBool>>,
+    /// The person asked for one that has not run to its end yet.
+    asked: bool,
+}
+fn measuring_state() -> &'static Mutex<Measuring> {
+    static STATE: OnceLock<Mutex<Measuring>> = OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+fn locked_measuring(state: &Mutex<Measuring>) -> std::sync::MutexGuard<'_, Measuring> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
+/// Takes the measurement for a worker and returns its stop flag, when one is
+/// to run: the person asked for one now (`asked`) or before it could run to
+/// its end, or `due` says so. `None` while one is queued or runs, or when
+/// none is to run.
+fn claim_measuring_in(
+    state: &Mutex<Measuring>,
+    asked: bool,
+    due: impl FnOnce() -> bool,
+) -> Option<Arc<AtomicBool>> {
+    let mut measuring = locked_measuring(state);
+    if measuring.running {
+        return None;
+    }
+    measuring.asked |= asked;
+    if !measuring.asked && !due() {
+        return None;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    measuring.running = true;
+    measuring.cancel = Some(cancel.clone());
+    Some(cancel)
+}
+/// Releases the measurement. One that ran to its `finished` end settles a
+/// request; one cut short runs again at the next idle moment, when it is
+/// still due or was asked for.
+fn finish_measuring_in(state: &Mutex<Measuring>, finished: bool) {
+    let mut measuring = locked_measuring(state);
+    measuring.running = false;
+    measuring.cancel = None;
+    if finished {
+        measuring.asked = false;
+    }
+}
+/// Stops the measurement that is queued or runs.
+fn cancel_measuring_in(state: &Mutex<Measuring>) {
+    if let Some(cancel) = &locked_measuring(state).cancel {
+        cancel.store(true, Ordering::Release);
+    }
+}
+/// Takes the measurement for the app's worker ([`claim_measuring_in`]): due
+/// when the Vulkan build, the sample and a model to time it with are there,
+/// and the saved measurement is missing or from another computer, or the
+/// larger model waits to be timed.
+pub fn claim_measuring(asked: bool) -> Option<Arc<AtomicBool>> {
+    if card_build().is_none() || sample_file().is_none() {
+        return None;
+    }
+    let models = models_dir();
+    sample_model(&models)?;
+    claim_measuring_in(measuring_state(), asked, || {
+        let saved = load_measured(&data_root());
+        needs_measuring(saved.as_ref(), &this_computer())
+            || saved.is_some_and(|saved| large_due(&saved, LARGE.installed_in(&models)))
+    })
+}
+/// Measures the devices for the worker that claimed it, under the app's
+/// inference lock, and releases the measurement. `cancel` cuts it short.
+pub fn measure_devices(cancel: &AtomicBool) {
+    let asked = locked_measuring(measuring_state()).asked;
+    let finished = match sample_file() {
+        Some(sample) => {
+            let models = models_dir();
+            let threads = crate::transcribe::whole_take_threads();
+            let sampler = |on: On, model: &'static SpeechModel| {
+                let Ok(command) =
+                    sample_command(on, &model.path_in(&models), model.dtw, &sample, threads)
+                else {
+                    return Ok(Run::default());
+                };
+                run_sample(command, cancel, SAMPLE_TIMEOUT)
+            };
+            measure_into(&data_root(), this_computer(), asked, &models, &sampler).is_ok()
+        }
+        None => true,
+    };
+    finish_measuring_in(measuring_state(), finished);
+}
+/// Releases a claimed measurement that did not start, because a recording
+/// runs: it runs at the next idle moment.
+pub fn give_up_measuring() {
+    finish_measuring_in(measuring_state(), false);
+}
+/// Stops a measurement that is queued or runs, because a recording starts.
+pub fn cancel_measuring() {
+    cancel_measuring_in(measuring_state());
+}
+/// What starts a measurement in the background: the app's, which holds its
+/// inference lock around [`measure_devices`]. The CLI never measures.
+static WORKER: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+pub fn set_measuring_worker(start: impl Fn() + Send + Sync + 'static) {
+    let _ = WORKER.set(Box::new(start));
+}
+/// Starts the app's worker, which measures when that is due.
+fn wake_measuring() {
+    if let Some(start) = WORKER.get() {
+        start();
+    }
+}
+
+/// whisper.cpp's own sample, 11 s of speech, in the runtime folder.
+fn sample_file() -> Option<PathBuf> {
+    let sample = locate("whisper-cli").ok()?.parent()?.join("jfk.wav");
+    sample.is_file().then_some(sample)
+}
+/// The model the sample is timed with: the multilingual small model, else
+/// base.
+fn sample_model(models: &Path) -> Option<&'static SpeechModel> {
+    [&SMALL, &BASE]
+        .into_iter()
+        .find(|model| model.installed_in(models))
+}
+/// How long one run of the sample may take; a run still going then counts as
+/// failed.
+const SAMPLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The command of one run of the sample.
+fn sample_command(
+    on: On,
+    model: &Path,
+    dtw: &str,
+    sample: &Path,
+    threads: usize,
+) -> Result<Command, String> {
+    let mut command = match on {
+        On::Processor => command("whisper-cli")?,
+        On::Card(_) => card_command()?,
+    };
+    sample_options(&mut command, on, model, dtw, sample, threads);
+    Ok(command)
+}
+/// The options of one run of the sample: those of a final transcription,
+/// held to English, without a vocabulary and without output files; on the
+/// processor build `-ng` and the threads of a whole-take pass, on the Vulkan
+/// build `-dev <card>` and four threads, as a run on the card has.
+fn sample_options(
+    command: &mut Command,
+    on: On,
+    model: &Path,
+    dtw: &str,
+    sample: &Path,
+    threads: usize,
+) {
+    command.arg("-m").arg(model).arg("-f").arg(sample);
+    command.args(["-dtw", dtw, "-nfa", "-l", "en"]);
+    match on {
+        On::Processor => command.args(["-ng".to_owned(), "-t".into(), threads.to_string()]),
+        On::Card(card) => command.args([
+            "-dev".to_owned(),
+            card.to_string(),
+            "-t".into(),
+            settings::CARD_THREADS.to_string(),
+        ]),
+    };
+    command.args(["-mc", "0", "-nf", "-nth", "0.3"]);
+}
+/// Runs `command`, timing it from its start to its exit and keeping its
+/// stderr. A run still going after `timeout` is killed and fails; one that
+/// cannot start fails. `cancel` kills it and cuts the measurement short.
+fn run_sample(mut command: Command, cancel: &AtomicBool, timeout: Duration) -> Result<Run, Cut> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(Cut);
+    }
+    let started = Instant::now();
+    let mut child = match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return Ok(Run {
+                log: error.to_string(),
+                ..Default::default()
+            })
+        }
+    };
+    let mut stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut log = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut log);
+        }
+        String::from_utf8_lossy(&log).into_owned()
+    });
+    let status = loop {
+        if cancel.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(Cut);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let ms = started.elapsed().as_millis() as u64;
+    Ok(Run {
+        ok: status.is_some_and(|status| status.success()),
+        ms,
+        log: reader.join().unwrap_or_default(),
+    })
+}
+
+/// This computer as a measurement sees it.
+fn this_computer() -> Computer {
+    Computer {
+        app: env!("CARGO_PKG_VERSION").into(),
+        runtime: [tool("whisper-cli").ok(), card_build()]
+            .into_iter()
+            .flatten()
+            .map(|build| written(&build))
+            .collect(),
+        adapters: display_adapters(),
+    }
+}
+/// A file's path, size and the time it was written, in seconds.
+fn written(path: &Path) -> String {
+    let meta = path.metadata().ok();
+    let size = meta.as_ref().map_or(0, |meta| meta.len());
+    let at = meta
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_secs());
+    format!("{} {size} {at}", path.display())
+}
+/// The display adapters and their driver versions, from the registry's
+/// display class (`HKLM\SYSTEM\CurrentControlSet\Control\Class\
+/// {4d36e968-e325-11ce-bfc1-08002be10318}\00NN`, `DriverDesc` and
+/// `DriverVersion`), in the order of their keys.
+#[cfg(windows)]
+fn display_adapters() -> Vec<Adapter> {
+    use std::ffi::c_void;
+    type Hkey = *mut c_void;
+    const HKEY_LOCAL_MACHINE: isize = 0x8000_0002_u32 as i32 as isize;
+    const KEY_READ: u32 = 0x0002_0019;
+    const RRF_RT_REG_SZ: u32 = 0x0000_0002;
+    const ERROR_NO_MORE_ITEMS: i32 = 259;
+    const CLASS: &str =
+        r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(
+            key: Hkey,
+            sub_key: *const u16,
+            options: u32,
+            desired: u32,
+            result: *mut Hkey,
+        ) -> i32;
+        fn RegEnumKeyExW(
+            key: Hkey,
+            index: u32,
+            name: *mut u16,
+            name_len: *mut u32,
+            reserved: *mut u32,
+            class: *mut u16,
+            class_len: *mut u32,
+            written: *mut u64,
+        ) -> i32;
+        fn RegGetValueW(
+            key: Hkey,
+            sub_key: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            data_len: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(key: Hkey) -> i32;
+    }
+    use std::ptr::null_mut as null;
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let mut class: Hkey = null();
+    // SAFETY: a valid predefined key, a NUL-terminated name and an out
+    // pointer to a local.
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE as Hkey,
+            wide(CLASS).as_ptr(),
+            0,
+            KEY_READ,
+            &mut class,
+        )
+    };
+    if opened != 0 {
+        return Vec::new();
+    }
+    let mut keys = Vec::new();
+    for index in 0..1000 {
+        let mut name = [0u16; 256];
+        let mut length = name.len() as u32;
+        // SAFETY: `class` is open; `name` holds `length` characters.
+        let status = unsafe {
+            RegEnumKeyExW(
+                class,
+                index,
+                name.as_mut_ptr(),
+                &mut length,
+                null(),
+                null(),
+                null(),
+                null(),
+            )
+        };
+        if status == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        let key = String::from_utf16_lossy(&name[..(length as usize).min(name.len())]);
+        if status == 0 && key.len() == 4 && key.bytes().all(|b| b.is_ascii_digit()) {
+            keys.push(key);
+        }
+    }
+    keys.sort();
+    let value = |key: &str, value: &str| -> Option<String> {
+        let mut data = [0u16; 1024];
+        let mut bytes = (data.len() * 2) as u32;
+        // SAFETY: `class` is open, the names are NUL-terminated and `data`
+        // holds `bytes` bytes.
+        let status = unsafe {
+            RegGetValueW(
+                class,
+                wide(key).as_ptr(),
+                wide(value).as_ptr(),
+                RRF_RT_REG_SZ,
+                null(),
+                data.as_mut_ptr().cast(),
+                &mut bytes,
+            )
+        };
+        let read = &data[..(bytes as usize / 2).min(data.len())];
+        (status == 0).then(|| {
+            String::from_utf16_lossy(read)
+                .trim_end_matches('\0')
+                .to_owned()
+        })
+    };
+    let adapters = keys
+        .iter()
+        .filter_map(|key| {
+            Some(Adapter {
+                name: value(key, "DriverDesc")?,
+                driver: value(key, "DriverVersion").unwrap_or_default(),
+            })
+        })
+        .collect();
+    // SAFETY: `class` was opened above and is closed once.
+    unsafe { RegCloseKey(class) };
+    adapters
+}
+#[cfg(not(windows))]
+fn display_adapters() -> Vec<Adapter> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,7 +1798,7 @@ mod tests {
 
     /// The state of each model `chosen` needs, in order.
     fn states(models: &Path, chosen: Option<&str>, fetch: &Fetch) -> Vec<(String, String)> {
-        statuses_of(models, chosen, fetch)
+        statuses_of(models, &needed_models(chosen), fetch)
             .into_iter()
             .map(|status| (status.model, status.state))
             .collect()
@@ -895,7 +1827,7 @@ mod tests {
             }
         };
         assert!(claim(&state, &needed_models(Some("en"))));
-        let chosen = || language.get();
+        let chosen = || needed_models(language.get());
         fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small.en", "small"]);
         assert!(SMALL.installed_in(dir.path()));
@@ -930,7 +1862,13 @@ mod tests {
             assert_eq!(states(dir.path(), None, &fetch), pairs(&waiting));
         };
         assert!(claim(&state, &needed_models(None)));
-        fetch_loop(dir.path(), &|| None, &installs(&order, &during), &state).unwrap();
+        fetch_loop(
+            dir.path(),
+            &|| needed_models(None),
+            &installs(&order, &during),
+            &state,
+        )
+        .unwrap();
         assert_eq!(*order.borrow(), ["small.en", "small"]);
         let fetch = locked(&state).clone();
         assert!(!fetch.running);
@@ -946,7 +1884,7 @@ mod tests {
         assert!(claim(&state, &needed_models(None)));
         fetch_loop(
             upgraded.path(),
-            &|| None,
+            &|| needed_models(None),
             &installs(&order, &|_| ()),
             &state,
         )
@@ -959,7 +1897,7 @@ mod tests {
             let state = Mutex::new(Fetch::default());
             let order = std::cell::RefCell::new(Vec::new());
             assert!(claim(&state, &needed_models(Some(language))));
-            let chosen = || Some(language);
+            let chosen = || needed_models(Some(language));
             fetch_loop(dir.path(), &chosen, &installs(&order, &|_| ()), &state).unwrap();
             assert_eq!(*order.borrow(), [model], "{language}");
         }
@@ -980,7 +1918,7 @@ mod tests {
             }
         };
         assert!(claim(&state, &needed_models(None)));
-        let chosen = || language.get();
+        let chosen = || needed_models(language.get());
         fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small.en"]);
         assert!(!SMALL.installed_in(dir.path()));
@@ -998,7 +1936,7 @@ mod tests {
             }
         };
         assert!(claim(&state, &needed_models(None)));
-        let chosen = || language.get();
+        let chosen = || needed_models(language.get());
         fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small.en", "small"]);
         assert!(SMALL.installed_in(dir.path()) && !SMALL_EN.installed_in(dir.path()));
@@ -1017,7 +1955,7 @@ mod tests {
             }
         };
         assert!(claim(&state, &needed_models(Some("de"))));
-        let chosen = || language.get();
+        let chosen = || needed_models(language.get());
         fetch_loop(dir.path(), &chosen, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small", "small.en"]);
     }
@@ -1035,7 +1973,7 @@ mod tests {
             }
         };
         assert!(claim(&state, &[&SMALL_EN]));
-        let english = || Some("en");
+        let english = || needed_models(Some("en"));
         fetch_loop(dir.path(), &english, &installs(&order, &during), &state).unwrap();
         assert_eq!(*order.borrow(), ["small.en"]);
         assert!(SMALL_EN.installed_in(dir.path()));
@@ -1064,7 +2002,7 @@ mod tests {
             Ok(())
         };
         assert!(claim(&state, &[&SMALL_EN]));
-        fetch_loop(dir.path(), &|| Some("en"), &download, &state).unwrap();
+        fetch_loop(dir.path(), &|| needed_models(Some("en")), &download, &state).unwrap();
         assert_eq!(calls.get(), 2, "small.en is fetched again");
         assert!(locked(&state).error.is_none());
         assert!(SMALL_EN.installed_in(dir.path()));
@@ -1127,7 +2065,7 @@ mod tests {
         let fail = |_: &SpeechModel, _: &Path, _: &dyn Fn(u64) -> bool| -> Result<(), String> {
             Err("The download was cut off.".into())
         };
-        let english = || Some("en");
+        let english = || needed_models(Some("en"));
         let error = fetch_loop(dir.path(), &english, &fail, &state).unwrap_err();
         assert_eq!(error, "The download was cut off.");
         let failed = status_of(dir.path(), &SMALL_EN, &locked(&state));
@@ -1181,5 +2119,1054 @@ mod tests {
         assert_eq!(vector_build(&plain, false), plain);
         let (_dir, plain) = runtime(false);
         assert_eq!(vector_build(&plain, true), plain);
+    }
+
+    // Trimmed from logs of whisper.cpp b5454's static Vulkan build on a PC
+    // with an RTX 5090 and AMD integrated graphics, and of its processor
+    // build.
+    const VULKAN_DEVICES: &str = "whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: gpu_device = 0
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = NVIDIA GeForce RTX 5090 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 1 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2v
+ggml_vulkan: 1 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 32768 | int dot: 1 | matrix cores: none
+whisper_init_with_params_no_state: devices    = 3
+whisper_init_with_params_no_state: backends   = 2
+";
+    const ON_CARD_0: &str = "whisper_model_load:      Vulkan0 total size =   487.01 MB
+whisper_backend_init_gpu: device 0: Vulkan0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: Vulkan0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: using Vulkan0 backend
+whisper_print_timings:    total time =   998.59 ms
+";
+    const ON_CARD_1: &str = "whisper_model_load:      Vulkan1 total size =   487.01 MB
+whisper_backend_init_gpu: device 0: Vulkan0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: Vulkan0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: device 1: Vulkan1 (type: 2)
+whisper_backend_init_gpu: found GPU device 1: Vulkan1 (type: 2, cnt: 1)
+whisper_backend_init_gpu: using Vulkan1 backend
+";
+    /// `-dev 7` on that PC: no such card, so the run fell back to the
+    /// processor and still exited with 0.
+    const NO_SUCH_CARD: &str = "whisper_backend_init_gpu: device 0: Vulkan0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: Vulkan0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: device 1: Vulkan1 (type: 2)
+whisper_backend_init_gpu: found GPU device 1: Vulkan1 (type: 2, cnt: 1)
+whisper_backend_init_gpu: device 2: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+";
+    const PROCESSOR_BUILD: &str = "whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_backend_init_gpu: device 0: CPU (type: 0)
+whisper_backend_init_gpu: no GPU found
+whisper_print_timings:    total time =  2541.21 ms
+";
+
+    #[test]
+    fn the_cards_and_the_card_in_use_are_read_from_the_vulkan_log() {
+        let card = |index, name: &str| Card {
+            index,
+            name: name.into(),
+        };
+        let cards = [
+            card(0, "NVIDIA GeForce RTX 5090"),
+            card(1, "AMD Radeon(TM) Graphics"),
+        ];
+        for tail in [ON_CARD_0, ON_CARD_1, NO_SUCH_CARD] {
+            assert_eq!(listed_cards(&format!("{VULKAN_DEVICES}{tail}")), cards);
+        }
+        assert_eq!(
+            card_in_use(&format!("{VULKAN_DEVICES}{ON_CARD_0}")),
+            Some(0)
+        );
+        assert_eq!(
+            card_in_use(&format!("{VULKAN_DEVICES}{ON_CARD_1}")),
+            Some(1)
+        );
+        // A run that ended on the processor, and the processor build.
+        assert_eq!(
+            card_in_use(&format!("{VULKAN_DEVICES}{NO_SUCH_CARD}")),
+            None
+        );
+        assert_eq!(card_in_use(PROCESSOR_BUILD), None);
+        assert!(listed_cards(PROCESSOR_BUILD).is_empty());
+        // A Vulkan build that did not start writes nothing; a malformed line
+        // names no card and no backend.
+        assert!(listed_cards("").is_empty());
+        for broken in [
+            "ggml_vulkan: Found 1 Vulkan devices:",
+            "ggml_vulkan: x = Card | uma: 0",
+            "ggml_vulkan: 0 =  | uma: 0",
+            "whisper_backend_init_gpu: using Vulkan backend",
+            "whisper_backend_init_gpu: using VulkanX backend",
+        ] {
+            assert!(listed_cards(broken).is_empty(), "{broken}");
+            assert_eq!(card_in_use(broken), None, "{broken}");
+        }
+        // A name without a driver group is kept whole.
+        assert_eq!(
+            listed_cards("ggml_vulkan: 2 = Intel(R) Arc(TM) A770 Graphics | uma: 0"),
+            [card(2, "Intel(R) Arc(TM) A770 Graphics")]
+        );
+    }
+
+    fn run(ok: bool, ms: u64, log: &str) -> Run {
+        Run {
+            ok,
+            ms,
+            log: log.into(),
+        }
+    }
+    fn timed(index: u32, ms: Option<u64>) -> CardTime {
+        CardTime {
+            index,
+            name: format!("Card {index}"),
+            ms,
+        }
+    }
+
+    #[test]
+    fn the_measurement_counts_second_runs_and_ties_go_to_the_processor() {
+        let card_0 = format!("{VULKAN_DEVICES}{ON_CARD_0}");
+        let fell_back = format!("{VULKAN_DEVICES}{NO_SUCH_CARD}");
+        // The second run counts: the first carries the card's warm-up.
+        let warm = run(true, 17_300, &card_0);
+        assert_eq!(
+            counted([&warm, &run(true, 1_300, &card_0)], Some(0)),
+            Some(1_300)
+        );
+        assert_eq!(
+            counted([&run(true, 2_900, ""), &run(true, 2_700, "")], None),
+            Some(2_700)
+        );
+        // A card whose log shows the processor, or another card, is left out,
+        // and so is one whose run failed.
+        assert_eq!(counted([&warm, &run(true, 900, &fell_back)], Some(0)), None);
+        assert_eq!(counted([&warm, &run(true, 900, &card_0)], Some(1)), None);
+        assert_eq!(counted([&run(false, 10, &card_0), &warm], Some(0)), None);
+        assert_eq!(counted([&run(true, 1, ""), &run(false, 1, "")], None), None);
+        // The fastest card wins when it beat the processor; a tie goes to the
+        // processor, and a card left out never wins.
+        let cards = [timed(0, Some(1_300)), timed(1, Some(6_000))];
+        assert_eq!(fastest(2_700, &cards), Some(0));
+        assert_eq!(fastest(2_700, &[timed(0, Some(2_700))]), None);
+        assert_eq!(fastest(2_700, &[timed(0, Some(2_699))]), Some(0));
+        assert_eq!(
+            fastest(2_700, &[timed(0, None), timed(1, Some(2_000))]),
+            Some(1)
+        );
+        assert_eq!(fastest(2_700, &[timed(0, None)]), None);
+        assert_eq!(fastest(2_700, &[]), None);
+    }
+
+    #[test]
+    fn the_larger_model_is_offered_at_two_thirds_of_the_processor_s_time() {
+        assert!(offers_large(2_700, 1_300));
+        assert!(offers_large(2_700, 1_800));
+        assert!(!offers_large(2_700, 1_801));
+        assert!(!offers_large(2_700, 2_600));
+        let measured = |card_ms| Measured {
+            cards: vec![timed(0, Some(card_ms))],
+            chosen: Some(0),
+            ..fast()
+        };
+        assert!(measured(1_800).large_offered());
+        assert!(!measured(1_801).large_offered());
+        // No card chosen, nothing offered.
+        let processor = Measured {
+            chosen: None,
+            ..fast()
+        };
+        assert!(!processor.large_offered());
+    }
+
+    const RTX: &str = "NVIDIA GeForce RTX 5090 (NVIDIA)";
+    const AMD: &str = "AMD Radeon(TM) Graphics (AMD proprietary driver)";
+    /// A made-up runtime to time: the processor takes `processor_ms` for the
+    /// sample, and each card its time, with its log showing it in use or
+    /// the processor; a card's first run takes 16 s more for its warm-up.
+    struct Bench {
+        processor_ms: u64,
+        cards: Vec<(&'static str, u64, bool)>,
+        large_ms: u64,
+        /// Whether the Vulkan build starts at all.
+        starts: bool,
+        /// The run at which a recording cuts the measurement short.
+        cut_at: Option<usize>,
+        runs: std::cell::RefCell<Vec<(On, &'static str)>>,
+    }
+    impl Bench {
+        fn new(processor_ms: u64, cards: &[(&'static str, u64, bool)]) -> Self {
+            Self {
+                processor_ms,
+                cards: cards.to_vec(),
+                large_ms: 2_000,
+                starts: true,
+                cut_at: None,
+                runs: Default::default(),
+            }
+        }
+        fn log(&self, in_use: Option<u32>) -> String {
+            let mut log = format!("ggml_vulkan: Found {} Vulkan devices:\n", self.cards.len());
+            for (index, (name, ..)) in self.cards.iter().enumerate() {
+                log += &format!("ggml_vulkan: {index} = {name} | uma: 0 | fp16: 1\n");
+            }
+            log + &match in_use {
+                Some(card) => format!("whisper_backend_init_gpu: using Vulkan{card} backend\n"),
+                None => "whisper_backend_init_gpu: no GPU found\n".into(),
+            }
+        }
+        fn sample(&self, on: On, model: &'static SpeechModel) -> Result<Run, Cut> {
+            let mut runs = self.runs.borrow_mut();
+            if Some(runs.len()) == self.cut_at {
+                return Err(Cut);
+            }
+            let warm = !runs.iter().any(|(done, _)| *done == on);
+            runs.push((on, model.name));
+            let card = match on {
+                On::Processor => return Ok(run(true, self.processor_ms, PROCESSOR_BUILD)),
+                On::Card(_) if !self.starts => return Ok(run(false, 30, "")),
+                On::Card(card) => card,
+            };
+            Ok(match self.cards.get(card as usize) {
+                Some(&(_, ms, used)) => {
+                    let ms = if model == &LARGE { self.large_ms } else { ms };
+                    let warm_up = if warm { 16_000 } else { 0 };
+                    run(true, ms + warm_up, &self.log(used.then_some(card)))
+                }
+                None => run(true, 3_000, &self.log(None)),
+            })
+        }
+        fn runs(&self) -> Vec<(On, &'static str)> {
+            self.runs.take()
+        }
+        fn measure(&self) -> Option<Measured> {
+            measure_with(computer(), &SMALL, &|on, model| self.sample(on, model)).unwrap()
+        }
+    }
+    fn computer() -> Computer {
+        Computer {
+            app: "0.3.0".into(),
+            runtime: vec![
+                r"C:\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe 2610688 1763500000".into(),
+                r"C:\CueReview\tools\whisper-b5454\vulkan\whisper-cli.exe 47901184 1763500000"
+                    .into(),
+            ],
+            adapters: vec![
+                Adapter {
+                    name: "NVIDIA GeForce RTX 5090".into(),
+                    driver: "32.0.15.8180".into(),
+                },
+                Adapter {
+                    name: "AMD Radeon(TM) Graphics".into(),
+                    driver: "32.0.21025.1".into(),
+                },
+            ],
+        }
+    }
+    /// What this PC measures: the RTX 5090 at half the processor's time.
+    fn fast() -> Measured {
+        Bench::new(2_700, &[(RTX, 1_300, true), (AMD, 6_000, true)])
+            .measure()
+            .unwrap()
+    }
+    /// A computer that has the Vulkan build and `measured`, made on it.
+    fn ready(measured: Measured) -> Facts {
+        Facts {
+            card_build: true,
+            saved: Some(measured),
+            current: true,
+            measuring: false,
+            switch_on: true,
+            large_chosen: false,
+            large_installed: false,
+        }
+    }
+    /// The processor transcribes on a computer with the Vulkan build, which
+    /// can measure its devices.
+    fn processor_here() -> SpeechDevice {
+        SpeechDevice {
+            measurable: true,
+            ..SpeechDevice::processor()
+        }
+    }
+    fn small() -> ModelChoice {
+        ModelChoice {
+            path: PathBuf::from("models").join(SMALL.file),
+            dtw: Some(SMALL.dtw.into()),
+        }
+    }
+    fn large() -> ModelChoice {
+        ModelChoice {
+            path: PathBuf::from("models").join(LARGE.file),
+            dtw: Some(LARGE.dtw.into()),
+        }
+    }
+    fn args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_fastest_measured_device_transcribes() {
+        // This PC: the RTX 5090 runs the sample in half the processor's
+        // time, the integrated chip slower than the processor.
+        let bench = Bench::new(2_700, &[(RTX, 1_300, true), (AMD, 6_000, true)]);
+        let measured = bench.measure().unwrap();
+        assert_eq!(
+            bench.runs(),
+            [
+                (On::Processor, "small"),
+                (On::Processor, "small"),
+                (On::Card(0), "small"),
+                (On::Card(0), "small"),
+                (On::Card(1), "small"),
+                (On::Card(1), "small"),
+            ],
+            "twice each, the processor first, then every card the first run listed"
+        );
+        assert_eq!(measured.processor_ms, 2_700);
+        assert_eq!(
+            measured.cards,
+            [
+                CardTime {
+                    index: 0,
+                    name: "NVIDIA GeForce RTX 5090".into(),
+                    ms: Some(1_300)
+                },
+                CardTime {
+                    index: 1,
+                    name: "AMD Radeon(TM) Graphics".into(),
+                    ms: Some(6_000)
+                },
+            ],
+            "the warm-up of the first run is not counted"
+        );
+        assert_eq!(measured.chosen, Some(0));
+        // Stretches and whole-take passes run on it, Standard with the small
+        // models.
+        let facts = ready(measured);
+        assert_eq!(facts.card(), Some(0));
+        let run = FinalRun::on(facts.card(), facts.large().then(large), small());
+        assert_eq!(
+            (run.card, &run.model, &run.small),
+            (Some(0), &small(), &small())
+        );
+        let takes = TakeModels {
+            english: small(),
+            other: small(),
+            large: None,
+        };
+        assert_eq!(takes.run_on(facts.card(), "de"), run);
+        assert_eq!(
+            facts.device(),
+            SpeechDevice {
+                state: DeviceState::Ready,
+                kind: DeviceKind::GraphicsCard,
+                name: Some("NVIDIA GeForce RTX 5090".into()),
+                card: Some(SpeechCard {
+                    name: "NVIDIA GeForce RTX 5090".into(),
+                    stopped: false
+                }),
+                large_offered: true,
+                large_slow: false,
+                measurable: true,
+            }
+        );
+        // The sample runs as a final transcription does on each: the Vulkan
+        // build with `-dev` and four threads, the processor build with `-ng`
+        // and the threads of a whole-take pass.
+        let mut on_card = Command::new("whisper-cli");
+        let (model, sample) = (Path::new("ggml-small.bin"), Path::new("jfk.wav"));
+        sample_options(&mut on_card, On::Card(1), model, "small", sample, 8);
+        assert_eq!(
+            args(&on_card),
+            [
+                "-m",
+                "ggml-small.bin",
+                "-f",
+                "jfk.wav",
+                "-dtw",
+                "small",
+                "-nfa",
+                "-l",
+                "en",
+                "-dev",
+                "1",
+                "-t",
+                "4",
+                "-mc",
+                "0",
+                "-nf",
+                "-nth",
+                "0.3"
+            ]
+        );
+        let mut on_processor = Command::new("whisper-cli");
+        sample_options(&mut on_processor, On::Processor, model, "small", sample, 8);
+        assert_eq!(args(&on_processor)[9..12], ["-ng", "-t", "8"]);
+
+        // A slow graphics card is left alone: the only card is slower than
+        // the processor, which transcribes as it does today.
+        let slow = Bench::new(2_700, &[(AMD, 6_000, true)]).measure().unwrap();
+        assert_eq!(slow.chosen, None);
+        let facts = ready(slow);
+        assert_eq!(facts.card(), None);
+        assert_eq!(
+            FinalRun::on(facts.card(), None, small()),
+            FinalRun::processor(small())
+        );
+        assert_eq!(facts.device(), processor_here());
+    }
+
+    #[test]
+    fn devices_are_measured_again_only_when_the_computer_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = models(&[&BASE, &SMALL]);
+        let bench = Bench::new(2_700, &[(RTX, 1_300, true), (AMD, 6_000, true)]);
+        let sample = |on, model| bench.sample(on, model);
+        // The first start: nothing is saved, so the devices are measured and
+        // the result saved beside the settings.
+        assert!(needs_measuring(None, &computer()));
+        measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
+        assert_eq!(bench.runs().len(), 6);
+        let saved = load_measured(root.path()).unwrap();
+        assert_eq!((saved.chosen, saved.model.as_str()), (Some(0), "small"));
+        let file = fs::read_to_string(root.path().join("speech-device.json")).unwrap();
+        assert!(file.contains("\"processorMs\": 2700"), "{file}");
+        // Later starts use it without measuring.
+        assert!(!needs_measuring(Some(&saved), &computer()));
+        measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
+        assert!(bench.runs().is_empty());
+        // A new version of the app, another runtime, an updated driver, a
+        // new adapter: measured again.
+        let changed = |change: &dyn Fn(&mut Computer)| {
+            let mut computer = computer();
+            change(&mut computer);
+            computer
+        };
+        let driver = changed(&|c| c.adapters[0].driver = "32.0.15.9000".into());
+        for other in [
+            changed(&|c| c.app = "0.4.0".into()),
+            changed(&|c| c.runtime[1].push('1')),
+            changed(&|c| {
+                c.runtime.pop();
+            }),
+            driver.clone(),
+            changed(&|c| {
+                c.adapters.push(Adapter {
+                    name: "Intel(R) Arc(TM) A770 Graphics".into(),
+                    driver: "32.0.101.6078".into(),
+                })
+            }),
+        ] {
+            assert!(needs_measuring(Some(&saved), &other), "{other:?}");
+        }
+        measure_into(
+            root.path(),
+            driver.clone(),
+            false,
+            installed.path(),
+            &sample,
+        )
+        .unwrap();
+        assert_eq!(bench.runs().len(), 6);
+        assert_eq!(load_measured(root.path()).unwrap().computer, driver);
+        // Asked for, it measures even though nothing changed.
+        measure_into(root.path(), driver.clone(), true, installed.path(), &sample).unwrap();
+        assert_eq!(bench.runs().len(), 6);
+        // Without a model to time the sample with, nothing runs yet.
+        let empty = tempfile::tempdir().unwrap();
+        let bare = models(&[]);
+        measure_into(empty.path(), computer(), false, bare.path(), &sample).unwrap();
+        assert!(bench.runs().is_empty() && load_measured(empty.path()).is_none());
+        // Base stands in for a missing small model.
+        let base_only = models(&[&BASE]);
+        measure_into(empty.path(), computer(), false, base_only.path(), &sample).unwrap();
+        let runs = bench.runs();
+        assert_eq!(runs.len(), 6);
+        assert!(runs.iter().all(|(_, model)| *model == "base"));
+        assert_eq!(load_measured(empty.path()).unwrap().model, "base");
+
+        // In the background, one at a time.
+        let state = Mutex::new(Measuring::default());
+        let cancel = claim_measuring_in(&state, false, || true).unwrap();
+        assert!(claim_measuring_in(&state, false, || true).is_none());
+        assert!(claim_measuring_in(&state, true, || true).is_none());
+        // A recording starts: the measurement stops at once and saves
+        // nothing, so the last result stays.
+        cancel_measuring_in(&state);
+        assert!(cancel.load(Ordering::Acquire));
+        let cut = Bench {
+            cut_at: Some(3),
+            ..Bench::new(2_700, &[(RTX, 900, true)])
+        };
+        let before = load_measured(root.path());
+        assert_eq!(
+            measure_into(
+                root.path(),
+                changed(&|c| c.app = "0.4.0".into()),
+                false,
+                installed.path(),
+                &|on, model| cut.sample(on, model)
+            ),
+            Err(Cut)
+        );
+        assert_eq!(load_measured(root.path()), before);
+        finish_measuring_in(&state, false);
+        // It runs again at the next idle moment, being still due.
+        assert!(claim_measuring_in(&state, false, || true).is_some());
+        finish_measuring_in(&state, true);
+        assert!(claim_measuring_in(&state, false, || false).is_none());
+        // One the person asked for runs though nothing changed, and when a
+        // recording cuts it short it is still asked for at the next idle
+        // moment, until it ran to its end.
+        assert!(claim_measuring_in(&state, true, || false).is_some());
+        finish_measuring_in(&state, false);
+        assert!(claim_measuring_in(&state, false, || false).is_some());
+        finish_measuring_in(&state, true);
+        assert!(claim_measuring_in(&state, false, || false).is_none());
+    }
+
+    const HANG_SAMPLE: &str = "CUEREVIEW_HANG_SAMPLE";
+    #[test]
+    fn hanging_sample_run() {
+        if std::env::var_os(HANG_SAMPLE).is_some() {
+            eprintln!("whisper_backend_init_gpu: using Vulkan0 backend");
+            std::thread::sleep(Duration::from_secs(120));
+        }
+    }
+    fn hanging_sample() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "deps::tests::hanging_sample_run", "--nocapture"])
+            .env(HANG_SAMPLE, "1");
+        command
+    }
+
+    #[test]
+    fn a_sample_run_is_timed_and_killed_by_a_recording_or_its_timeout() {
+        // A run that ends: timed, its log kept.
+        let quick = Command::new(std::env::current_exe().unwrap());
+        let mut quick = quick;
+        quick.arg("--list");
+        let done = run_sample(quick, &AtomicBool::new(false), Duration::from_secs(60)).unwrap();
+        assert!(done.ok, "{}", done.log);
+        // One still going after its time fails, and is killed.
+        let began = Instant::now();
+        let hung = run_sample(
+            hanging_sample(),
+            &AtomicBool::new(false),
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        assert!(!hung.ok);
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            began.elapsed()
+        );
+        // A recording that starts kills it and cuts the measurement short.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = cancel.clone();
+        let trigger = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            signal.store(true, Ordering::Release);
+        });
+        let began = Instant::now();
+        assert_eq!(
+            run_sample(hanging_sample(), &cancel, Duration::from_secs(60)).unwrap_err(),
+            Cut
+        );
+        trigger.join().unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(
+            run_sample(hanging_sample(), &cancel, Duration::from_secs(60)).unwrap_err(),
+            Cut,
+            "a cut measurement starts no run"
+        );
+        // A build that cannot start fails its run.
+        let missing = Command::new("Z:\\no-such-folder\\whisper-cli.exe");
+        let failed = run_sample(missing, &AtomicBool::new(false), Duration::from_secs(5)).unwrap();
+        assert!(!failed.ok);
+    }
+
+    #[test]
+    fn no_usable_graphics_card_means_the_processor_build() {
+        // Without the Vulkan build nothing is measured, whatever was saved,
+        // and the processor build its processor supports transcribes.
+        let (dir, plain) = runtime(true);
+        assert_eq!(card_build_beside(&plain), None);
+        assert_eq!(
+            vector_build(&plain, true),
+            dir.path().join("avx2/whisper-cli.exe")
+        );
+        let without = Facts {
+            card_build: false,
+            ..ready(fast())
+        };
+        assert_eq!(without.card(), None);
+        assert_eq!(without.device(), SpeechDevice::processor());
+        assert!(!without.device().measurable, "nothing to measure or test");
+        assert_eq!(
+            FinalRun::on(without.card(), Some(large()), small()),
+            FinalRun::processor(small())
+        );
+        // The Vulkan build sits beside the processor build.
+        fs::create_dir(dir.path().join("vulkan")).unwrap();
+        fs::write(dir.path().join("vulkan/whisper-cli.exe"), b"vulkan").unwrap();
+        assert_eq!(
+            card_build_beside(&plain),
+            Some(dir.path().join("vulkan/whisper-cli.exe"))
+        );
+        // A Vulkan build that does not start, as without a Vulkan loader:
+        // only the processor counts.
+        let unstarted = Bench {
+            starts: false,
+            ..Bench::new(2_700, &[(RTX, 1_300, true)])
+        };
+        let measured = unstarted.measure().unwrap();
+        assert!(measured.cards.is_empty() && measured.chosen.is_none());
+        assert_eq!(ready(measured).device(), processor_here());
+        assert!(processor_here().measurable, "it can be tested again");
+        // A computer without a card the runtime can use: every run of the
+        // card ended on the processor.
+        let unusable = Bench::new(2_700, &[(AMD, 900, false)]).measure().unwrap();
+        assert_eq!(unusable.cards[0].ms, None);
+        assert_eq!(unusable.chosen, None);
+        assert_eq!(ready(unusable).card(), None);
+        // Nothing measured yet: the processor, and no error.
+        let unmeasured = Facts {
+            saved: None,
+            current: false,
+            ..ready(fast())
+        };
+        assert_eq!(unmeasured.card(), None);
+        assert_eq!(unmeasured.device(), processor_here());
+        // A processor build that cannot run the sample saves nothing.
+        let broken = |on: On, _: &'static SpeechModel| {
+            Ok(match on {
+                On::Processor => run(false, 5, "error: failed to initialize whisper context"),
+                On::Card(_) => panic!("no card is timed without the processor"),
+            })
+        };
+        assert_eq!(measure_with(computer(), &SMALL, &broken), Ok(None));
+    }
+
+    #[test]
+    fn the_switch_keeps_transcription_on_the_processor() {
+        let off = Facts {
+            switch_on: false,
+            large_chosen: true,
+            large_installed: true,
+            ..ready(Measured {
+                large: Some(LargeTime::Ms(2_000)),
+                ..fast()
+            })
+        };
+        // Every run goes to the processor, the larger model's too: the
+        // stretches while recording (asked for each) and every pass after.
+        assert_eq!(off.card(), None);
+        assert!(!off.large());
+        assert_eq!(
+            FinalRun::on(off.card(), off.large().then(large), small()),
+            FinalRun::processor(small())
+        );
+        let takes = TakeModels {
+            english: small(),
+            other: small(),
+            large: Some(large()),
+        };
+        assert_eq!(takes.run_on(off.card(), "de"), FinalRun::processor(small()));
+        // Settings name the processor, and still the card it can turn back to.
+        assert_eq!(
+            off.device(),
+            SpeechDevice {
+                state: DeviceState::Ready,
+                kind: DeviceKind::Processor,
+                name: None,
+                card: Some(SpeechCard {
+                    name: "NVIDIA GeForce RTX 5090".into(),
+                    stopped: false
+                }),
+                large_offered: true,
+                large_slow: false,
+                measurable: true,
+            }
+        );
+        // The choice is kept across restarts.
+        let root = tempfile::tempdir().unwrap();
+        let saved = settings::save(
+            root.path(),
+            &crate::models::Settings {
+                graphics_card: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!settings::graphics_card_on(&saved));
+        assert!(!settings::graphics_card_on(&settings::load(root.path())));
+        // Turned on again, the card transcribes.
+        let on = Facts {
+            switch_on: true,
+            ..off
+        };
+        assert_eq!(on.card(), Some(0));
+        assert_eq!(takes.run_on(on.card(), "de").model, large());
+    }
+
+    #[test]
+    fn a_failed_graphics_card_is_used_again_after_a_new_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = models(&[&BASE, &SMALL]);
+        let bench = Bench::new(2_700, &[(RTX, 1_300, true)]);
+        let sample = |on, model| bench.sample(on, model);
+        measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
+        bench.runs();
+        let facts = || ready(load_measured(root.path()).unwrap());
+        assert_eq!(facts().card(), Some(0));
+        // A run on the card failed: the processor transcribes, and Settings
+        // say the card stopped.
+        stop_card_in(root.path(), "Processing failed (exit code: 0xc0000005)");
+        assert_eq!(facts().card(), None);
+        let device = facts().device();
+        assert_eq!(device.kind, DeviceKind::Processor);
+        assert_eq!(device.card.map(|card| card.stopped), Some(true));
+        // Nothing changed on the computer, so nothing measures by itself.
+        assert!(!needs_measuring(
+            load_measured(root.path()).as_ref(),
+            &computer()
+        ));
+        let state = Mutex::new(Measuring::default());
+        assert!(claim_measuring_in(&state, false, || false).is_none());
+        // The person asks for the card to be tested again: it measures
+        // fastest and transcribes again.
+        assert!(claim_measuring_in(&state, true, || false).is_some());
+        measure_into(root.path(), computer(), true, installed.path(), &sample).unwrap();
+        finish_measuring_in(&state, true);
+        assert_eq!(bench.runs().len(), 4);
+        assert!(!load_measured(root.path()).unwrap().stopped);
+        assert_eq!(facts().card(), Some(0));
+        assert_eq!(facts().device().kind, DeviceKind::GraphicsCard);
+        // While it measures, the processor transcribes and Settings say so,
+        // with the card of the last result.
+        let measuring = Facts {
+            measuring: true,
+            ..facts()
+        };
+        assert_eq!(measuring.card(), None);
+        let device = measuring.device();
+        assert_eq!(
+            (
+                device.state,
+                device.kind,
+                device.card.is_some(),
+                device.large_offered
+            ),
+            (DeviceState::Measuring, DeviceKind::Processor, true, true)
+        );
+        // Stopping an already stopped card, or one never chosen, writes
+        // nothing new.
+        let none = tempfile::tempdir().unwrap();
+        stop_card_in(none.path(), "no measurement");
+        assert!(load_measured(none.path()).is_none());
+    }
+
+    #[test]
+    fn the_larger_model_transcribes_every_language_once_installed() {
+        // Large downloads after the small models of the language, which
+        // transcribe until it is there; Settings list it first.
+        assert_eq!(wanted_models(None, true), [&SMALL_EN, &SMALL, &LARGE]);
+        assert_eq!(wanted_models(Some("de"), true), [&SMALL, &LARGE]);
+        assert_eq!(wanted_models(Some("en"), true), [&SMALL_EN, &LARGE]);
+        assert_eq!(listed_models(None, true), [&LARGE, &SMALL_EN, &SMALL]);
+        assert_eq!(listed_models(Some("de"), false), [&SMALL]);
+        assert_eq!(LARGE.size, 1_624_555_275);
+        let dir = models(&[&BASE]);
+        let state = Mutex::new(Fetch::default());
+        let order = std::cell::RefCell::new(Vec::new());
+        let listed = listed_models(None, true);
+        let during = |name: &'static str| {
+            let fetch = locked(&state).clone();
+            let now = statuses_of(dir.path(), &listed, &fetch);
+            let large = (now[0].model.as_str(), now[0].state.as_str());
+            assert_eq!(large, ("large-v3-turbo", "downloading"), "{name}");
+            assert_eq!(now[0].total_bytes, 1_624_555_275);
+        };
+        assert!(claim(&state, &wanted_models(None, true)));
+        let wanted = || wanted_models(None, true);
+        fetch_loop(dir.path(), &wanted, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["small.en", "small", "large-v3-turbo"]);
+        assert!(LARGE.installed_in(dir.path()));
+
+        // Until it is installed the small models transcribe.
+        let timed = Measured {
+            large: Some(LargeTime::Ms(2_000)),
+            ..fast()
+        };
+        let waiting = Facts {
+            large_chosen: true,
+            large_installed: false,
+            ..ready(timed.clone())
+        };
+        assert!(!waiting.large_fits() && !waiting.large());
+        // Installed, then timed once on the card: its time is due.
+        let untimed = fast();
+        assert!(large_due(&untimed, true));
+        assert!(!large_due(&untimed, false));
+        let root = tempfile::tempdir().unwrap();
+        save_measured(
+            root.path(),
+            &Measured {
+                computer: computer(),
+                ..untimed
+            },
+        );
+        let bench = Bench::new(2_700, &[(RTX, 1_300, true)]);
+        let with_large = models(&[&BASE, &SMALL, &LARGE]);
+        measure_into(
+            root.path(),
+            computer(),
+            false,
+            with_large.path(),
+            &|on, model| bench.sample(on, model),
+        )
+        .unwrap();
+        assert_eq!(
+            bench.runs(),
+            [
+                (On::Card(0), "large-v3-turbo"),
+                (On::Card(0), "large-v3-turbo")
+            ]
+        );
+        let saved = load_measured(root.path()).unwrap();
+        assert_eq!(
+            saved.large,
+            Some(LargeTime::Ms(2_000)),
+            "the second run counts"
+        );
+        assert!(!large_due(&saved, true), "timed once");
+
+        // Installed and timed no slower than the processor with the small
+        // model: Large transcribes every take on the card, in every language,
+        // held to it.
+        let fits = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(timed)
+        };
+        assert!(fits.large());
+        assert!(!fits.device().large_slow);
+        let takes = TakeModels {
+            english: ModelChoice {
+                path: PathBuf::from("models").join(SMALL_EN.file),
+                dtw: Some(SMALL_EN.dtw.into()),
+            },
+            other: small(),
+            large: fits.large_fits().then(large),
+        };
+        for (code, _) in settings::LANGUAGES {
+            let run = FinalRun::on(fits.card(), fits.large().then(large), small());
+            assert_eq!((run.card, &run.model), (Some(0), &large()), "{code}");
+            let stretch = takes.run_on(fits.card(), code);
+            assert_eq!(
+                (stretch.card, &stretch.model),
+                (Some(0), &large()),
+                "{code}"
+            );
+            let args =
+                settings::decoding_args_on(&Default::default(), &large().path, code, Some(0));
+            assert_eq!(args[..5], ["-l", code, "-ojf", "-dev", "0"], "{code}");
+        }
+        assert_eq!(LARGE.dtw, "large.v3.turbo");
+    }
+
+    #[test]
+    fn the_larger_model_never_runs_on_the_processor() {
+        let fits = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(Measured {
+                large: Some(LargeTime::Ms(2_000)),
+                ..fast()
+            })
+        };
+        assert!(fits.large());
+        let stopped = Measured {
+            stopped: true,
+            ..fits.saved.clone().unwrap()
+        };
+        for (why, facts) in [
+            (
+                "the switch is off",
+                Facts {
+                    switch_on: false,
+                    ..fits.clone()
+                },
+            ),
+            (
+                "the card stopped",
+                Facts {
+                    saved: Some(stopped),
+                    ..fits.clone()
+                },
+            ),
+            (
+                "the devices are measured",
+                Facts {
+                    measuring: true,
+                    ..fits.clone()
+                },
+            ),
+            (
+                "the computer changed",
+                Facts {
+                    current: false,
+                    ..fits.clone()
+                },
+            ),
+            (
+                "no Vulkan build",
+                Facts {
+                    card_build: false,
+                    ..fits.clone()
+                },
+            ),
+        ] {
+            assert!(!facts.large(), "{why}");
+            assert_eq!(
+                FinalRun::on(facts.card(), facts.large().then(large), small()),
+                FinalRun::processor(small()),
+                "{why}"
+            );
+        }
+        // A take that started with Large, whose card stops during it, goes on
+        // with the small model on the processor.
+        let takes = TakeModels {
+            english: small(),
+            other: small(),
+            large: Some(large()),
+        };
+        assert_eq!(takes.run_on(None, "de"), FinalRun::processor(small()));
+        // A failed run with Large is done again with the small model.
+        let run = FinalRun::on(Some(0), Some(large()), small());
+        assert_eq!((&run.model, &run.small), (&large(), &small()));
+
+        // A card that is not fast enough is not offered Large, and one that
+        // ran Large slower than the processor ran small, or failed with it,
+        // transcribes with the small models; Settings say so.
+        let barely = Measured {
+            cards: vec![timed(0, Some(2_000))],
+            large: Some(LargeTime::Ms(1_000)),
+            ..fast()
+        };
+        let slow = Measured {
+            large: Some(LargeTime::Ms(2_701)),
+            ..fast()
+        };
+        let failed = Measured {
+            large: Some(LargeTime::Failed),
+            ..fast()
+        };
+        for (why, measured, offered, slow) in [
+            ("not offered", barely, false, false),
+            ("slower than the processor", slow, true, true),
+            ("failed on the card", failed, true, true),
+        ] {
+            let facts = Facts {
+                saved: Some(measured),
+                ..fits.clone()
+            };
+            assert!(!facts.large(), "{why}");
+            assert_eq!(facts.card(), Some(0), "{why}: the card still runs small");
+            let device = facts.device();
+            assert_eq!(
+                (device.large_offered, device.large_slow),
+                (offered, slow),
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_goes_back_to_the_small_models() {
+        let large_chosen = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(Measured {
+                large: Some(LargeTime::Ms(2_000)),
+                ..fast()
+            })
+        };
+        assert!(large_chosen.large());
+        // Standard: the small models transcribe on the card again.
+        let standard = Facts {
+            large_chosen: false,
+            ..large_chosen
+        };
+        assert!(!standard.large());
+        assert_eq!(
+            FinalRun::on(standard.card(), standard.large().then(large), small()),
+            FinalRun {
+                card: Some(0),
+                model: small(),
+                small: small()
+            }
+        );
+        assert_eq!(wanted_models(Some("de"), false), [&SMALL]);
+        assert_eq!(listed_models(None, false), [&SMALL_EN, &SMALL]);
+        // The large model stays installed: Standard downloads nothing and
+        // removes nothing.
+        let dir = models(&[&BASE, &SMALL_EN, &SMALL, &LARGE]);
+        let state = Mutex::new(Fetch::default());
+        let order = std::cell::RefCell::new(Vec::new());
+        assert!(claim(&state, &wanted_models(None, false)));
+        fetch_loop(
+            dir.path(),
+            &|| wanted_models(None, false),
+            &installs(&order, &|_| ()),
+            &state,
+        )
+        .unwrap();
+        assert!(order.borrow().is_empty());
+        assert!(LARGE.installed_in(dir.path()));
+        // Standard chosen while Large downloads stops that download, and the
+        // small models are kept.
+        let dir = models(&[&BASE, &SMALL]);
+        let state = Mutex::new(Fetch::default());
+        let order = std::cell::RefCell::new(Vec::new());
+        let large = std::cell::Cell::new(true);
+        let during = |name: &'static str| {
+            if name == LARGE.name {
+                large.set(false);
+                stop_other(&state, &wanted_models(Some("de"), false));
+                assert!(locked(&state).cancel, "Standard has no use for it");
+            }
+        };
+        assert!(claim(&state, &wanted_models(Some("de"), true)));
+        let wanted = || wanted_models(Some("de"), large.get());
+        fetch_loop(dir.path(), &wanted, &installs(&order, &during), &state).unwrap();
+        assert_eq!(*order.borrow(), ["large-v3-turbo"]);
+        assert!(!LARGE.installed_in(dir.path()) && SMALL.installed_in(dir.path()));
+        assert!(locked(&state).error.is_none());
+    }
+
+    #[test]
+    fn the_display_adapters_are_read_from_the_registry() {
+        // Read-only, from the machine running the tests.
+        let adapters = display_adapters();
+        assert!(
+            adapters.iter().all(|adapter| !adapter.name.is_empty()),
+            "{adapters:?}"
+        );
+        assert_eq!(display_adapters(), adapters, "the same on every read");
+        eprintln!("{adapters:?}");
     }
 }

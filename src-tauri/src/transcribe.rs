@@ -38,10 +38,26 @@ fn track_threads(logical: usize) -> usize {
 fn logical_threads() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
 }
+/// Whisper threads of a whole-take pass over a take with one track on the
+/// processor, which the measurement of the devices times the processor with.
+pub(crate) fn whole_take_threads() -> usize {
+    final_threads(logical_threads())
+}
 // The options live in settings.rs so the saved vocabulary can shape them;
 // `language` is the language of this run.
+#[cfg(test)]
 fn decoding_options(root: &Path, model: &Path, language: &str) -> Vec<String> {
-    settings::decoding_args(&settings::load(root), model, language)
+    decoding_options_on(root, model, language, None)
+}
+/// [`decoding_options`] for a run on graphics card `card`, or on the
+/// processor with `None`.
+fn decoding_options_on(
+    root: &Path,
+    model: &Path,
+    language: &str,
+    card: Option<u32>,
+) -> Vec<String> {
+    settings::decoding_args_on(&settings::load(root), model, language, card)
 }
 /// `model` when its file is there to transcribe with.
 fn installed(model: deps::ModelChoice) -> Result<deps::ModelChoice, String> {
@@ -541,8 +557,8 @@ fn detect_take_language(
         .or_else(|| stretches::likeliest(&guesses))
         .map(str::to_owned)
 }
-/// Runs Whisper on `speech` (16 kHz) with `model`, held to `language`; its
-/// raw output is kept as `raw`.
+/// Runs Whisper on `speech` (16 kHz) with `model` on the processor build,
+/// held to `language`; its raw output is kept as `raw`.
 #[allow(clippy::too_many_arguments)]
 fn run_whisper(
     root: &Path,
@@ -554,34 +570,87 @@ fn run_whisper(
     cancel: Option<&AtomicBool>,
     raw: &Path,
 ) -> Result<Transcript, String> {
-    run_whisper_until(
+    let mut whisper = deps::command("whisper-cli")?;
+    alignment_options(&mut whisper, model)?;
+    run_whisper_with(
+        whisper,
         root,
         speech,
         folder,
         model,
         language,
+        None,
         threads,
         cancel.into(),
         raw,
     )
 }
-/// [`run_whisper`], running as `until` says.
+/// A final transcription of `speech` (16 kHz) as `run` says, held to
+/// `language`, running as `until` says; its raw output is kept as `raw`. On
+/// the processor it has `threads`; on a graphics card the Vulkan build runs
+/// with `-dev <card>` and four threads ([`settings::CARD_THREADS`]), and a
+/// failure there is repeated on the processor ([`on_device`]). Returns the
+/// words and the model that made them. Stretches, the pass after Stop,
+/// Retry, `cue transcribe` and the refining pass all come here.
 #[allow(clippy::too_many_arguments)]
-fn run_whisper_until(
+fn run_final(
     root: &Path,
     speech: &Path,
     folder: &Path,
-    model: &deps::ModelChoice,
+    run: &deps::FinalRun,
     language: &str,
     threads: usize,
     until: Until<'_>,
     raw: &Path,
-) -> Result<Transcript, String> {
-    let mut whisper = deps::command("whisper-cli")?;
-    alignment_options(&mut whisper, model)?;
-    run_whisper_with(
-        whisper, root, speech, folder, model, language, threads, until, raw,
-    )
+) -> Result<(Transcript, deps::ModelChoice), String> {
+    let log = scratch(folder, speech, "transcription.log");
+    let attempt = |card: Option<u32>, model: &deps::ModelChoice| {
+        let (mut whisper, threads) = match card {
+            Some(_) => (deps::card_command()?, settings::CARD_THREADS),
+            None => (deps::command("whisper-cli")?, threads),
+        };
+        alignment_options(&mut whisper, model)?;
+        let words = run_whisper_with(
+            whisper, root, speech, folder, model, language, card, threads, until, raw,
+        )?;
+        let log = match card {
+            Some(_) => fs::read_to_string(&log).unwrap_or_default(),
+            None => String::new(),
+        };
+        Ok((words, log))
+    };
+    on_device(run, &attempt, &deps::stop_card)
+}
+/// What one run of Whisper gave: its words and its log.
+type Attempt<'a> =
+    &'a dyn Fn(Option<u32>, &deps::ModelChoice) -> Result<(Transcript, String), String>;
+/// Runs one final transcription as `run` says, through `attempt`, which runs
+/// Whisper on the graphics card it is given, or on the processor build with
+/// `None`, with the model it is given. A run on the card that fails, and was
+/// not cancelled, is done again on the processor build with the small model
+/// of its language, and `stop` marks the card as stopped, so the runs after
+/// it use the processor; a run that ends well but whose log shows the
+/// processor is kept, and the card is marked the same way. Returns the
+/// words and the model that made them.
+fn on_device(
+    run: &deps::FinalRun,
+    attempt: Attempt<'_>,
+    stop: &dyn Fn(&str),
+) -> Result<(Transcript, deps::ModelChoice), String> {
+    if let Some(card) = run.card {
+        match attempt(Some(card), &run.model) {
+            Ok((words, log)) => {
+                if deps::card_in_use(&log) != Some(card) {
+                    stop("a run on it used the processor");
+                }
+                return Ok((words, run.model.clone()));
+            }
+            Err(error) if error == CANCELLED => return Err(error),
+            Err(error) => stop(error.lines().next().unwrap_or_default()),
+        }
+    }
+    let (words, _) = attempt(None, &run.small)?;
+    Ok((words, run.small.clone()))
 }
 /// A quick guess of the words of `speech` with base: one beam and no
 /// alignment points, which a guess shown while recording never needs.
@@ -605,11 +674,13 @@ fn guess_words(
         folder,
         &model,
         language,
+        None,
         threads,
         Until::Cancelled(cancel),
         &raw,
     )
 }
+/// Runs `whisper`, the processor build or with `card` the Vulkan build.
 #[allow(clippy::too_many_arguments)]
 fn run_whisper_with(
     mut whisper: std::process::Command,
@@ -618,6 +689,7 @@ fn run_whisper_with(
     folder: &Path,
     model: &deps::ModelChoice,
     language: &str,
+    card: Option<u32>,
     threads: usize,
     until: Until<'_>,
     raw: &Path,
@@ -628,7 +700,7 @@ fn run_whisper_with(
         .arg(&model.path)
         .arg("-f")
         .arg(speech)
-        .args(decoding_options(root, &model.path, language))
+        .args(decoding_options_on(root, &model.path, language, card))
         .arg("-t")
         .arg(threads.to_string())
         .arg("-of")
@@ -855,17 +927,17 @@ pub fn live_commit(
                 None
             };
             let language = stretches.language_for(heard.as_ref());
-            let model = models.of(&language);
+            let run = models.run_of(&language);
             fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
             let raw = stretches::raw(take, stretches.track, stretches.until_ms);
-            let words = run_whisper(
+            let (words, model) = run_final(
                 root,
                 &part,
                 folder,
-                model,
+                &run,
                 &language,
                 threads,
-                Some(cancel),
+                Until::Cancelled(cancel),
                 &raw,
             )?;
             stretches.push(words, end_ms, &language, &file_name(&model.path), heard)
@@ -881,8 +953,8 @@ pub fn live_commit(
     }
     Ok((stretches::after(guess, done), audio.length_ms - done))
 }
-/// Transcribes the stretch `part` of a take again, held to `language` with
-/// `model`, and replaces its words in `stretches`, which it saves. `audio`
+/// Transcribes the stretch `part` of a take again, held to `language`, as
+/// `run` says, and replaces its words in `stretches`, which it saves. `audio`
 /// is a copy of the take's audio from the stretch's start, and `system`, for
 /// the microphone of a take with two tracks, one of the system track from
 /// there, by which the echo is silenced again; scratch files go to `folder`.
@@ -895,7 +967,7 @@ fn redo_stretch(
     system: Option<&Path>,
     part: &stretches::Part,
     language: &str,
-    model: &deps::ModelChoice,
+    run: &deps::FinalRun,
     cancel: &AtomicBool,
     stretches: &mut Stretches,
 ) -> Result<(), String> {
@@ -912,23 +984,23 @@ fn redo_stretch(
             .speech
             .is_empty();
     }
-    let words = if spoken {
+    let (words, model) = if spoken {
         fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
         let raw = stretches::raw(take, stretches.track, part.start_ms);
         let threads = live_threads(logical_threads());
-        run_whisper(
+        run_final(
             root,
             &speech,
             folder,
-            model,
+            run,
             language,
             threads,
-            Some(cancel),
+            Until::Cancelled(cancel),
             &raw,
         )?
     } else {
         // Nothing but echo is left of it.
-        Transcript::default()
+        (Transcript::default(), run.model.clone())
     };
     stretches.replace(part.start_ms, words, language, &file_name(&model.path));
     stretches::save(take, stretches)
@@ -992,7 +1064,6 @@ pub fn redo_provisional(
             Ok(())
         },
         &mut |part, language, stretches| {
-            let model = models.of(language);
             redo_stretch(
                 root,
                 take,
@@ -1001,7 +1072,7 @@ pub fn redo_provisional(
                 system.as_deref().filter(|_| compared.get()),
                 part,
                 language,
-                model,
+                &models.run_of(language),
                 cancel,
                 stretches,
             )
@@ -1267,6 +1338,10 @@ fn transcribe_take_with(
 /// language is detected from its speech ([`detect_take_language`]), so every
 /// take, and each track of it, is detected on its own. The transcript
 /// carries the language and whether it was detected.
+///
+/// Every Whisper run of the pass goes where [`deps::final_run`] says: on
+/// the graphics card the devices measured fastest, both tracks of a take
+/// with two at once, or on the processor ([`run_final`]).
 pub fn transcribe_media(
     root: &Path,
     folder: &Path,
@@ -1316,11 +1391,15 @@ fn transcribe_media_with(
             detect_take_language(speech, regions, folder, threads, detecting)
         },
         model: &|language| {
-            installed(deps::final_model(language)).map(|model| file_name(&model.path))
+            installed(deps::final_run(language).model).map(|model| file_name(&model.path))
         },
         whisper: &|speech, language, raw| {
-            let model = installed(deps::final_model(language))?;
-            run_whisper_until(root, speech, folder, &model, language, threads, until, raw)
+            // Chosen for each run: a card that stopped during the pass is
+            // not used again.
+            let run = deps::final_run(language);
+            installed(run.model.clone())?;
+            run_final(root, speech, folder, &run, language, threads, until, raw)
+                .map(|(words, _)| words)
         },
         echo: &|microphone, system| {
             // Padded by only 100 ms, as the regions the rule was measured on.
@@ -2330,6 +2409,152 @@ Speech segment 0: start = 1.0, end = 2.0
         let mut transcript = sample_transcript(&[(text, 100, 900)]);
         transcript.segments[0].id = "segment-0".into();
         transcript
+    }
+    #[test]
+    fn a_failed_graphics_card_run_is_repeated_on_the_processor() {
+        use crate::models::DeviceKind;
+        use deps::{CardTime, Facts, FinalRun, LargeTime, Measured, ModelChoice};
+        let root = tempfile::tempdir().unwrap();
+        // A computer that transcribes on its graphics card, here with the
+        // larger model.
+        let measured = Measured {
+            computer: Default::default(),
+            model: "small".into(),
+            processor_ms: 2_700,
+            cards: vec![CardTime {
+                index: 0,
+                name: "NVIDIA GeForce RTX 5090".into(),
+                ms: Some(1_300),
+            }],
+            chosen: Some(0),
+            stopped: false,
+            large: Some(LargeTime::Ms(2_000)),
+        };
+        let saved = root.path().join("speech-device.json");
+        let reset = || crate::store::write_json(&saved, &measured).unwrap();
+        let stopped = || deps::load_measured(root.path()).unwrap().stopped;
+        let facts = || Facts {
+            card_build: true,
+            saved: deps::load_measured(root.path()),
+            current: true,
+            measuring: false,
+            switch_on: true,
+            large_chosen: true,
+            large_installed: true,
+        };
+        let model = |file: &str| ModelChoice {
+            path: Path::new("models").join(file),
+            dtw: None,
+        };
+        let (small, large) = (model("ggml-small.bin"), model("ggml-large-v3-turbo.bin"));
+        let run_now = || {
+            let facts = facts();
+            FinalRun::on(
+                facts.card(),
+                facts.large().then(|| large.clone()),
+                small.clone(),
+            )
+        };
+        let stop = |why: &str| deps::stop_card_in(root.path(), why);
+        let tried = Noted::<Vec<(Option<u32>, String)>>::default();
+        let note = |card: Option<u32>, model: &ModelChoice| {
+            tried.borrow_mut().push((card, file_name(&model.path)));
+        };
+        let on = |card: Option<u32>, file: &str| (card, file.to_owned());
+        reset();
+        let run = run_now();
+        assert_eq!((run.card, &run.model), (Some(0), &large));
+
+        // The run on the card crashes, or exits with an error.
+        for error in [
+            "Processing failed (exit code: 0xc0000005): ggml_vulkan: Device lost",
+            "Processing failed (exit code: 1): ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory",
+        ] {
+            reset();
+            let failing = |card: Option<u32>, model: &ModelChoice| {
+                note(card, model);
+                match card {
+                    Some(_) => Err(error.to_owned()),
+                    None => Ok((spoken("ask not what your country"), String::new())),
+                }
+            };
+            let (words, made_by) = on_device(&run_now(), &failing, &stop).unwrap();
+            // The same audio is transcribed on the processor with the small
+            // model, and the take gets its transcript.
+            assert_eq!(
+                tried.take(),
+                [
+                    on(Some(0), "ggml-large-v3-turbo.bin"),
+                    on(None, "ggml-small.bin")
+                ]
+            );
+            assert_eq!(made_by, small);
+            assert_eq!(words.segments[0].text, "ask not what your country");
+            // The transcriptions after it run on the processor.
+            assert!(stopped());
+            assert_eq!(run_now(), FinalRun::processor(small.clone()));
+            let device = facts().device();
+            assert_eq!(device.kind, DeviceKind::Processor);
+            assert_eq!(device.card.map(|card| card.stopped), Some(true));
+            on_device(&run_now(), &failing, &stop).unwrap();
+            assert_eq!(tried.take(), [on(None, "ggml-small.bin")]);
+        }
+
+        // A run that ends well but whose log shows the processor is kept,
+        // and the card is marked as stopped all the same.
+        reset();
+        let fell_back = |card: Option<u32>, model: &ModelChoice| {
+            note(card, model);
+            Ok((
+                spoken("kept"),
+                "whisper_backend_init_gpu: no GPU found\n".to_owned(),
+            ))
+        };
+        let (words, made_by) = on_device(&run_now(), &fell_back, &stop).unwrap();
+        assert_eq!(tried.take(), [on(Some(0), "ggml-large-v3-turbo.bin")]);
+        assert_eq!(
+            (words.segments[0].text.as_str(), made_by),
+            ("kept", large.clone())
+        );
+        assert!(stopped());
+
+        // A run whose log shows the card is kept, and the card goes on.
+        reset();
+        let on_card = |card: Option<u32>, model: &ModelChoice| {
+            note(card, model);
+            Ok((
+                spoken("on the card"),
+                "whisper_backend_init_gpu: using Vulkan0 backend\n".to_owned(),
+            ))
+        };
+        on_device(&run_now(), &on_card, &stop).unwrap();
+        assert_eq!(tried.take(), [on(Some(0), "ggml-large-v3-turbo.bin")]);
+        assert!(!stopped());
+        assert_eq!(run_now().card, Some(0));
+
+        // A cancelled run is no failure: nothing is repeated, and the card
+        // goes on.
+        let cancelled = |card: Option<u32>, model: &ModelChoice| {
+            note(card, model);
+            Err(CANCELLED.to_owned())
+        };
+        assert_eq!(
+            on_device(&run_now(), &cancelled, &stop).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(tried.take(), [on(Some(0), "ggml-large-v3-turbo.bin")]);
+        assert!(!stopped());
+
+        // On the processor a failure stays one: there is nothing to repeat it
+        // on, and the card is not to blame.
+        let failing = |card: Option<u32>, model: &ModelChoice| {
+            note(card, model);
+            Err("Processing failed (exit code: 1)".to_owned())
+        };
+        let processor = FinalRun::processor(small.clone());
+        assert!(on_device(&processor, &failing, &stop).is_err());
+        assert_eq!(tried.take(), [on(None, "ggml-small.bin")]);
+        assert!(!stopped());
     }
     fn mark(index: u32, start_ms: u64) -> crate::models::TakeMark {
         crate::models::TakeMark {
@@ -5124,5 +5349,164 @@ Speech segment 0: start = 1.0, end = 2.0
             serde_json::to_vec_pretty(&merged).unwrap(),
         )
         .unwrap();
+    }
+    #[test]
+    #[ignore = "Requires the Vulkan build and jfk.wav in the runtime folder, a graphics card faster than the processor, FFmpeg, and base, small.en, small and the detector in CUEREVIEW_DATA_DIR (large-v3-turbo optional)"]
+    fn actual_graphics_card_transcribes_and_keeps_word_timing() {
+        use crate::models::{DeviceKind, Settings};
+        use std::time::Instant;
+        assert!(
+            std::env::var_os("CUEREVIEW_DATA_DIR").is_some(),
+            "Point CUEREVIEW_DATA_DIR at an isolated data folder: the test writes its settings and speech-device.json"
+        );
+        let root = crate::store::data_root();
+        let build = deps::card_build().expect("no vulkan/whisper-cli.exe beside the runtime");
+        let sample = deps::locate("whisper-cli")
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("jfk.wav");
+        let english = |more: Settings| {
+            settings::save(
+                &root,
+                &Settings {
+                    language: Some("en".into()),
+                    ..more
+                },
+            )
+            .unwrap()
+        };
+        english(Settings::default());
+
+        // The first start: the devices are measured.
+        let _ = fs::remove_file(root.join("speech-device.json"));
+        let cancel = deps::claim_measuring(false).expect("a measurement is due");
+        let began = Instant::now();
+        deps::measure_devices(&cancel);
+        let measuring = began.elapsed();
+        let measured = deps::load_measured(&root).expect("the measurement was saved");
+        eprintln!(
+            "Measured in {measuring:?} with {} ({}): processor {} ms; {}",
+            measured.model,
+            build.display(),
+            measured.processor_ms,
+            measured
+                .cards
+                .iter()
+                .map(|card| format!("{} {} = {:?} ms", card.index, card.name, card.ms))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        let card = measured
+            .chosen
+            .expect("no graphics card measured faster than the processor");
+        let device = deps::speech_device_status();
+        assert_eq!(device.kind, DeviceKind::GraphicsCard, "{device:?}");
+        eprintln!("{device:?}");
+        assert!(
+            deps::claim_measuring(false).is_none(),
+            "measured once, not again"
+        );
+
+        // A take of the sample, transcribed whole as after Stop.
+        let duration = {
+            let wav = hound::WavReader::open(&sample).unwrap();
+            wav.duration() as u64 * 1000 / wav.spec().sample_rate as u64
+        };
+        let take = |name: &str| {
+            let folder = tempfile::tempdir().unwrap();
+            fs::copy(&sample, folder.path().join("mic.wav")).unwrap();
+            let began = Instant::now();
+            let transcript = transcribe_media(&root, folder.path(), duration, true).unwrap();
+            let took = began.elapsed();
+            let log = fs::read_to_string(folder.path().join("transcription.log")).unwrap();
+            eprintln!(
+                "{name}: {took:?}: {:?}",
+                transcript
+                    .segments
+                    .iter()
+                    .map(|s| &s.text)
+                    .collect::<Vec<_>>()
+            );
+            (transcript, log, took)
+        };
+        let timing = |transcript: &Transcript| -> Vec<(String, u64)> {
+            let words: Vec<_> = transcript.segments.iter().flat_map(|s| &s.words).collect();
+            assert!(words.len() >= 15, "only {} words", words.len());
+            let mut last = 0;
+            for word in &words {
+                let seek = word.seek_ms.expect("every word keeps its alignment point");
+                assert!(word.start_ms <= word.end_ms && word.end_ms <= duration + 500);
+                assert!(seek <= duration && seek + 100 >= last, "{words:?}");
+                last = seek;
+            }
+            let phrase = crate::agent::find(transcript, "ask not what your country").unwrap();
+            assert!(!phrase.is_empty(), "lost the phrase");
+            words
+                .iter()
+                .map(|word| {
+                    let text = word.text.to_lowercase();
+                    let text = text.trim_matches(|c: char| !c.is_alphanumeric());
+                    (text.to_owned(), word.seek_ms.unwrap())
+                })
+                .collect()
+        };
+        let (on_card, log, card_took) = take("small.en on the card");
+        assert!(
+            log.contains(&format!("using Vulkan{card} backend")),
+            "{log}"
+        );
+        let card_words = timing(&on_card);
+
+        // The switch keeps it on the processor: the same words, aligned
+        // within a fifth of a second.
+        english(Settings {
+            graphics_card: Some(false),
+            ..Default::default()
+        });
+        let (on_processor, log, processor_took) = take("small.en on the processor");
+        assert!(!log.contains("using Vulkan"), "{log}");
+        let processor_words = timing(&on_processor);
+        let same = card_words
+            .iter()
+            .zip(&processor_words)
+            .filter(|(a, b)| a.0 == b.0)
+            .inspect(|(a, b)| assert!(a.1.abs_diff(b.1) <= 200, "{a:?} against {b:?}"))
+            .count();
+        assert!(
+            same * 10 >= processor_words.len() * 9
+                && card_words.len().abs_diff(processor_words.len()) <= 2,
+            "{card_words:?} against {processor_words:?}"
+        );
+        eprintln!("card {card_took:?}, processor {processor_took:?}, {same} words alike");
+
+        // Where the card is fast enough and the larger model is installed,
+        // the measurement timed it on the card too, and, not slower than the
+        // processor, it transcribes the take there.
+        let large = root.join("models").join(deps::LARGE.file);
+        let offered = deps::speech_device_status().large_offered;
+        if offered && large.metadata().is_ok_and(|m| m.len() == deps::LARGE.size) {
+            english(Settings {
+                model: Some("large".into()),
+                ..Default::default()
+            });
+            let timed = deps::load_measured(&root).unwrap().large;
+            assert!(timed.is_some(), "an installed larger model is timed");
+            let device = deps::speech_device_status();
+            eprintln!("large-v3-turbo on the card: {timed:?}, {device:?}");
+            if !device.large_slow {
+                let (with_large, log, took) = take("large-v3-turbo on the card");
+                assert!(log.contains(deps::LARGE.file), "{log}");
+                assert!(
+                    log.contains(&format!("using Vulkan{card} backend")),
+                    "{log}"
+                );
+                timing(&with_large);
+                eprintln!("large-v3-turbo took {took:?}");
+            }
+        } else {
+            eprintln!("large-v3-turbo not installed or not offered: left out");
+        }
+        settings::save(&root, &Settings::default()).unwrap();
     }
 }

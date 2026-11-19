@@ -275,6 +275,14 @@ pub struct Settings {
     /// detected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// `"large"` when the larger model (large-v3-turbo) is chosen; `None` is
+    /// Standard, the small models. Any other value reads as Standard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `false` when the switch "Use the graphics card" is off, which keeps
+    /// transcription on the processor; `None` is on. `true` is never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics_card: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -393,6 +401,75 @@ pub struct SetupStatus {
     /// models for Auto. Empty when `CUEREVIEW_MODEL` replaces them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub language_models: Vec<LanguageModel>,
+    /// Where transcription runs.
+    pub speech_device: SpeechDevice,
+}
+
+/// Where transcription runs, for Settings and `cue setup`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechDevice {
+    pub state: DeviceState,
+    /// Where final transcription runs now.
+    pub kind: DeviceKind,
+    /// The graphics card's name when `kind` is `graphicsCard`, as Vulkan
+    /// names it ("NVIDIA GeForce RTX 5090").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The card that measured fastest, faster than the processor, in the last
+    /// measurement, even while the switch is off or the card is stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<SpeechCard>,
+    /// The card ran the sample in two thirds of the processor's time or
+    /// less, so the larger model is offered.
+    pub large_offered: bool,
+    /// The larger model is installed and was timed on the card slower than
+    /// the processor with the small model: the small models transcribe.
+    pub large_slow: bool,
+    /// The speech runtime here has its graphics-card build, so the devices
+    /// are measured and can be tested again; false on macOS, Linux and a
+    /// runtime without the Vulkan build.
+    pub measurable: bool,
+}
+/// Whether the devices are being measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceState {
+    /// Being timed in the background; transcription runs on the processor
+    /// meanwhile.
+    Measuring,
+    Ready,
+}
+/// The kind of device final transcription runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceKind {
+    GraphicsCard,
+    Processor,
+}
+/// The graphics card of the last measurement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechCard {
+    pub name: String,
+    /// A run on it failed or turned out to use the processor; the processor
+    /// transcribes until the devices are measured again.
+    pub stopped: bool,
+}
+impl SpeechDevice {
+    /// The processor, with nothing measured: no saved measurement, or no
+    /// graphics build of the runtime.
+    pub fn processor() -> Self {
+        Self {
+            state: DeviceState::Ready,
+            kind: DeviceKind::Processor,
+            name: None,
+            card: None,
+            large_offered: false,
+            large_slow: false,
+            measurable: false,
+        }
+    }
 }
 
 /// The state of one speech model the chosen language needs, for Settings and
@@ -400,7 +477,7 @@ pub struct SetupStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageModel {
-    /// The model's name: `"small.en"` or `"small"`.
+    /// The model's name: `"small.en"`, `"small"` or `"large-v3-turbo"`.
     pub model: String,
     /// `"ready"`, `"downloading"`, `"failed"` or `"missing"`.
     pub state: String,
@@ -434,6 +511,7 @@ mod tests {
                 model("small.en", "ready", 487_614_201, 487_614_201),
                 model("small", "downloading", 5, 487_601_967),
             ],
+            speech_device: SpeechDevice::processor(),
         };
         assert_eq!(
             serde_json::to_value(&status).unwrap()["languageModels"],
@@ -453,6 +531,81 @@ mod tests {
         status.language_models.clear();
         let custom = serde_json::to_value(&status).unwrap();
         assert!(custom.get("languageModels").is_none() && custom.get("languageModel").is_none());
+    }
+
+    #[test]
+    fn the_transcription_device_is_reported_in_camel_case() {
+        let card = |stopped| SpeechCard {
+            name: "NVIDIA GeForce RTX 5090".into(),
+            stopped,
+        };
+        let mut status = SetupStatus {
+            ready: true,
+            issues: Vec::new(),
+            dependencies: Vec::new(),
+            model_ready: true,
+            model_path: None,
+            language_models: Vec::new(),
+            speech_device: SpeechDevice {
+                state: DeviceState::Ready,
+                kind: DeviceKind::GraphicsCard,
+                name: Some("NVIDIA GeForce RTX 5090".into()),
+                card: Some(card(false)),
+                large_offered: true,
+                large_slow: false,
+                measurable: true,
+            },
+        };
+        // A fast card transcribes: an agent reads its name and its kind.
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["speechDevice"],
+            json!({
+                "state": "ready",
+                "kind": "graphicsCard",
+                "name": "NVIDIA GeForce RTX 5090",
+                "card": {"name": "NVIDIA GeForce RTX 5090", "stopped": false},
+                "largeOffered": true,
+                "largeSlow": false,
+                "measurable": true
+            })
+        );
+        // The card stopped: the processor transcribes, and the card says so.
+        status.speech_device = SpeechDevice {
+            kind: DeviceKind::Processor,
+            name: None,
+            card: Some(card(true)),
+            ..status.speech_device
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["speechDevice"],
+            json!({
+                "state": "ready",
+                "kind": "processor",
+                "card": {"name": "NVIDIA GeForce RTX 5090", "stopped": true},
+                "largeOffered": true,
+                "largeSlow": false,
+                "measurable": true
+            })
+        );
+        // Measuring, and a computer without a usable card: no name, no card.
+        let measuring = SpeechDevice {
+            state: DeviceState::Measuring,
+            measurable: true,
+            ..SpeechDevice::processor()
+        };
+        assert_eq!(
+            serde_json::to_value(&measuring).unwrap(),
+            json!({"state":"measuring","kind":"processor","largeOffered":false,"largeSlow":false,"measurable":true})
+        );
+        // Without the graphics-card build there is nothing to measure.
+        assert_eq!(
+            serde_json::to_value(SpeechDevice::processor()).unwrap(),
+            json!({"state":"ready","kind":"processor","largeOffered":false,"largeSlow":false,"measurable":false})
+        );
+        // What `cue setup` prints reads back as the same device.
+        let printed = serde_json::to_string_pretty(&status).unwrap();
+        let read: SetupStatus = serde_json::from_str(&printed).unwrap();
+        assert_eq!(read.speech_device, status.speech_device);
     }
 
     // Byte-for-byte what v0.1.0 writes through `store::write_json`

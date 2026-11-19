@@ -602,9 +602,85 @@ async fn install_transcription(s: CmdState<'_>) -> Result<SetupStatus, String> {
         let _guard = s.installer.lock().map_err(|e| e.to_string())?;
         let status = deps::install_transcription()?;
         deps::start_language_models_download()?;
+        // Base is there now to time the devices with.
+        spawn_measure(&s, false);
         Ok(status)
     })
     .await
+}
+/// Where transcription runs, for the light poll while the devices are
+/// measured.
+#[tauri::command]
+async fn get_speech_device() -> Result<SpeechDevice, String> {
+    blocking(|| Ok(deps::speech_device_status())).await
+}
+/// "Test the graphics card again": measures the devices again in the
+/// background and returns where transcription runs, now measuring. Refused
+/// without the graphics-card build of the runtime, and while a recording
+/// runs.
+#[tauri::command]
+async fn test_speech_devices(s: CmdState<'_>) -> Result<SpeechDevice, String> {
+    let s = s.inner().clone();
+    blocking(move || {
+        if deps::card_build().is_none() {
+            return Err(
+                "This computer's speech runtime has no graphics-card build to test.".into(),
+            );
+        }
+        if s.runtime
+            .lock()
+            .map_err(|e| e.to_string())?
+            .active
+            .is_some()
+        {
+            return Err(
+                "The graphics card can be tested again once the recording has stopped.".into(),
+            );
+        }
+        spawn_measure(&s, true);
+        Ok(deps::speech_device_status())
+    })
+    .await
+}
+/// Measures the devices on a thread of its own when that is due or `asked`
+/// ([`deps::claim_measuring`]): under the inference lock, so no
+/// transcription runs meanwhile, and only while nothing records. A recording
+/// that starts cuts it short ([`deps::cancel_measuring`]), and it runs again
+/// at the next idle moment, when the pass that refines a transcript after
+/// Stop has ended.
+fn spawn_measure(s: &Shared, asked: bool) {
+    // While a recording runs nothing is claimed, so its stretches keep
+    // their device.
+    if s.runtime
+        .lock()
+        .map_or(true, |runtime| runtime.active.is_some())
+    {
+        return;
+    }
+    let Some(cancel) = deps::claim_measuring(asked) else {
+        return;
+    };
+    let state = s.clone();
+    let spawned = std::thread::Builder::new()
+        .name("measure-devices".into())
+        .spawn(move || {
+            let Ok(_inference) = state.inference.lock() else {
+                deps::give_up_measuring();
+                return;
+            };
+            let recording = state
+                .runtime
+                .lock()
+                .map_or(true, |runtime| runtime.active.is_some());
+            if recording || cancel.load(Ordering::Acquire) {
+                deps::give_up_measuring();
+                return;
+            }
+            deps::measure_devices(&cancel);
+        });
+    if spawned.is_err() {
+        deps::give_up_measuring();
+    }
 }
 /// Starts or restarts downloading whichever models the chosen language needs
 /// and are missing, for example after a download failed.
@@ -752,6 +828,8 @@ fn spawn_refine(s: &Shared, id: &str) {
             if let Some(Err(error)) = outcome {
                 eprintln!("The transcript of {id} was not refined: {error}");
             }
+            // An idle moment: a measurement a recording cut short runs now.
+            spawn_measure(&state, false);
         });
 }
 fn spawn_live(s: &Shared, id: &str, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
@@ -835,6 +913,7 @@ fn start_recording_with(
         }
         // Whisper beside a capture runs only with the live threads.
         stop_refining(&mut runtime, None);
+        deps::cancel_measuring();
         match start(
             config,
             &s.store.session_dir(&session.id)?,
@@ -1180,6 +1259,7 @@ fn start_take_with(
     let folder = takes::take_dir(&s.store.session_dir(id)?, take.index);
     // Whisper beside a capture runs only with the live threads.
     stop_refining(&mut runtime, None);
+    deps::cancel_measuring();
     match start(config, &folder, muted) {
         Ok(active) => {
             let session = started.session.clone();
@@ -1236,16 +1316,23 @@ fn save_settings(s: CmdState<'_>, settings: Settings) -> Result<Settings, String
         let _ = deps::start_language_models_download();
     })
 }
-/// Saves the settings and calls `language_changed` when the language did.
+/// Saves the settings and calls `models_changed` when the language or the
+/// model did, which changes the models to download.
 fn save_settings_in(
     root: &std::path::Path,
     settings: &Settings,
-    language_changed: impl FnOnce(),
+    models_changed: impl FnOnce(),
 ) -> Result<Settings, String> {
-    let before = settings::chosen_language(&settings::load(root));
+    let models = |settings: &Settings| {
+        (
+            settings::chosen_language(settings),
+            settings::large_chosen(settings),
+        )
+    };
+    let before = models(&settings::load(root));
     let saved = settings::save(root, settings)?;
-    if settings::chosen_language(&saved) != before {
-        language_changed();
+    if models(&saved) != before {
+        models_changed();
     }
     Ok(saved)
 }
@@ -1318,16 +1405,24 @@ pub fn run() {
             }
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
-            // An installation that lacks a model its language needs fetches it now.
-            let _ = deps::start_language_models_download();
-            app.manage(Arc::new(AppState {
+            let state: Shared = Arc::new(AppState {
                 store,
                 _ownership: ownership,
                 runtime: Mutex::new(Runtime::default()),
                 installer: Mutex::new(()),
                 inference: Mutex::new(()),
                 preview: Mutex::new(preview::Preview::default()),
-            }));
+            });
+            app.manage(state.clone());
+            // A finished download of the larger model wakes the measurement,
+            // which times it on the graphics card.
+            let worker = state.clone();
+            deps::set_measuring_worker(move || spawn_measure(&worker, false));
+            // An installation that lacks a model its choices need fetches it now.
+            let _ = deps::start_language_models_download();
+            // The first start, or one after the app, the runtime or a display
+            // driver changed, measures the devices in the background.
+            spawn_measure(&state, false);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1368,6 +1463,8 @@ pub fn run() {
             install_transcription,
             download_language_models,
             get_language_models,
+            get_speech_device,
+            test_speech_devices,
             get_languages,
             get_agent_handoff,
             open_session_folder,
@@ -1493,6 +1590,28 @@ mod orchestration_tests {
         })
         .unwrap();
         assert_eq!(started.get(), 4, "Auto stays Auto");
+        // Choosing Large fetches it; the switch fetches nothing; Standard
+        // again stops a download it has no use for.
+        let large = Settings {
+            model: Some("large".into()),
+            ..Default::default()
+        };
+        save_settings_in(root.path(), &large, || started.set(started.get() + 1)).unwrap();
+        assert_eq!(started.get(), 5);
+        let switched_off = Settings {
+            graphics_card: Some(false),
+            ..large.clone()
+        };
+        save_settings_in(root.path(), &switched_off, || {
+            started.set(started.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(started.get(), 5, "the switch downloads nothing");
+        save_settings_in(root.path(), &Settings::default(), || {
+            started.set(started.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(started.get(), 6);
     }
     #[test]
     fn shell_folder_resolves_the_physical_path_and_preserves_spaces() {
