@@ -69,6 +69,12 @@ the pinned revision, on ten minutes of German speech with the app's own argument
 - **Q22 While recording**: the graphics card is used while recording too, with a switch in Settings
   to keep transcription off it. Rejected: only after Stop; no switch.
 - **Q23 Summary**: confirmed as written here.
+- **Q24 Two tracks at once**: the large model is judged on one run against the processor's one
+  run with the small model; two runs at once, as a take with two tracks runs them, only have to
+  succeed on the card. Measured on the owner's PC on 20 s of German: Large 2.3 s alone and 3.3 s
+  two at once on the RTX 5090, against 3.5 s and 4.8 s for small on the processor. Rejected: the
+  slower of two runs at once against one processor run, which passes here by 0.2 s; timing the
+  processor two at once as well.
 - **Look**: Model choice (`look.md`): a Model select, Standard or Large, and one folded "Runs on"
   line holding the switch. Rejected: two switches; a Graphics card section of its own.
 - **Another engine**: faster-whisper (CTranslate2) was weighed on the owner's question and not

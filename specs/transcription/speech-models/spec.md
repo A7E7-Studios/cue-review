@@ -166,9 +166,11 @@ reads like bad hearing and neither the person nor the agent can tell what to cha
 ### Requirement: A fast graphics card can run the larger model
 Settings SHALL offer a choice of model, Standard or Large (large-v3-turbo), on a computer whose
 graphics card transcribes with the large model no slower than its processor does with the small
-model, and with Large chosen the app SHALL transcribe every take with it, held to the take's language, because on such a card it costs no
-time, reads German and other languages clearly better than the small model, and can write the
-words of another language inside a take, which small.en cannot.
+model, one run against one, and with Large chosen the app SHALL transcribe every take with it,
+held to the take's language, once the card has also run it twice at once, as the two tracks of a
+take run, because on such a card it costs no time, reads German and other languages clearly better
+than the small model, and can write the words of another language inside a take, which small.en
+cannot.
 
 #### Scenario: Settings offers the larger model on a fast graphics card
 - **GIVEN** a computer whose graphics card is fast enough for the larger model
