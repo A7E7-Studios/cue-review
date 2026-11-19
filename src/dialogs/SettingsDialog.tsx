@@ -214,11 +214,15 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   const onCard = cardOn && device?.kind === 'graphicsCard';
   /** Large transcribes now, as the backend decided once it tried Large on the card. */
   const largeInUse = onCard && !!device?.largeInUse && large?.state === 'ready';
-  /** Large is installed and chosen on a card in use, and not yet tried there: the backend tries it within seconds. */
-  const largeTrying = large?.state === 'ready' && onCard && !device?.largeInUse && !device?.largeSlow && !measuring;
+  /**
+   * Large is chosen, installed and offered, the switch is on and the card not stopped, and the backend has not yet
+   * decided whether it keeps up: it tries Large on the card in a measurement, so this includes `measuring`.
+   */
+  const largeTrying = large?.state === 'ready' && !!device?.largeOffered && !device.largeInUse && !device.largeSlow && cardOn && !card?.stopped;
 
   // While a language model downloads, the states are read about each second so its progress moves;
   // while the devices are measured or Large is tried, the device is, so the line and the note follow.
+  // Large that is not offered is never tried, so it is never waited for.
   useEverySecond(open && models.some(model => model.state === 'downloading'), readModel);
   useEverySecond(open && (measuring || largeTrying), readDevice);
   // A download that ends (downloading, then ready or failed) can change what the backend transcribes with: one read.
@@ -322,6 +326,8 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
         if (largeTrying) return `Large is being tried on the graphics card; until then, ${smallTranscribe}.`;
         if (!cardOn) return `With the graphics card off, ${smallTranscribe}.`;
         if (stopped) return `With the graphics card stopped, ${smallTranscribe}.`;
+        // On the card, neither in use, tried nor slow: the last measurement no longer offers Large.
+        if (onCard) return `This graphics card is not fast enough for the large model, so ${smallTranscribe}.`;
         return `Without the graphics card, ${smallTranscribe}.`;
       }
       const fixed = auto ? AUTO_NOTE : `Every take is transcribed as ${named}, whatever is spoken.`;
@@ -349,15 +355,18 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   </>;
 
   const modelRow = (model: LanguageModel) => {
-    /** Large, installed, waiting for the graphics card: switched off, stopped or not measured faster. */
-    const idle = model.model === LARGE && model.state === 'ready' && !onCard;
+    /**
+     * Large, installed and neither in use, being tried nor slow: it waits for the graphics card (switched off,
+     * stopped, none measured faster) or, on the card, for one fast enough (no longer offered).
+     */
+    const idle = model.model === LARGE && model.state === 'ready' && !largeInUse && !largeTrying && !(device?.largeSlow && onCard);
     const ready = model.state === 'ready' && !idle;
     /** What transcribes until a failed model is installed. */
     const meanwhile = model.model === LARGE ? `${capital(smallTranscribe)} until it is installed.` : `${capital(scope)} are transcribed with the base model until it is installed.`;
     return <Fragment key={model.model}>
       <div className="settings-status" data-available={ready || undefined}>
         <span>{modelName(model)}</span>
-        <span>{ready && <Icon name="check"/>}{idle ? 'Needs the graphics card' : modelState(model)}</span>
+        <span>{ready && <Icon name="check"/>}{idle ? onCard ? 'Needs a faster graphics card' : 'Needs the graphics card' : modelState(model)}</span>
       </div>
       {model.state === 'downloading' && <div className="settings-progress" role="progressbar" aria-label={NAMES.modelDownload(modelName(model))}
         aria-valuemin={0} aria-valuemax={model.totalBytes > 0 ? megabytes(model.totalBytes) : undefined}

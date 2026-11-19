@@ -36,8 +36,8 @@ const languageModels = (): LanguageModel[] => {
   if (advancing) {
     const receivedBytes = modelStates[advancing].receivedBytes + Math.ceil(TOTAL_BYTES[advancing] / 16);
     modelStates[advancing] = receivedBytes >= TOTAL_BYTES[advancing] ? READY : { ...modelStates[advancing], receivedBytes };
-    // As the app does, a finished large model is tried on the card before it transcribes.
-    if (advancing === 'large-v3-turbo' && modelStates[advancing].state === 'ready') deviceFacts = { ...deviceFacts, largeInUse: false, tries: 0 };
+    // As the app does, a finished large model is tried on the card, in a measurement, before it transcribes.
+    if (advancing === 'large-v3-turbo' && modelStates[advancing].state === 'ready') deviceFacts = { ...deviceFacts, state: 'measuring', largeInUse: false, tries: 0 };
     // The next missing model follows once one finishes.
     const next = models.find(model => modelStates[model].state === 'missing');
     if (modelStates[advancing].state === 'ready' && next && scenario !== 'setup') modelStates[next] = { state: 'downloading', receivedBytes: 0, advancing: true };
@@ -56,7 +56,8 @@ export function configureLanguageModels(language: string | undefined, states: Pa
 // Where transcription runs, as `get_setup_status`, `get_speech_device` and `test_speech_devices` report it.
 // A measurement the workshop starts with Test the graphics card again ends after three reads with the card
 // working again; a configured one stays measuring, for a steady look. The switch sets where it runs. A large
-// model the workshop downloads is tried on the card for two reads, then transcribes; a configured one stays.
+// model the workshop downloads is tried on the card in a measurement for two reads, then transcribes; a
+// configured trial stays.
 export const GRAPHICS_CARD = 'NVIDIA GeForce RTX 5090';
 /** `largeInUse`: Large was tried on the card and keeps up, so it transcribes while chosen, installed and the card in use. */
 type DeviceFacts = Pick<SpeechDevice, 'state' | 'card' | 'largeOffered' | 'largeSlow' | 'largeInUse' | 'measurable'> & { reads?: number; tries?: number };
@@ -67,6 +68,8 @@ type DeviceFacts = Pick<SpeechDevice, 'state' | 'card' | 'largeOffered' | 'large
 export const SPEECH_DEVICES = {
   /** A graphics card fast enough for Large. */
   fastCard: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true },
+  /** The same card while Large, just downloaded, is tried on it: the backend reports a measurement. */
+  largeTrial: { state: 'measuring', card: { name: GRAPHICS_CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true },
   /** The same card, Large tried on it and keeping up. */
   largeInUse: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: true, measurable: true },
   /** No card the speech runtime can use, or none faster than the processor. */
@@ -83,7 +86,7 @@ const speechDevice = (advance = false): SpeechDevice => {
   if (advance && deviceFacts.reads !== undefined && ++deviceFacts.reads >= 3) {
     deviceFacts = { ...deviceFacts, state: 'ready', card: deviceFacts.card && { ...deviceFacts.card, stopped: false }, reads: undefined };
   }
-  if (advance && deviceFacts.tries !== undefined && ++deviceFacts.tries >= 2) deviceFacts = { ...deviceFacts, largeInUse: true, tries: undefined };
+  if (advance && deviceFacts.tries !== undefined && ++deviceFacts.tries >= 2) deviceFacts = { ...deviceFacts, state: 'ready', largeInUse: true, tries: undefined };
   const { state, card, largeOffered, largeSlow, measurable } = deviceFacts;
   const onCard = state === 'ready' && !!card && !card.stopped && settings.graphicsCard !== false;
   const largeInUse = deviceFacts.largeInUse && !largeSlow && onCard && settings.model === 'large' && modelStates['large-v3-turbo'].state === 'ready';

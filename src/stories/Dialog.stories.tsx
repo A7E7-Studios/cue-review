@@ -139,8 +139,8 @@ export const SettingsWithoutGraphicsBuild: Story = settingsStory({ device: 'noGr
 export const SettingsMeasuringDevices: Story = settingsStory({ device: 'measuring' });
 /** Large chosen while it downloads: the small models transcribe until it finishes. */
 export const SettingsLargeDownloading: Story = settingsStory({ device: 'fastCard', choices: { model: 'large' }, models: { 'large-v3-turbo': { state: 'downloading', receivedBytes: 640_000_000 } } });
-/** Large downloaded and not yet tried on the card: it reads Ready, and the small models transcribe until it has been. */
-export const SettingsLargeBeingTried: Story = settingsStory({ device: 'fastCard', choices: { model: 'large' } });
+/** Large downloaded and being tried on the card, which the backend reports as a measurement: it reads Ready, and the small models transcribe until it has been. */
+export const SettingsLargeBeingTried: Story = settingsStory({ device: 'largeTrial', choices: { model: 'large' } });
 /** Large in use, the fold open: the switch, and the small models as the fallback. */
 export const SettingsLargeInUse: Story = { ...settingsStory({ device: 'largeInUse', choices: { model: 'large' } }), play: unfold };
 /** The switch turned off with Large chosen: Large needs the graphics card, so the small models transcribe. */

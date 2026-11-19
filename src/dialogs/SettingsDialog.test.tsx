@@ -52,6 +52,8 @@ const PROCESSOR: SpeechDevice = { state: 'ready', kind: 'processor', largeOffere
 const MEASURING: SpeechDevice = { state: 'measuring', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true };
 const STOPPED: SpeechDevice = { state: 'ready', kind: 'processor', card: { name: CARD, stopped: true }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
 const NO_GRAPHICS_BUILD: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: false };
+/** The fast card while the backend tries Large on it, after its download: a measurement, the processor transcribing. */
+const LARGE_TRIAL: SpeechDevice = { state: 'measuring', kind: 'processor', card: { name: CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
 /** Auto's two models ready, unless other models are given, on the given device. */
 const on = (speechDevice: SpeechDevice, setup: SetupStatus = auto()): SetupStatus => ({ ...setup, speechDevice });
 /** Large chosen: the large model first, in the given state, then Auto's two ready. */
@@ -633,8 +635,10 @@ describe('SettingsDialog: the graphics card', () => {
     expect(select).toHaveDisplayValue('Standard');
     unmount();
 
-    // Large downloaded but not yet tried on the card: it reads Ready, and the small models transcribe until it has been.
-    const tried = render(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge())}/>);
+    // Large downloaded and being tried on the card, which the backend reports as a measurement: it reads Ready, and the
+    // small models transcribe until it has been.
+    const tried = render(<Harness initial={{ model: 'large' }} setup={on(LARGE_TRIAL, withLarge())}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · testing the graphics card…$/);
     expect(modelRow('Large')).toHaveTextContent('Ready');
     expect(modelRow('Large')).toHaveAttribute('data-available');
     expect(transcription().getByText('Large is being tried on the graphics card; until then, the English and multilingual models transcribe.')).toBeVisible();
@@ -681,6 +685,24 @@ describe('SettingsDialog: the graphics card', () => {
     // A card faster than the processor but not enough for Large still transcribes.
     render(<Harness setup={on(fastCard({ largeOffered: false }))}/>);
     expect(deviceLine()).toHaveTextContent(/^Runs on NVIDIA GeForce RTX 5090$/);
+
+    // Large saved and installed, but the last measurement no longer offers it: the Model select stays so Standard can
+    // be chosen again, Large is neither in use nor being tried, and the device is not read again for it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    cleanupAndRender(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeOffered: false }), withLarge())}/>);
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveDisplayValue('Large');
+    expect(modelRow('Large')).toHaveTextContent('Needs a faster graphics card');
+    expect(modelRow('Large')).not.toHaveAttribute('data-available');
+    expect(transcription().getByText('This graphics card is not fast enough for the large model, so the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText(/being tried|transcribes every language/)).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
+    // The same on the processor, no card faster than it.
+    cleanupAndRender(<Harness initial={{ model: 'large' }} setup={on(PROCESSOR, withLarge())}/>);
+    expect(modelRow('Large')).toHaveTextContent('Needs the graphics card');
+    expect(transcription().getByText('Without the graphics card, the English and multilingual models transcribe.')).toBeVisible();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
   });
 
   it("shows the larger model's download progress", async () => {
@@ -705,10 +727,12 @@ describe('SettingsDialog: the graphics card', () => {
     expect(handlers.poll).toHaveBeenCalledTimes(2);
     expect(handlers.pollDevice).not.toHaveBeenCalled();
     // Once it is ready, the models are no longer read; the device is read at once, then each second while the
-    // backend tries Large on the card, until it is in use.
+    // backend tries Large on the card, which it reports as a measurement, until it is in use.
     await act(async () => {});
-    rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge())}/>);
+    rerender(<Harness initial={{ model: 'large' }} setup={on(LARGE_TRIAL, withLarge())}/>);
     expect(modelRow('Large')).toHaveTextContent('Ready');
+    expect(modelRow('Large')).toHaveAttribute('data-available');
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · testing the graphics card…$/);
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
     expect(handlers.pollDevice).toHaveBeenCalledOnce();
     expect(transcription().getByText('Large is being tried on the graphics card; until then, the English and multilingual models transcribe.')).toBeVisible();
