@@ -12,7 +12,14 @@ export interface Take { index: number; offsetMs: number; durationMs: number; sta
  * Start of a take on the combined timeline, for the "Take N · m:ss" divider, and the take's language: a speech-model
  * code, absent until it is known; `languageDetected` when Auto found it rather than a language chosen in Settings.
  */
-export interface TakeMark { index: number; startMs: number; language?: string; languageDetected?: boolean }
+export interface TakeMark { index: number; startMs: number; language?: string; languageDetected?: boolean; trackLanguages?: TrackLanguages }
+/** Where a row was heard in a take transcribed from two tracks: the microphone, or the computer's audio. */
+export type AudioTrack = 'microphone' | 'system';
+/**
+ * Each track's language in a take transcribed from two tracks, each decided on its own; a track is absent until its
+ * language is known. `language` beside it stays the microphone track's.
+ */
+export type TrackLanguages = Partial<Record<AudioTrack, { language: string; languageDetected?: boolean }>>;
 /** What a `window:` or `monitor:` source id named at the session's first capture (docs/ARCHITECTURE.md, Source identity). */
 export type SourceIdentity =
   | { kind: 'window'; title: string; process: string; class: string; pid?: number; processCreatedMs?: number }
@@ -30,14 +37,17 @@ export interface Word { text: string; startMs: number; endMs: number; seekMs?: n
  * A transcript sentence. While recording, the live transcript lists the finished stretches first,
  * ordinary final words whose ids start `stretch-`, then at most one segment of words still being
  * heard, last, whose id starts `live-` (`stillHeard` in review.ts): its words may change every
- * second. While nothing is being heard there is no `live-` segment.
+ * second. While nothing is being heard there is no `live-` segment. A take recorded with two tracks holds both tracks'
+ * finished rows merged by time, then at most one `live-` segment per track. `track` is present on every row of a take
+ * transcribed from two tracks and absent on rows of a one-track take and of transcripts made before tracks existed.
  */
-export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[] }
+export interface Segment { id?: string; startMs: number; endMs: number; text: string; words: Word[]; track?: AudioTrack }
 /**
  * `language` and `languageDetected` are those of a session of one take, which has no `takes`; with takes, each mark
  * carries its own. In the live transcript of a take being recorded, `language` is the take's, absent until it is decided.
+ * `trackLanguages` does the same per track for a take transcribed from two tracks.
  */
-export interface Transcript { segments: Segment[]; language?: string; languageDetected?: boolean; status?: string; error?: string; takes?: TakeMark[] }
+export interface Transcript { segments: Segment[]; language?: string; languageDetected?: boolean; trackLanguages?: TrackLanguages; status?: string; error?: string; takes?: TakeMark[] }
 export interface CaptureSource { id: string; name: string; kind: 'display' | 'window' | 'android' | 'quest' | 'camera'; available: boolean; detail?: string }
 export interface Microphone { id: string; name: string }
 export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 'error'; sessionId?: string; elapsedMs?: number; audioLevel?: number; liveTranscript?: Transcript; error?: string; takeIndex?: number; takeOffsetMs?: number;

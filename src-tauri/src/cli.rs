@@ -7,7 +7,7 @@
 
 use crate::{
     agent::{normalized, segment_seek_ms, FrameStyle, FrameTime, FrameTimes},
-    models::Transcript,
+    models::{Segment, Track, Transcript},
 };
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -750,8 +750,28 @@ pub fn stamp(ms: u64) -> String {
     }
 }
 
+/// What a row of a take transcribed from two tracks starts with in the
+/// text formats: `mic: ` or `system: `. Nothing for a row without a track.
+fn track_label(segment: &Segment) -> &'static str {
+    match segment.track {
+        Some(Track::Microphone) => "mic: ",
+        Some(Track::System) => "system: ",
+        None => "",
+    }
+}
+/// `cue transcript` without options: each segment's text on its own line,
+/// after its track when the take was transcribed from two.
+pub fn format_text(transcript: &Transcript) -> String {
+    let mut text = String::new();
+    for segment in &transcript.segments {
+        let _ = writeln!(text, "{}{}", track_label(segment), segment.text);
+    }
+    text
+}
 /// `cue transcript --segments`: one `[mm:ss | seekMs] text` line per segment,
-/// with a `── Take N · m:ss ──` line before the first segment of each take.
+/// with the track after the time when the take was transcribed from two
+/// (`[mm:ss | seekMs] mic: text`), and a `── Take N · m:ss ──` line before
+/// the first segment of each take.
 pub fn format_segments(transcript: &Transcript) -> String {
     let mut text = String::new();
     let mut takes = transcript.takes.iter().peekable();
@@ -768,7 +788,7 @@ pub fn format_segments(transcript: &Transcript) -> String {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        let line = format!("[{} | {seek}] {words}", stamp(seek));
+        let line = format!("[{} | {seek}] {}{words}", stamp(seek), track_label(segment));
         let _ = writeln!(text, "{}", line.trim_end());
     }
     // Takes without speech still get their divider.
@@ -1330,6 +1350,7 @@ mod tests {
             end_ms: start_ms + 250 * words.len() as u64,
             text: format!(" {text}"),
             words,
+            track: None,
         }
     }
 

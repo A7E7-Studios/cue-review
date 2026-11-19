@@ -214,7 +214,7 @@ export interface TranscriptPaneProps {
    * Its language is its mark's, else the transcript's own `language`.
    */
   liveTake?: TakeMark;
-  /** Names for the language codes on the take dividers ("German, detected"); a code without a name shows the code. */
+  /** Names for the language codes on the take dividers ("German, detected") and track tags; a code without a name shows the code. */
   languages?: SpeechLanguage[];
   /** Live transcription problem, shown as a status note. */
   liveError?: string;
@@ -357,7 +357,8 @@ export const NAMES = {
   // Transcript
   transcript: 'Transcript',
   findInTranscript: 'Find in transcript',
-  seekTo: (time: string) => `Seek to ${time}`,
+  /** A row's time; in a take transcribed from two tracks it names the row's track: "Seek to 0:21, microphone". */
+  seekTo: (time: string, track?: string) => track ? `Seek to ${time}, ${track}` : `Seek to ${time}`,
   seekToWord: (word: string, time: string) => `Seek to ${word} at ${time}`,
   returnToPlayback: 'Return to playback',
   backToLive: 'Back to live',

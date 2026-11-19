@@ -16,8 +16,14 @@
 //! ([`Stretches::to_redo`], [`Stretches::replace`]): while the take records
 //! by [`Redo`], else by Stop. A take that stops undecided takes the likeliest
 //! language heard ([`Stretches::settle`]).
+//!
+//! A take with a microphone and system audio has stretches of each track,
+//! saved in a file of their own, with a language of their own. The live
+//! worker serves the system track first and then the microphone in every
+//! cycle ([`turns`]), and shows both as one live transcript
+//! ([`live_of_tracks`]).
 use crate::{
-    models::{Segment, Transcript},
+    models::{Segment, Track, TrackLanguages, Transcript},
     store::{atomic_write, read_json, Store},
     takes,
 };
@@ -182,13 +188,19 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The words of a take's finished stretches, take-relative, and what they
-/// were made from. Saved as `stretches/stretches.json` in the take folder.
+/// were made from. Saved in the take folder as `stretches/stretches.json`,
+/// or for a take with two tracks as `stretches/system.json` and
+/// `stretches/microphone.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stretches {
     pub version: u32,
     /// The live audio file the stretches were cut from, for example `mic.wav`.
     pub source: String,
+    /// Which of the take's two tracks they are of; `None` for a take with
+    /// one track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
     /// The language the take is held to: the one chosen in Settings, or the
     /// one detection decided. `None` while Auto has not decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,8 +223,22 @@ const VERSION: u32 = 2;
 pub fn folder(take: &Path) -> PathBuf {
     take.join("stretches")
 }
-fn file(take: &Path) -> PathBuf {
-    folder(take).join("stretches.json")
+/// Every way the stretches of one take are saved: one track alone, or
+/// either of two.
+const SAVED_AS: [Option<Track>; 3] = [None, Some(Track::System), Some(Track::Microphone)];
+fn file(take: &Path, track: Option<Track>) -> PathBuf {
+    folder(take).join(match track {
+        Some(track) => format!("{}.json", track.name()),
+        None => "stretches.json".into(),
+    })
+}
+/// Where the raw Whisper output of the stretch starting at `start_ms` is
+/// kept: `<start>.json`, or `<track>-<start>.json` in a take with two tracks.
+pub fn raw(take: &Path, track: Option<Track>, start_ms: u64) -> PathBuf {
+    folder(take).join(match track {
+        Some(track) => format!("{}-{start_ms}.json", track.name()),
+        None => format!("{start_ms}.json"),
+    })
 }
 
 impl Stretches {
@@ -225,6 +251,37 @@ impl Stretches {
             language: chosen.map(str::to_owned),
             ..Default::default()
         }
+    }
+    /// The stretches of one track of a take with two tracks.
+    pub fn of_track(track: Track, chosen: Option<&str>) -> Self {
+        Self {
+            track: Some(track),
+            ..Self::new(track.file(), chosen)
+        }
+    }
+    /// The track whose audio the stretches are cut from.
+    pub fn audio(&self) -> Track {
+        self.track
+            .unwrap_or(if self.source == Track::System.file() {
+                Track::System
+            } else {
+                Track::Microphone
+            })
+    }
+    /// What the ids of this take's stretch and live segments start with, so
+    /// the two tracks of a take never share one.
+    fn id(&self, kind: &str) -> String {
+        match self.track {
+            Some(track) => format!("{kind}-{}", track.name()),
+            None => kind.into(),
+        }
+    }
+    /// `segments` marked with the track they were heard on.
+    fn tracked(&self, mut segments: Vec<Segment>) -> Vec<Segment> {
+        for segment in &mut segments {
+            segment.track = self.track;
+        }
+        segments
     }
     /// Whether the next stretch's language still has to be detected: only
     /// under Auto, until a guess has decided the take.
@@ -272,8 +329,8 @@ impl Stretches {
     ) -> bool {
         let start = self.until_ms;
         let index = self.segments.len();
-        self.segments
-            .extend(shift(stretch, start, end_ms - start, "stretch", index));
+        let fresh = shift(stretch, start, end_ms - start, &self.id("stretch"), index);
+        self.segments.extend(self.tracked(fresh));
         self.until_ms = end_ms;
         let undecided = self.language.is_none();
         let confident = guess
@@ -348,7 +405,7 @@ impl Stretches {
         let at = self
             .segments
             .partition_point(|segment| segment.start_ms < start);
-        let fresh = shift(stretch, start, end - start, "stretch", 0);
+        let fresh = self.tracked(shift(stretch, start, end - start, &self.id("stretch"), 0));
         self.segments.splice(at..at, fresh);
     }
     /// The take's transcript: the stretches, then `rest`, the words after
@@ -356,13 +413,8 @@ impl Stretches {
     pub fn join(&self, rest: Transcript, rest_ms: u64) -> Transcript {
         let language = rest.language.clone();
         let mut segments = self.segments.clone();
-        segments.extend(shift(
-            rest,
-            self.until_ms,
-            rest_ms,
-            "stretch",
-            segments.len(),
-        ));
+        let rest = shift(rest, self.until_ms, rest_ms, "stretch", segments.len());
+        segments.extend(self.tracked(rest));
         for (index, segment) in segments.iter_mut().enumerate() {
             segment.id = format!("segment-{index}");
         }
@@ -371,14 +423,14 @@ impl Stretches {
             language: self.language.clone().or(language),
             language_detected: self.language_detected,
             status: Some("complete".into()),
-            error: None,
-            takes: Vec::new(),
+            ..Default::default()
         }
     }
     /// The live transcript: the stretches, then the words still being heard
     /// (`guess`, timed from `until_ms`) as one segment whose id starts with
     /// `live-`, all moved by `offset_ms` onto the session timeline. It names
-    /// the take's language once the take is held to one.
+    /// the take's language once the take is held to one. The stretches of
+    /// one track of two give that track's rows, for [`live_of_tracks`].
     pub fn live(&self, guess: Transcript, guess_ms: u64, offset_ms: u64) -> Transcript {
         let mut segments: Vec<Segment> = self
             .segments
@@ -393,7 +445,7 @@ impl Stretches {
         if let (Some(first), Some(last)) = (words.first(), words.last()) {
             segments.push(moved(
                 Segment {
-                    id: format!("live-{}", self.until_ms),
+                    id: format!("{}-{}", self.id("live"), self.until_ms),
                     start_ms: first.start_ms,
                     end_ms: last.end_ms,
                     text: words
@@ -402,6 +454,7 @@ impl Stretches {
                         .collect::<Vec<_>>()
                         .join(" "),
                     words,
+                    track: self.track,
                 },
                 offset_ms,
             ));
@@ -543,26 +596,198 @@ fn moved(mut segment: Segment, by_ms: u64) -> Segment {
     segment
 }
 
+/// One track's turn in a cycle of the live worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Turn {
+    pub track: Track,
+    /// Whether the words still being heard on the track are guessed in this
+    /// turn; its finished stretches are transcribed in every turn.
+    pub guess: bool,
+}
+/// The turns of the live worker's `cycle` (counted from 0) for a take
+/// recording `tracks`. With two tracks the system track comes first, and
+/// its words still being heard are guessed only every second cycle, so the
+/// microphone's, guessed every cycle, show within the time one track takes.
+pub fn turns(tracks: &[Track], cycle: u64) -> Vec<Turn> {
+    let has = |track| tracks.contains(&track);
+    if has(Track::System) && has(Track::Microphone) {
+        return vec![
+            Turn {
+                track: Track::System,
+                guess: cycle.is_multiple_of(2),
+            },
+            Turn {
+                track: Track::Microphone,
+                guess: true,
+            },
+        ];
+    }
+    tracks
+        .first()
+        .map(|&track| Turn { track, guess: true })
+        .into_iter()
+        .collect()
+}
+/// The bounds in the take (ms) of a copy of a live track, or why none could
+/// be made.
+pub type Bounds = Result<(u64, u64), String>;
+/// What a turn of the live worker has to work on: the copies of the take's
+/// live tracks it could make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Copied {
+    /// `length_ms` of the turn's track, from the end of its last finished
+    /// stretch. `reference`: the system track was copied from the same
+    /// point too, for the microphone's echo to be recognised by; without it
+    /// nothing of the microphone's audio counts as echo.
+    Audio { length_ms: u64, reference: bool },
+    /// Nothing of the track could be copied, for the reason given: a track
+    /// of two is silent for this cycle, and the other one goes on.
+    Silent(String),
+    /// Nothing of the take's only track could be copied.
+    Failed(String),
+}
+/// How far apart two copies made from the same point of the take can report
+/// their starts (ms). The capture starts each copy at the last sample at or
+/// before the point asked for and reports the start in whole ms, rounded
+/// down ([`crate::capture::copy_span`], [`crate::capture::span_ms`]): at a
+/// device rate that is not a multiple of 1000 Hz that can be the ms before,
+/// so a 48 kHz microphone and a 44.1 kHz loopback copied from 12345 ms
+/// report 12345 and 12344. Their audio starts less than one sample period of
+/// the slower track apart: 23 microseconds there, 125 at 8 kHz.
+pub const SAME_START_MS: u64 = 1;
+/// Whether a copy of the system track with these bounds (ms into the take)
+/// can be compared with a microphone copy that reports its start at
+/// `start_ms`: it was made, holds audio, and starts at the same point, which
+/// is within [`SAME_START_MS`] as reported. The comparison does not take
+/// the two starts for equal: what is left between them, less than a sample
+/// period, is part of the delay its search finds ([`crate::echo`] looks from
+/// 50 ms ahead to 500 ms behind). A system track that is shorter than the
+/// point asked for gives an empty copy from its own end, and one without
+/// samples none at all: nothing has played there.
+pub fn is_reference(start_ms: u64, system: &Bounds) -> bool {
+    matches!(system, Ok((start, end)) if start.abs_diff(start_ms) <= SAME_START_MS && end > start)
+}
+/// Makes the copies for `turn` of a take recording two tracks (`two`) or
+/// one. `copy` copies a live track from the end of the turn's last finished
+/// stretch and returns the copy's bounds in the take (ms); its flag says
+/// whether the copy is the echo reference, the system track over the
+/// microphone's span, which goes to a file of its own.
+///
+/// A track of two that cannot be copied, because it has no samples yet (a
+/// loopback sends none until the computer first plays something, a device
+/// can start late) or for any other reason, is silent for this cycle; the
+/// take's only track failing is a failure, as it always was. The microphone
+/// of two is compared with the system track only when that copy was made
+/// and starts where the microphone's does ([`is_reference`]), whatever the
+/// two devices' sample rates; where the system copy ends
+/// before the microphone's, the system audio counts as silent from there
+/// ([`crate::echo`]).
+pub fn copy_for(turn: Turn, two: bool, copy: &mut dyn FnMut(Track, bool) -> Bounds) -> Copied {
+    let (start, end) = match copy(turn.track, false) {
+        Ok(bounds) => bounds,
+        Err(error) if two => return Copied::Silent(error),
+        Err(error) => return Copied::Failed(error),
+    };
+    let length_ms = end.saturating_sub(start);
+    let reference = two
+        && turn.track == Track::Microphone
+        && length_ms > 0
+        && is_reference(start, &copy(Track::System, true));
+    Copied::Audio {
+        length_ms,
+        reference,
+    }
+}
+/// How one turn of a cycle of the live worker ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Turned {
+    /// Its audio was heard.
+    Served,
+    /// Its track could not be copied and counted as silent ([`Copied::Silent`]).
+    Silent(String),
+    /// It failed: the copy of a take's only track, or the transcription.
+    Failed(String),
+}
+/// The error a cycle of the live worker shows in place of the live
+/// transcript: the first turn that failed, or, when not one track could be
+/// copied, why the first could not. A silent track beside one that was
+/// heard is no error.
+pub fn cycle_error(turned: &[Turned]) -> Option<String> {
+    let failed = turned.iter().find_map(|turn| match turn {
+        Turned::Failed(error) => Some(error.clone()),
+        _ => None,
+    });
+    let heard = turned.contains(&Turned::Served);
+    failed.or_else(|| {
+        turned.iter().find_map(|turn| match turn {
+            Turned::Silent(why) if !heard => Some(why.clone()),
+            _ => None,
+        })
+    })
+}
+/// The rows of two tracks in the order they were spoken: by the time the
+/// app shows for a row, its first word's alignment point when it has one
+/// and its start otherwise, the system row first where two share it.
+/// Whisper starts a segment where the one before it ended, which after a
+/// silence, or the silenced echo of the other track, is long before its
+/// words; the alignment point is where they are.
+pub fn by_time(system: Vec<Segment>, microphone: Vec<Segment>) -> Vec<Segment> {
+    let mut rows = system;
+    rows.extend(microphone);
+    // Stable, so each track keeps its own order and the system rows lead.
+    rows.sort_by_key(crate::agent::segment_seek_ms);
+    rows
+}
+/// The live transcript of a take with two tracks, from each track's own
+/// ([`Stretches::live`]): the finished rows of both in the order they were
+/// spoken, then at most one segment of words still being heard per track.
+/// `trackLanguages` holds what is decided so far, and `language` is the
+/// microphone's, or the system's while the microphone has none.
+pub fn live_of_tracks(system: Transcript, microphone: Transcript) -> Transcript {
+    let language = |live: &Transcript| Some((live.language.clone()?, live.language_detected));
+    let track_languages = TrackLanguages::of(language(&microphone), language(&system));
+    let first = track_languages
+        .as_ref()
+        .and_then(|languages| languages.first());
+    let heard = |segment: &Segment| segment.id.starts_with("live-");
+    let (system_heard, system_rows): (Vec<_>, Vec<_>) =
+        system.segments.into_iter().partition(heard);
+    let (microphone_heard, microphone_rows): (Vec<_>, Vec<_>) =
+        microphone.segments.into_iter().partition(heard);
+    let mut segments = by_time(system_rows, microphone_rows);
+    segments.extend(by_time(system_heard, microphone_heard));
+    Transcript {
+        segments,
+        language: first.map(|first| first.language.clone()),
+        language_detected: first.is_some_and(|first| first.language_detected),
+        track_languages,
+        status: Some("provisional".into()),
+        ..Default::default()
+    }
+}
+
+/// Saves the stretches in the file of their track.
 pub fn save(take: &Path, stretches: &Stretches) -> Result<(), String> {
     fs::create_dir_all(folder(take)).map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec_pretty(stretches).map_err(|e| e.to_string())?;
-    atomic_write(&file(take), &bytes)
+    atomic_write(&file(take, stretches.track), &bytes)
 }
 /// The take's saved stretches for Stop, settled on the take's language,
-/// when they can be reused: cut from `source`, made under the language
-/// choice that holds now (`chosen`, `None` for Auto), and every stretch in
-/// the take's language made by the model that language uses now
-/// (`model_of` gives its file name). `None` otherwise, or when there are
-/// none. Stretches in another language are still to be transcribed again
-/// ([`Stretches::to_redo`]).
+/// when they can be reused: those of `track` (`None` for a take with one
+/// track), cut from `source`, made under the language choice that holds now
+/// (`chosen`, `None` for Auto), and every stretch in the take's language
+/// made by the model that language uses now (`model_of` gives its file
+/// name). `None` otherwise, or when there are none. Stretches in another
+/// language are still to be transcribed again ([`Stretches::to_redo`]).
 pub fn usable(
     take: &Path,
+    track: Option<Track>,
     source: &str,
     chosen: Option<&str>,
     model_of: &dyn Fn(&str) -> String,
 ) -> Option<Stretches> {
-    let mut saved: Stretches = read_json(&file(take)).ok()?;
-    if saved.version != VERSION || saved.source != source {
+    let mut saved: Stretches = read_json(&file(take, track)).ok()?;
+    if saved.version != VERSION || saved.source != source || saved.track != track {
         return None;
     }
     let same_choice = match chosen {
@@ -581,10 +806,11 @@ pub fn usable(
     }
     Some(saved)
 }
-/// The language the take's saved stretches hold it to, and whether
-/// detection decided it, for the pass that refines them.
-pub fn language(take: &Path) -> Option<(String, bool)> {
-    let saved: Stretches = read_json(&file(take)).ok()?;
+/// The language the take's saved stretches of `track` (`None` for a take
+/// with one track) hold it to, and whether detection decided it, for the
+/// pass that refines them.
+pub fn language(take: &Path, track: Option<Track>) -> Option<(String, bool)> {
+    let saved: Stretches = read_json(&file(take, track)).ok()?;
     if saved.version != VERSION {
         return None;
     }
@@ -592,10 +818,20 @@ pub fn language(take: &Path) -> Option<(String, bool)> {
         .language
         .map(|language| (language, saved.language_detected))
 }
-/// Forgets the take's stretches, so its next transcription covers the whole
-/// take. Their raw Whisper output stays.
+/// Whether the take has stretches saved, of either track or of its one.
+pub fn any_saved(take: &Path) -> bool {
+    SAVED_AS.iter().any(|&track| file(take, track).is_file())
+}
+/// Forgets the take's stretches of `track`.
+pub fn forget_track(take: &Path, track: Option<Track>) {
+    let _ = fs::remove_file(file(take, track));
+}
+/// Forgets the take's stretches, of every track, so its next transcription
+/// covers the whole take. Their raw Whisper output stays.
 pub fn forget(take: &Path) {
-    let _ = fs::remove_file(file(take));
+    for track in SAVED_AS {
+        forget_track(take, track);
+    }
 }
 /// Forgets the stretches of every take of session `id`, before Retry or
 /// `cue transcribe` transcribe it again.
@@ -630,6 +866,7 @@ mod tests {
                         seek_ms: Some(start_ms + 10),
                     })
                     .collect(),
+                track: None,
             }],
             status: Some("complete".into()),
             ..Default::default()
@@ -1108,40 +1345,40 @@ mod tests {
     fn saved_stretches_are_used_only_when_they_match() {
         let take = tempfile::tempdir().unwrap();
         let english = Some("en");
-        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
+        assert!(usable(take.path(), None, "mic.wav", english, &model_of).is_none());
         let mut stretches = Stretches::new("mic.wav", english);
         stretches.push(spoken(&[("one", 100, 400)]), 1000, "en", SMALL_EN, None);
         save(take.path(), &stretches).unwrap();
         assert_eq!(
-            usable(take.path(), "mic.wav", english, &model_of)
+            usable(take.path(), None, "mic.wav", english, &model_of)
                 .map(|saved| (saved.until_ms, saved.segments.len())),
             Some((1000, 1))
         );
-        assert_eq!(language(take.path()), Some(("en".into(), false)));
+        assert_eq!(language(take.path(), None), Some(("en".into(), false)));
         // Another audio file, another language choice (German, or Auto,
         // which never chose English), or a model that arrived meanwhile.
         let base = |_: &str| "ggml-base.bin".to_owned();
-        assert!(usable(take.path(), "audio.wav", english, &model_of).is_none());
-        assert!(usable(take.path(), "mic.wav", Some("de"), &model_of).is_none());
-        assert!(usable(take.path(), "mic.wav", None, &model_of).is_none());
-        assert!(usable(take.path(), "mic.wav", english, &base).is_none());
+        assert!(usable(take.path(), None, "audio.wav", english, &model_of).is_none());
+        assert!(usable(take.path(), None, "mic.wav", Some("de"), &model_of).is_none());
+        assert!(usable(take.path(), None, "mic.wav", None, &model_of).is_none());
+        assert!(usable(take.path(), None, "mic.wav", english, &base).is_none());
         // Retry forgets them; the raw output in the folder stays.
         fs::write(folder(take.path()).join("0.json"), b"{}").unwrap();
         forget(take.path());
-        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
-        assert_eq!(language(take.path()), None);
+        assert!(usable(take.path(), None, "mic.wav", english, &model_of).is_none());
+        assert_eq!(language(take.path(), None), None);
         assert!(folder(take.path()).join("0.json").is_file());
         // A damaged file is not used.
-        fs::write(file(take.path()), b"{broken").unwrap();
-        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
+        fs::write(file(take.path(), None), b"{broken").unwrap();
+        assert!(usable(take.path(), None, "mic.wav", english, &model_of).is_none());
         // Nor is a file of version 1, which knew one language per take.
         fs::write(
-            file(take.path()),
+            file(take.path(), None),
             br#"{"version":1,"source":"mic.wav","model":"ggml-small.en.bin","language":"en","untilMs":1000,"segments":[]}"#,
         )
         .unwrap();
-        assert!(usable(take.path(), "mic.wav", english, &model_of).is_none());
-        assert_eq!(language(take.path()), None);
+        assert!(usable(take.path(), None, "mic.wav", english, &model_of).is_none());
+        assert_eq!(language(take.path(), None), None);
     }
 
     #[test]
@@ -1152,11 +1389,11 @@ mod tests {
         let undecided = heard(&[Some(("en", 0.6)), Some(("de", 0.8))]);
         save(take.path(), &undecided).unwrap();
         assert_eq!(
-            language(take.path()),
+            language(take.path(), None),
             None,
             "nothing decided while it recorded"
         );
-        let settled = usable(take.path(), "mic.wav", None, &model_of).unwrap();
+        let settled = usable(take.path(), None, "mic.wav", None, &model_of).unwrap();
         assert_eq!(
             (settled.language.as_deref(), settled.language_detected),
             (Some("de"), true)
@@ -1164,7 +1401,7 @@ mod tests {
         let again: Vec<_> = settled.to_redo().iter().map(|part| part.start_ms).collect();
         assert_eq!(again, [0]);
         // A language chosen before Stop is used instead: the whole take again.
-        assert!(usable(take.path(), "mic.wav", Some("de"), &model_of).is_none());
+        assert!(usable(take.path(), None, "mic.wav", Some("de"), &model_of).is_none());
         // The German model arrived during the take: its stretches were made
         // with base, so the whole take is transcribed again.
         let mut early = Stretches::new("mic.wav", None);
@@ -1176,15 +1413,15 @@ mod tests {
             Some(guess("de", 0.95)),
         );
         save(take.path(), &early).unwrap();
-        assert_eq!(language(take.path()), Some(("de".into(), true)));
-        assert!(usable(take.path(), "mic.wav", None, &model_of).is_none());
+        assert_eq!(language(take.path(), None), Some(("de".into(), true)));
+        assert!(usable(take.path(), None, "mic.wav", None, &model_of).is_none());
         let base = |_: &str| "ggml-base.bin".to_owned();
-        assert!(usable(take.path(), "mic.wav", None, &base).is_some());
+        assert!(usable(take.path(), None, "mic.wav", None, &base).is_some());
         // Only silence so far: reused, with the language still to detect.
         let mut silent = Stretches::new("mic.wav", None);
         silent.skip(28_000);
         save(take.path(), &silent).unwrap();
-        let reused = usable(take.path(), "mic.wav", None, &model_of).unwrap();
+        let reused = usable(take.path(), None, "mic.wav", None, &model_of).unwrap();
         assert_eq!((reused.language, reused.until_ms), (None, 28_000));
         // What is saved: the decision and each stretch's guess.
         let saved: serde_json::Value = serde_json::to_value(&settled).unwrap();
@@ -1199,6 +1436,612 @@ mod tests {
                 "guess":{"language":"en","p":0.6f32},"provisional":true})
         );
         assert!(saved["parts"][1].get("provisional").is_none());
+    }
+
+    #[test]
+    fn the_system_track_is_served_first_and_guessed_every_second_cycle() {
+        let turn = |track, guess| Turn { track, guess };
+        let both = [Track::Microphone, Track::System];
+        // Every cycle: the system track, then the microphone. The
+        // microphone's words still being heard are guessed in each, the
+        // system's in every second one, from the first on.
+        let served: Vec<_> = (0..4).map(|cycle| turns(&both, cycle)).collect();
+        let guessed = [turn(Track::System, true), turn(Track::Microphone, true)];
+        let committed = [turn(Track::System, false), turn(Track::Microphone, true)];
+        assert_eq!(served, [guessed, committed, guessed, committed]);
+        // The order the capture names its tracks in changes nothing.
+        assert_eq!(turns(&[Track::System, Track::Microphone], 1), committed);
+        // One track is guessed in every cycle, as before.
+        for track in [Track::Microphone, Track::System] {
+            for cycle in 0..3 {
+                assert_eq!(turns(&[track], cycle), [turn(track, true)]);
+            }
+        }
+        assert!(turns(&[], 0).is_empty());
+    }
+
+    /// The copies a cycle asked for: the track, and whether as the echo
+    /// reference.
+    type Asked = Vec<(Track, bool)>;
+    /// What the capture answers when a live track has no samples yet.
+    const WAITING: &str = "Waiting for audio samples";
+    const BUSY: &str = "Audio snapshot is busy; retry next update";
+    /// The rates the two devices of these tests record at: different, as a
+    /// microphone's and a loopback's mostly are.
+    fn device_rate(track: Track) -> u32 {
+        match track {
+            Track::Microphone => 48_000,
+            Track::System => 44_100,
+        }
+    }
+    /// The copies one cycle makes of a take whose live tracks hold `lengths`
+    /// ms of audio (`Err` for a track that cannot be copied), each track
+    /// from `from` ms: what each turn has to work on, and which copies were
+    /// asked for, the echo reference marked.
+    fn cycle_copies(
+        lengths: &[(Track, Result<u64, &str>)],
+        from: &[(Track, u64)],
+    ) -> (Vec<(Track, Copied)>, Asked) {
+        cycle_copies_at(&device_rate, lengths, from)
+    }
+    /// [`cycle_copies`] with each track recorded at the rate `rate` gives.
+    fn cycle_copies_at(
+        rate: &dyn Fn(Track) -> u32,
+        lengths: &[(Track, Result<u64, &str>)],
+        from: &[(Track, u64)],
+    ) -> (Vec<(Track, Copied)>, Asked) {
+        let recorded: Vec<Track> = lengths.iter().map(|(track, _)| *track).collect();
+        let two = recorded.len() > 1;
+        let asked = std::cell::RefCell::new(Vec::new());
+        let copied = turns(&recorded, 0)
+            .into_iter()
+            .map(|turn| {
+                let from_ms = from
+                    .iter()
+                    .find(|(track, _)| *track == turn.track)
+                    .map_or(0, |(_, from_ms)| *from_ms);
+                // As the capture copies, and reports what it copied: from
+                // the last sample at or before the point asked for, or from
+                // the track's end when it is shorter, up to 60 s, in whole
+                // ms rounded down.
+                let mut copy = |track: Track, reference: bool| {
+                    asked.borrow_mut().push((track, reference));
+                    let length = lengths
+                        .iter()
+                        .find(|(recorded, _)| *recorded == track)
+                        .map(|(_, length)| *length)
+                        .unwrap_or(Err("No live track"))
+                        .map_err(str::to_owned)?;
+                    if length == 0 {
+                        return Err(WAITING.to_owned());
+                    }
+                    let rate = rate(track);
+                    let samples = (length * rate as u64 / 1000) as u32;
+                    let span = crate::capture::copy_span(rate, samples, Some(from_ms));
+                    Ok(crate::capture::span_ms(rate, span))
+                };
+                (turn.track, copy_for(turn, two, &mut copy))
+            })
+            .collect();
+        (copied, asked.into_inner())
+    }
+    fn audio(length_ms: u64, reference: bool) -> Copied {
+        Copied::Audio {
+            length_ms,
+            reference,
+        }
+    }
+    fn ends(copied: &[(Track, Copied)]) -> Vec<Turned> {
+        copied
+            .iter()
+            .map(|(_, copied)| match copied {
+                Copied::Audio { .. } => Turned::Served,
+                Copied::Silent(why) => Turned::Silent(why.clone()),
+                Copied::Failed(error) => Turned::Failed(error.clone()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_system_track_without_samples_is_silent_until_it_fills() {
+        use Track::{Microphone, System};
+        // Nothing has played yet: the loopback has sent no packet, so the
+        // system track has no samples, while the microphone has 4 s.
+        let (copied, asked) = cycle_copies(&[(Microphone, Ok(4_000)), (System, Ok(0))], &[]);
+        assert_eq!(
+            copied,
+            [
+                (System, Copied::Silent(WAITING.into())),
+                // The microphone goes on as in a take with one track:
+                // nothing of it is compared, nothing counts as echo.
+                (Microphone, audio(4_000, false)),
+            ]
+        );
+        assert_eq!(
+            asked,
+            [(System, false), (Microphone, false), (System, true)],
+            "the system track first, then the microphone and its reference"
+        );
+        assert_eq!(cycle_error(&ends(&copied)), None, "no error is shown");
+        // The computer plays its first sound at 6 s: the track then holds
+        // silence up to it. Both tracks are heard, and the microphone is
+        // compared with the system audio of the same span.
+        let both = [(Microphone, Ok(8_000)), (System, Ok(8_000))];
+        let (copied, _) = cycle_copies(&both, &[]);
+        assert_eq!(
+            copied,
+            [
+                (System, audio(8_000, false)),
+                (Microphone, audio(8_000, true))
+            ]
+        );
+        assert_eq!(cycle_error(&ends(&copied)), None);
+        // Each track from the end of its own last finished stretch.
+        let (copied, _) = cycle_copies(&both, &[(Microphone, 7_000), (System, 2_000)]);
+        assert_eq!(
+            copied,
+            [
+                (System, audio(6_000, false)),
+                (Microphone, audio(1_000, true))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_microphone_track_without_samples_does_not_stop_the_system_track() {
+        use Track::{Microphone, System};
+        // A device that starts late: the call is heard meanwhile.
+        let (copied, asked) = cycle_copies(&[(Microphone, Ok(0)), (System, Ok(5_000))], &[]);
+        assert_eq!(
+            copied,
+            [
+                (System, audio(5_000, false)),
+                (Microphone, Copied::Silent(WAITING.into())),
+            ]
+        );
+        assert_eq!(
+            asked,
+            [(System, false), (Microphone, false)],
+            "no reference is copied for a microphone without audio"
+        );
+        assert_eq!(cycle_error(&ends(&copied)), None);
+        // Neither track has a sample yet: that is shown, as for one track.
+        let (copied, _) = cycle_copies(&[(Microphone, Ok(0)), (System, Ok(0))], &[]);
+        assert_eq!(cycle_error(&ends(&copied)), Some(WAITING.into()));
+        // The microphone has caught up to where it was heard last: nothing
+        // new, nothing to compare.
+        let (copied, asked) = cycle_copies(
+            &[(Microphone, Ok(5_000)), (System, Ok(9_000))],
+            &[(Microphone, 5_000)],
+        );
+        assert_eq!(copied[1], (Microphone, audio(0, false)));
+        assert_eq!(asked.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_copy_of_one_track_leaves_the_other_its_turn() {
+        use Track::{Microphone, System};
+        // The system track's writer is busy, or the track has failed: the
+        // system turn is silent and the microphone's audio is not compared.
+        for error in [BUSY, "Audio writer failed", "Audio recording has stopped"] {
+            let (copied, _) = cycle_copies(&[(Microphone, Ok(4_000)), (System, Err(error))], &[]);
+            assert_eq!(
+                copied,
+                [
+                    (System, Copied::Silent(error.into())),
+                    (Microphone, audio(4_000, false)),
+                ]
+            );
+            assert_eq!(cycle_error(&ends(&copied)), None);
+            // And the other way round.
+            let (copied, _) = cycle_copies(&[(Microphone, Err(error)), (System, Ok(4_000))], &[]);
+            assert_eq!(
+                copied,
+                [
+                    (System, audio(4_000, false)),
+                    (Microphone, Copied::Silent(error.into())),
+                ]
+            );
+            assert_eq!(cycle_error(&ends(&copied)), None);
+        }
+        // The system turn was heard, but its reference copy for the
+        // microphone, made a moment later, fails: no echo, no error.
+        let calls = std::cell::Cell::new(0);
+        let microphone = Turn {
+            track: Microphone,
+            guess: true,
+        };
+        let copied = copy_for(microphone, true, &mut |track, reference| {
+            calls.set(calls.get() + 1);
+            match (track, reference) {
+                (Microphone, false) => Ok((3_000, 9_000)),
+                (System, true) => Err(BUSY.to_owned()),
+                other => panic!("{other:?} is not copied in the microphone's turn"),
+            }
+        });
+        assert_eq!((copied, calls.get()), (audio(6_000, false), 2));
+        // Both copies fail: the cycle shows why, the first reason.
+        let (copied, _) = cycle_copies(
+            &[
+                (Microphone, Err(BUSY)),
+                (System, Err("Audio writer failed")),
+            ],
+            &[],
+        );
+        assert_eq!(
+            cycle_error(&ends(&copied)),
+            Some("Audio writer failed".into())
+        );
+        // A transcription that fails is shown, whatever the other track did.
+        let failed = Turned::Failed("Local speech processing failed.".into());
+        for other in [Turned::Served, Turned::Silent(WAITING.into())] {
+            assert_eq!(
+                cycle_error(&[other, failed.clone()]),
+                Some("Local speech processing failed.".into())
+            );
+        }
+        assert_eq!(cycle_error(&[]), None);
+
+        // A take with one track is as it was: its copy failing is the
+        // cycle's error, and nothing else is copied.
+        for track in [Microphone, System] {
+            for error in [WAITING, BUSY] {
+                let length = if error == WAITING { Ok(0) } else { Err(error) };
+                let (copied, asked) = cycle_copies(&[(track, length)], &[]);
+                assert_eq!(copied, [(track, Copied::Failed(error.into()))]);
+                assert_eq!(asked, [(track, false)]);
+                assert_eq!(cycle_error(&ends(&copied)), Some(error.into()));
+            }
+            let (copied, asked) = cycle_copies(&[(track, Ok(4_000))], &[(track, 1_000)]);
+            assert_eq!(copied, [(track, audio(3_000, false))]);
+            assert_eq!(asked, [(track, false)]);
+        }
+    }
+
+    #[test]
+    fn copies_of_different_spans_are_compared_only_from_the_same_start() {
+        use Track::{Microphone, System};
+        let reference = |microphone: u64, system: u64, from: u64| {
+            let lengths = [(Microphone, Ok(microphone)), (System, Ok(system))];
+            cycle_copies(&lengths, &[(Microphone, from)]).0[1].1.clone()
+        };
+        // The system copy ends before the microphone's (nothing has played
+        // since 5 s) or after it: both start where the microphone's does,
+        // so they are compared, the system audio silent past its end.
+        assert_eq!(reference(8_000, 5_000, 0), audio(8_000, true));
+        assert_eq!(reference(8_000, 5_000, 3_000), audio(5_000, true));
+        assert_eq!(reference(8_000, 30_000, 3_000), audio(5_000, true));
+        // The system track ends at or before the point the microphone is
+        // heard from: its copy would start elsewhere, or is empty, so
+        // nothing is compared and nothing counts as echo.
+        assert_eq!(reference(20_000, 5_000, 5_000), audio(15_000, false));
+        assert_eq!(reference(20_000, 5_000, 15_000), audio(5_000, false));
+        // The rule itself: made, from the same point, with audio.
+        assert!(is_reference(3_000, &Ok((3_000, 3_001))));
+        assert!(!is_reference(3_000, &Ok((3_000, 3_000))));
+        assert!(!is_reference(3_000, &Ok((2_000, 9_000))));
+        assert!(!is_reference(3_000, &Ok((4_000, 9_000))));
+        assert!(!is_reference(3_000, &Err(WAITING.into())));
+    }
+
+    #[test]
+    fn tracks_at_different_rates_are_compared_from_the_same_point() {
+        use Track::{Microphone, System};
+        let lengths = [(Microphone, Ok(70_000)), (System, Ok(70_000))];
+        // The microphone's turn from `from`, the two devices at these rates.
+        let turn = |from: u64, microphone: u32, system: u32| {
+            let rate = move |track: Track| match track {
+                Microphone => microphone,
+                System => system,
+            };
+            cycle_copies_at(&rate, &lengths, &[(Microphone, from)]).0[1]
+                .1
+                .clone()
+        };
+        // What the capture reports for a copy from `from` at `rate`.
+        let reported = |from: u64, rate: u32| {
+            let span = crate::capture::copy_span(rate, rate * 70, Some(from));
+            crate::capture::span_ms(rate, span)
+        };
+        // A 48 kHz microphone and a 44.1 kHz loopback from 12345 ms report
+        // 12345 and 12344: the same point, and the system copy is the
+        // reference.
+        assert_eq!(reported(12_345, 48_000), (12_345, 70_000));
+        assert_eq!(reported(12_345, 44_100), (12_344, 70_000));
+        assert_eq!(turn(12_345, 48_000, 44_100), audio(57_655, true));
+        assert_eq!(turn(12_345, 44_100, 48_000), audio(57_656, true));
+        // So it is from every millisecond a stretch can end on, whatever
+        // the two rates, though most of them report different starts.
+        let rates = [
+            (48_000, 44_100),
+            (44_100, 48_000),
+            (16_000, 44_100),
+            (96_000, 22_050),
+            (8_000, 11_025),
+            (44_100, 44_100),
+            (48_000, 48_000),
+        ];
+        let mut apart = 0;
+        for (microphone, system) in rates {
+            for from in (1..2_000).chain([12_344, 12_346, 33_333, 59_999]) {
+                let (own, reference) = (reported(from, microphone), reported(from, system));
+                apart += usize::from(own.0 != reference.0);
+                assert_eq!(
+                    turn(from, microphone, system),
+                    audio(own.1 - own.0, true),
+                    "{microphone} Hz and {system} Hz from {from} ms: {own:?} {reference:?}"
+                );
+            }
+        }
+        assert!(
+            apart > 1_000,
+            "{apart} points with different reported starts"
+        );
+        // The rule: a millisecond apart is the same point, more is not.
+        assert_eq!(SAME_START_MS, 1);
+        assert!(is_reference(12_345, &Ok((12_344, 20_000))));
+        assert!(is_reference(12_344, &Ok((12_345, 20_000))));
+        assert!(!is_reference(12_345, &Ok((12_343, 20_000))));
+        assert!(!is_reference(12_345, &Ok((12_347, 20_000))));
+        // A system track that ends a millisecond before the point is no
+        // reference, near as its end is: its copy is empty.
+        let short = [(Microphone, Ok(70_000)), (System, Ok(12_344))];
+        let (copied, _) = cycle_copies(&short, &[(Microphone, 12_345)]);
+        assert_eq!(copied[1].1, audio(57_655, false));
+    }
+
+    #[test]
+    fn each_track_has_stretches_of_its_own() {
+        let take = tempfile::tempdir().unwrap();
+        let english = Some("en");
+        // The two tracks of a take, each cut into stretches of its own.
+        let mut system = Stretches::of_track(Track::System, None);
+        system.push(
+            spoken(&[("anruf", 100, 400)]),
+            10_000,
+            "de",
+            SMALL,
+            Some(guess("de", 0.95)),
+        );
+        let mut microphone = Stretches::of_track(Track::Microphone, english);
+        microphone.push(
+            spoken(&[("review", 200, 500)]),
+            12_000,
+            "en",
+            SMALL_EN,
+            None,
+        );
+        assert_eq!(
+            (system.source.as_str(), microphone.source.as_str()),
+            ("system.wav", "mic.wav")
+        );
+        assert_eq!(
+            (system.audio(), microphone.audio()),
+            (Track::System, Track::Microphone)
+        );
+        // Their rows carry the track, and no id is shared between them.
+        assert!(system
+            .segments
+            .iter()
+            .all(|row| row.track == Some(Track::System)));
+        assert_eq!(system.segments[0].id, "stretch-system-0-0");
+        assert_eq!(microphone.segments[0].id, "stretch-microphone-0-0");
+        system.replace(0, spoken(&[("anruf", 100, 400)]), "de", SMALL);
+        assert_eq!(system.segments[0].track, Some(Track::System));
+        let joined = microphone.join(spoken(&[("more", 0, 200)]), 900);
+        assert!(joined
+            .segments
+            .iter()
+            .all(|row| row.track == Some(Track::Microphone)));
+        // Each is saved in its own file, beside its raw output.
+        save(take.path(), &system).unwrap();
+        save(take.path(), &microphone).unwrap();
+        let files = |take: &Path| -> Vec<String> {
+            let mut names: Vec<_> = fs::read_dir(folder(take))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(files(take.path()), ["microphone.json", "system.json"]);
+        assert_eq!(
+            raw(take.path(), Some(Track::System), 28_000),
+            folder(take.path()).join("system-28000.json")
+        );
+        assert_eq!(
+            raw(take.path(), None, 28_000),
+            folder(take.path()).join("28000.json")
+        );
+        // And used, and held to its language, on its own.
+        let reused = |track: Track, chosen: Option<&str>| {
+            usable(take.path(), Some(track), track.file(), chosen, &model_of)
+        };
+        assert_eq!(
+            reused(Track::System, None).map(|saved| (saved.until_ms, saved.track)),
+            Some((10_000, Some(Track::System)))
+        );
+        assert!(
+            reused(Track::Microphone, None).is_none(),
+            "made under English"
+        );
+        assert_eq!(
+            reused(Track::Microphone, english).map(|saved| saved.until_ms),
+            Some(12_000)
+        );
+        assert!(reused(Track::System, english).is_none(), "made under Auto");
+        assert_eq!(
+            language(take.path(), Some(Track::System)),
+            Some(("de".into(), true))
+        );
+        assert_eq!(
+            language(take.path(), Some(Track::Microphone)),
+            Some(("en".into(), false))
+        );
+        // They are not the stretches of a take with one track.
+        assert!(usable(take.path(), None, "mic.wav", english, &model_of).is_none());
+        assert_eq!(language(take.path(), None), None);
+        assert!(any_saved(take.path()));
+        // One track's can be forgotten alone; Retry forgets them all.
+        forget_track(take.path(), Some(Track::System));
+        assert_eq!(files(take.path()), ["microphone.json"]);
+        assert!(any_saved(take.path()));
+        forget(take.path());
+        assert!(!any_saved(take.path()));
+
+        // A take with one track keeps the one file it always had, written
+        // without a track, whether cut from the microphone or from the
+        // system audio; a file saved before tracks existed reads the same.
+        let mut alone = Stretches::new("system.wav", english);
+        alone.push(spoken(&[("one", 100, 400)]), 1000, "en", SMALL_EN, None);
+        assert_eq!((alone.track, alone.audio()), (None, Track::System));
+        assert_eq!(alone.segments[0].id, "stretch-0-0");
+        assert_eq!(alone.segments[0].track, None);
+        save(take.path(), &alone).unwrap();
+        assert_eq!(files(take.path()), ["stretches.json"]);
+        let saved: serde_json::Value = read_json(&file(take.path(), None)).unwrap();
+        assert!(saved.get("track").is_none());
+        assert!(saved["segments"][0].get("track").is_none());
+        assert!(usable(take.path(), None, "system.wav", english, &model_of).is_some());
+        assert!(
+            usable(
+                take.path(),
+                Some(Track::System),
+                "system.wav",
+                english,
+                &model_of
+            )
+            .is_none(),
+            "not the system track of a take with two"
+        );
+        assert!(any_saved(take.path()));
+        assert_eq!(Stretches::new("mic.wav", None).audio(), Track::Microphone);
+    }
+
+    #[test]
+    fn the_live_transcript_holds_both_tracks_and_one_guess_for_each() {
+        // A call in German on the system track, decided; the reviewer on
+        // the microphone, not decided yet.
+        let mut system = Stretches::of_track(Track::System, None);
+        system.push(
+            spoken(&[("frage", 1_000, 1_800)]),
+            10_000,
+            "de",
+            SMALL,
+            Some(guess("de", 0.95)),
+        );
+        system.push(
+            spoken(&[("danke", 2_000, 2_500)]),
+            20_000,
+            "de",
+            SMALL,
+            None,
+        );
+        let mut microphone = Stretches::of_track(Track::Microphone, None);
+        microphone.push(
+            spoken(&[("answer", 4_000, 5_000)]),
+            12_000,
+            "en",
+            SMALL_EN,
+            Some(guess("en", 0.6)),
+        );
+        // Take 2 starts at 60 s on the session timeline.
+        let offset = 60_000;
+        let live = live_of_tracks(
+            system.live(spoken(&[("noch", 500, 900)]), 3_000, offset),
+            microphone.live(
+                spoken(&[("and", 300, 600), ("then", 700, 900)]),
+                9_000,
+                offset,
+            ),
+        );
+        let rows: Vec<_> = live
+            .segments
+            .iter()
+            .map(|row| (row.id.as_str(), row.track, row.text.as_str(), row.start_ms))
+            .collect();
+        let (system_track, microphone_track) = (Some(Track::System), Some(Track::Microphone));
+        assert_eq!(
+            rows,
+            [
+                // The finished rows of both tracks, by time.
+                ("stretch-system-0-0", system_track, "frage", 61_000),
+                ("stretch-microphone-0-0", microphone_track, "answer", 64_000),
+                ("stretch-system-10000-1", system_track, "danke", 72_000),
+                // Then the words still being heard, one segment per track.
+                (
+                    "live-microphone-12000",
+                    microphone_track,
+                    "and then",
+                    72_300
+                ),
+                ("live-system-20000", system_track, "noch", 80_500),
+            ]
+        );
+        assert_eq!(live.status.as_deref(), Some("provisional"));
+        // What is decided so far: the system track is German.
+        let shown = serde_json::to_value(&live).unwrap();
+        assert_eq!(
+            shown["trackLanguages"],
+            serde_json::json!({"system":{"language":"de","languageDetected":true}})
+        );
+        assert_eq!(shown["language"], serde_json::json!("de"));
+        assert_eq!(
+            shown["segments"][3]["track"],
+            serde_json::json!("microphone")
+        );
+        // Once the microphone is decided too, the transcript's own language
+        // is the microphone's.
+        microphone.push(
+            spoken(&[("clear", 100, 400)]),
+            22_000,
+            "en",
+            SMALL_EN,
+            Some(guess("en", 0.97)),
+        );
+        // No words being heard on a track: no live segment for it; rows
+        // that start together show the system's first.
+        let mut tied = Stretches::of_track(Track::Microphone, Some("en"));
+        tied.push(
+            spoken(&[("same", 1_000, 1_300)]),
+            5_000,
+            "en",
+            SMALL_EN,
+            None,
+        );
+        let live = live_of_tracks(
+            system.live(Transcript::default(), 0, 0),
+            microphone.live(spoken(&[("now", 0, 200)]), 500, 0),
+        );
+        assert_eq!(
+            (live.language.as_deref(), live.language_detected),
+            (Some("en"), true)
+        );
+        let heard: Vec<_> = live
+            .segments
+            .iter()
+            .filter(|row| row.id.starts_with("live-"))
+            .map(|row| (row.track, row.text.as_str()))
+            .collect();
+        assert_eq!(heard, [(microphone_track, "now")]);
+        assert!(live.segments.last().unwrap().id.starts_with("live-"));
+        let live = live_of_tracks(
+            system.live(Transcript::default(), 0, 0),
+            tied.live(Transcript::default(), 0, 0),
+        );
+        let first: Vec<_> = live.segments.iter().take(2).map(|row| row.track).collect();
+        assert_eq!(first, [system_track, microphone_track]);
+        assert_eq!(
+            (live.segments[0].start_ms, live.segments[1].start_ms),
+            (1_000, 1_000)
+        );
+        // Nothing heard on either track yet.
+        let empty = live_of_tracks(
+            Stretches::of_track(Track::System, None).live(Transcript::default(), 0, 0),
+            Stretches::of_track(Track::Microphone, None).live(Transcript::default(), 0, 0),
+        );
+        assert!(empty.segments.is_empty() && empty.track_languages.is_none());
+        assert_eq!(empty.language, None);
     }
 
     /// What a real-time replay of a recorded take through the live worker
@@ -1306,9 +2149,12 @@ mod tests {
                     &snapshot,
                     length,
                     stretches.language.as_deref(),
+                    None,
+                    true,
                     &cancel,
                 )
                 .unwrap();
+                let guess = guess.expect("a guess was asked for");
                 seen(&stretches.live(guess.clone(), length, 0), started.elapsed().as_secs_f64());
                 let before = stretches.until_ms;
                 let (guess, guess_ms) = match audio {
@@ -1433,6 +2279,216 @@ mod tests {
     #[ignore = "Requires Whisper, small.en, base, the speech detector, test-results/replay/mic.wav and its reference.txt; runs in real time"]
     fn actual_replay_finishes_within_seconds_of_stop() {
         let stop = replay().stop;
+        assert!(stop.as_secs_f64() < 5.0, "Stop took {stop:?}");
+    }
+
+    /// A track of the two-track fixture: its samples and their rate.
+    fn fixture_track(path: &Path) -> (Vec<f32>, hound::WavSpec) {
+        let mut reader = hound::WavReader::open(path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let spec = reader.spec();
+        let samples = match spec.sample_format {
+            hound::SampleFormat::Float => reader.samples::<f32>().map(Result::unwrap).collect(),
+            hound::SampleFormat::Int => {
+                let full = (1i64 << (spec.bits_per_sample - 1)) as f32;
+                reader
+                    .samples::<i32>()
+                    .map(|sample| sample.unwrap() as f32 / full)
+                    .collect()
+            }
+        };
+        assert_eq!(spec.channels, 1, "{} is mono", path.display());
+        (samples, spec)
+    }
+
+    #[test]
+    #[ignore = "Requires Whisper, both small models, base, the speech detector and a recorded take with both tracks: test-results/replay/two-tracks/mic.wav and system.wav; runs in real time"]
+    fn actual_replay_of_two_tracks_finishes_within_seconds_of_stop() {
+        use std::time::{Duration, Instant};
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-results/replay/two-tracks");
+        let audio = |track: Track| fixture_track(&fixtures.join(track.file()));
+        let (microphone, system) = (audio(Track::Microphone), audio(Track::System));
+        let length_of = |(samples, spec): &(Vec<f32>, hound::WavSpec)| {
+            samples.len() as u64 * 1000 / spec.sample_rate as u64
+        };
+        let length_ms = length_of(&microphone).min(length_of(&system));
+        let root = tempfile::tempdir().unwrap();
+        let take = root.path().join("take");
+        let live = take.join("live");
+        fs::create_dir_all(&live).unwrap();
+        // No settings: Auto, each track detected on its own.
+        let models = crate::deps::TakeModels::now();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // A copy of a track from a point, as the capture makes it and
+        // reports it: at most 60 s, of what is recorded by `now_ms`.
+        let copy = |track: Track, from_ms: u64, now_ms: u64, target: &Path| -> Bounds {
+            let (samples, spec) = match track {
+                Track::Microphone => &microphone,
+                Track::System => &system,
+            };
+            let rate = spec.sample_rate;
+            let recorded = (now_ms * rate as u64 / 1000) as u32;
+            if recorded == 0 {
+                return Err("Waiting for audio samples".into());
+            }
+            let (a, b) = crate::capture::copy_span(rate, recorded, Some(from_ms));
+            let spec = hound::WavSpec {
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+                ..*spec
+            };
+            let mut writer = hound::WavWriter::create(target, spec).unwrap();
+            for sample in &samples[a as usize..b as usize] {
+                writer.write_sample(*sample).unwrap();
+            }
+            writer.finalize().unwrap();
+            Ok(crate::capture::span_ms(rate, (a, b)))
+        };
+        let both = [Track::Microphone, Track::System];
+        let mut tracks: Vec<(Stretches, Transcript)> = turns(&both, 0)
+            .iter()
+            .map(|turn| (Stretches::of_track(turn.track, None), Transcript::default()))
+            .collect();
+        let snapshot = live.join("snapshot.wav");
+        let system_snapshot = live.join("system-snapshot.wav");
+        let started = Instant::now();
+        let mut cycle = 0;
+        // The longest a cycle took: how far the live transcript can lag.
+        let mut slowest = Duration::ZERO;
+        // The microphone's turns: all, those compared with the system
+        // track, and those in which the gate silenced speech as echo; and
+        // the speech regions it silenced, counted each time they were
+        // judged, and by the second of the take they start in.
+        let (mut heard, mut compared, mut gated, mut silenced) = (0, 0, 0, 0);
+        let mut echoes = std::collections::BTreeSet::new();
+        loop {
+            let began = Instant::now();
+            let now_ms = (started.elapsed().as_millis() as u64).min(length_ms);
+            for (at, turn) in turns(&both, cycle).into_iter().enumerate() {
+                let (stretches, shown) = &mut tracks[at];
+                let from = stretches.until_ms;
+                // The copies and what they are good for, as the live worker
+                // decides it.
+                let copied = copy_for(turn, true, &mut |track, reference| {
+                    let target = if reference {
+                        &system_snapshot
+                    } else {
+                        &snapshot
+                    };
+                    copy(track, from, now_ms, target)
+                });
+                let Copied::Audio {
+                    length_ms: length,
+                    reference,
+                } = copied
+                else {
+                    continue;
+                };
+                if turn.track == Track::Microphone {
+                    heard += 1;
+                    compared += usize::from(reference);
+                }
+                let (guess, audio) = crate::transcribe::live_guess(
+                    root.path(),
+                    &live,
+                    &snapshot,
+                    length,
+                    stretches.language.as_deref(),
+                    reference.then_some(system_snapshot.as_path()),
+                    turn.guess,
+                    &cancel,
+                )
+                .unwrap();
+                if let Some(audio) = &audio {
+                    gated += usize::from(!audio.silenced().is_empty());
+                    silenced += audio.silenced().len();
+                    echoes.extend(audio.silenced().iter().map(|echo| (from + echo.0) / 1000));
+                }
+                let guess = guess.unwrap_or_else(|| shown.clone());
+                let before = stretches.until_ms;
+                *shown = match audio {
+                    Some(audio) => {
+                        crate::transcribe::live_commit(
+                            root.path(),
+                            &take,
+                            &live,
+                            &models,
+                            stretches,
+                            &audio,
+                            guess,
+                            &cancel,
+                        )
+                        .unwrap()
+                        .0
+                    }
+                    None => guess,
+                };
+                if stretches.until_ms != before {
+                    eprintln!("{} cut {before} {}", turn.track.name(), stretches.until_ms);
+                }
+            }
+            slowest = slowest.max(began.elapsed());
+            if now_ms >= length_ms {
+                break;
+            }
+            cycle += 1;
+            let spent = began.elapsed();
+            if spent < LIVE_CYCLE {
+                std::thread::sleep(LIVE_CYCLE - spent);
+            }
+        }
+        eprintln!(
+            "the echo gate, at {} Hz (microphone) and {} Hz (system): compared in {compared} of {heard} microphone turns, silenced speech in {gated} of them, {silenced} regions in all, starting in {} different seconds of the take",
+            microphone.1.sample_rate,
+            system.1.sample_rate,
+            echoes.len()
+        );
+        // The fixture is a call over loudspeakers: a gate that silences
+        // nothing of it is not comparing the two tracks.
+        assert!(
+            compared > 0,
+            "the microphone was never compared with the system track"
+        );
+        assert!(
+            silenced > 0 && !echoes.is_empty(),
+            "the echo gate silenced nothing of a call over loudspeakers"
+        );
+        // Stop: the finished tracks, as the capture leaves them.
+        for track in both {
+            fs::copy(fixtures.join(track.file()), take.join(track.file())).unwrap();
+        }
+        let stopped = Instant::now();
+        let transcript =
+            crate::transcribe::transcribe_media(root.path(), &take, length_ms, true).unwrap();
+        let stop = stopped.elapsed();
+        let rows = |track: Track| {
+            transcript
+                .segments
+                .iter()
+                .filter(|row| row.track == Some(track))
+                .count()
+        };
+        eprintln!(
+            "replay of {} s on two tracks: {} system and {} microphone rows ({:?}); the slowest cycle took {slowest:?}; Stop {stop:?}",
+            length_ms / 1000,
+            rows(Track::System),
+            rows(Track::Microphone),
+            transcript.track_languages,
+        );
+        for row in &transcript.segments {
+            eprintln!(
+                "{:>7} {:<10} {}",
+                row.start_ms,
+                row.track.map_or("", Track::name),
+                row.text
+            );
+        }
+        assert!(
+            transcript.segments.iter().all(|row| row.track.is_some()),
+            "every row of a two-track take names its track"
+        );
+        assert!(rows(Track::System) > 0, "the call is in the transcript");
         assert!(stop.as_secs_f64() < 5.0, "Stop took {stop:?}");
     }
 

@@ -1056,6 +1056,7 @@ mod tests {
         let transcript = Transcript { segments: vec![Segment {
             id:"s".into(), start_ms:0,end_ms:1000,
             text:"  Fix\tthis button \n before opening the very complicated library settings menu please  ".into(),words:vec![],
+            track: None,
         }], ..Default::default() };
         Store::apply_auto_title(&mut session, &transcript);
         assert_eq!(

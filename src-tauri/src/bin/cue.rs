@@ -37,9 +37,7 @@ fn execute(store: &Store, command: Command) -> Result<(), String> {
             let t = store.transcript(&id)?;
             match format {
                 TranscriptFormat::Text => {
-                    for s in t.segments {
-                        println!("{}", s.text);
-                    }
+                    print!("{}", cli::format_text(&t));
                     Ok(())
                 }
                 TranscriptFormat::Segments => {

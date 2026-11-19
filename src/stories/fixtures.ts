@@ -1,4 +1,4 @@
-import type { Project, Session, SpeechLanguage, Transcript } from '../backend';
+import type { AudioTrack, Project, Segment, Session, SpeechLanguage, Transcript } from '../backend';
 
 export const date = '2026-10-28T09:00:00.000Z';
 export const sections: Project[] = [
@@ -126,4 +126,73 @@ export const germanChosenTranscript: Transcript = { status: 'complete', language
 export const germanRecordingTranscript: Transcript = {
   takes: [{ index: 1, startMs: 0, language: 'de', languageDetected: true }],
   segments: [...germanTakeOne, ...takeTwoLiveTranscript.segments],
+};
+
+// A review over a call, recorded with the microphone and the computer's audio and transcribed from
+// both (the both-audio-tracks look's sample): the call's rows are `system`, the reviewer's `microphone`.
+/** A row whose words are spread evenly over it, so the spoken word moves with playback. */
+function timed(id: string, startMs: number, endMs: number, text: string, track?: AudioTrack): Segment {
+  const list = text.split(' ');
+  const step = (endMs - startMs) / list.length;
+  const words = list.map((word, at) => ({ text: word, startMs: Math.round(startMs + at * step), endMs: Math.round(startMs + (at + 1) * step) }));
+  return track ? { id, startMs, endMs, text, words, track } : { id, startMs, endMs, text, words };
+}
+const CALL: [number, AudioTrack, string, string?][] = [
+  [0, 'system', "Okay, I'm sharing the new library screen now.", 'Ich teile jetzt den neuen Bibliotheksbildschirm.'],
+  [4, 'system', 'The left column lists the albums, and the grid shows the photos in the selected one.', 'Links stehen die Alben, daneben das Raster mit den Fotos des gewählten Albums.'],
+  [11, 'system', 'Selecting a photo opens the details panel on the right.', 'Wenn man ein Foto auswählt, öffnet sich rechts das Detailfenster.'],
+  [16, 'microphone', 'The details panel covers the last column of the grid.'],
+  [21, 'microphone', "I'd expect the grid to shrink instead of being covered."],
+  [27, 'system', 'Good point. It used to shrink before we added the filters.', 'Guter Punkt. Früher wurde das Raster schmaler, das war vor den Filtern.'],
+  [33, 'system', 'Let me open the filters so you can see the problem.', 'Ich öffne mal die Filter, dann sieht man das Problem.'],
+  [38, 'microphone', 'Now the panel and the filters both cover the grid.'],
+  [43, 'system', 'Right, only one of them should be open at a time.', 'Stimmt, es sollte immer nur eins von beiden offen sein.'],
+  [49, 'system', 'The export button is at the top right, next to search.', 'Der Export-Knopf ist oben rechts, neben der Suche.'],
+  [54, 'microphone', 'Export should say how many photos it will include.'],
+  [59, 'system', 'That number is in the dialog, but not on the button.', 'Die Zahl steht im Dialog, aber nicht auf dem Knopf.'],
+  [64, 'microphone', 'Then put it on the button too.'],
+];
+const callRows = (german = false, shiftMs = 0, prefix = 'call') => CALL.map(([at, track, english, deutsch], index) =>
+  timed(`${prefix}-${index}`, at * 1000 + shiftMs, at * 1000 + shiftMs + 4500, german && deutsch ? deutsch : english, track));
+const ENGLISH = { language: 'en', languageDetected: true };
+const GERMAN_DETECTED = { language: 'de', languageDetected: true };
+/** A take transcribed from two tracks, both heard as English. */
+export const twoTrackTranscript: Transcript = { status: 'complete', ...ENGLISH, trackLanguages: { system: ENGLISH, microphone: ENGLISH }, segments: callRows() };
+/** On the word "grid" in the reviewer's second row. */
+export const twoTrackSpokenMs = 22700;
+/** The same call in German with the reviewer's remarks in English: Auto detected each track on its own. */
+export const twoLanguageTranscript: Transcript = { ...twoTrackTranscript, trackLanguages: { system: GERMAN_DETECTED, microphone: ENGLISH }, segments: callRows(true) };
+const RUN = [
+  'The grid should keep its column count when the panel opens.', 'Right now it drops from five columns to three.', 'That moves every photo, so I lose my place.',
+  'I would rather the panel overlay only the last column.', 'Or the panel could be narrower, about a third of the width.', 'The close button on the panel is very small.',
+  'It is also too close to the scrollbar.', 'Escape should close the panel as well.', 'And the arrow keys should still move through the grid.', 'Those are the main points for this screen.',
+];
+/** Ten rows in a row from the microphone between the call's rows. */
+export const runOfTenTranscript: Transcript = {
+  ...twoTrackTranscript,
+  segments: [...callRows().slice(0, 3), ...RUN.map((text, index) => timed(`run-${index}`, 16000 + index * 5000, 20500 + index * 5000, text, 'microphone')),
+    timed('run-after', 66000, 70500, 'Good point. It used to shrink before we added the filters.', 'system')],
+};
+/** On "place." in the third row of the run. */
+export const runOfTenSpokenMs = 30200;
+/** Take 1 recorded with the microphone alone, take 2 with the computer's audio too. */
+export const oneThenTwoTracksTranscript: Transcript = {
+  status: 'complete',
+  takes: [{ index: 1, startMs: 0, ...ENGLISH }, { index: 2, startMs: 24000, ...ENGLISH, trackLanguages: { system: ENGLISH, microphone: ENGLISH } }],
+  segments: [
+    timed('one-0', 0, 4000, 'The library feels clear and easy to navigate.'), timed('one-1', 5000, 11000, 'When I select this album the grid should update alongside it.'),
+    timed('one-2', 12000, 17000, 'The import action could be closer to the search field.'), timed('one-3', 19000, 23000, 'Everything else is working as expected.'),
+    ...callRows(false, 26000, 'two').slice(0, 9),
+  ],
+};
+/** On "grid" in take 2's second microphone row. */
+export const oneThenTwoTracksSpokenMs = 48700;
+/** A first recording of the call while both tracks produce live words: one segment still being heard per track. */
+export const twoTrackRecordingTranscript: Transcript = {
+  status: 'provisional', ...ENGLISH, trackLanguages: { system: ENGLISH, microphone: ENGLISH },
+  segments: [
+    ...callRows(false, 0, 'stretch').slice(0, 10),
+    { ...timed('live-system-59000', 59000, 62000, 'That number is in the dialog, but not on', 'system'), words: [] },
+    { ...timed('live-microphone-61000', 61000, 63000, 'Then put it on the', 'microphone'), words: [] },
+  ],
 };
