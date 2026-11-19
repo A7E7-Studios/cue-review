@@ -5490,11 +5490,14 @@ Speech segment 0: start = 1.0, end = 2.0
                 model: Some("large".into()),
                 ..Default::default()
             });
+            // Timed twice one after the other, then twice at the same time,
+            // as the two tracks of a take run.
             let timed = deps::load_measured(&root).unwrap().large;
             assert!(timed.is_some(), "an installed larger model is timed");
             let device = deps::speech_device_status();
-            eprintln!("large-v3-turbo on the card: {timed:?}, {device:?}");
-            if !device.large_slow {
+            eprintln!("large-v3-turbo on the card, alone and two at once: {timed:?}, {device:?}");
+            assert_eq!(device.large_in_use, !device.large_slow, "{device:?}");
+            if device.large_in_use {
                 let (with_large, log, took) = take("large-v3-turbo on the card");
                 assert!(log.contains(deps::LARGE.file), "{log}");
                 assert!(

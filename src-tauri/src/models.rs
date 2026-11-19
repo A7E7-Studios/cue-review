@@ -426,6 +426,10 @@ pub struct SpeechDevice {
     /// The larger model is installed and was timed on the card slower than
     /// the processor with the small model: the small models transcribe.
     pub large_slow: bool,
+    /// The larger model transcribes final runs now: chosen, installed,
+    /// timed on the card no slower than the processor with the small model,
+    /// and the runs go to the card.
+    pub large_in_use: bool,
     /// The speech runtime here has its graphics-card build, so the devices
     /// are measured and can be tested again; false on macOS, Linux and a
     /// runtime without the Vulkan build.
@@ -467,6 +471,7 @@ impl SpeechDevice {
             card: None,
             large_offered: false,
             large_slow: false,
+            large_in_use: false,
             measurable: false,
         }
     }
@@ -553,6 +558,7 @@ mod tests {
                 card: Some(card(false)),
                 large_offered: true,
                 large_slow: false,
+                large_in_use: true,
                 measurable: true,
             },
         };
@@ -566,14 +572,17 @@ mod tests {
                 "card": {"name": "NVIDIA GeForce RTX 5090", "stopped": false},
                 "largeOffered": true,
                 "largeSlow": false,
+                "largeInUse": true,
                 "measurable": true
             })
         );
-        // The card stopped: the processor transcribes, and the card says so.
+        // The card stopped: the processor transcribes with the small models,
+        // and the card says so.
         status.speech_device = SpeechDevice {
             kind: DeviceKind::Processor,
             name: None,
             card: Some(card(true)),
+            large_in_use: false,
             ..status.speech_device
         };
         assert_eq!(
@@ -584,6 +593,7 @@ mod tests {
                 "card": {"name": "NVIDIA GeForce RTX 5090", "stopped": true},
                 "largeOffered": true,
                 "largeSlow": false,
+                "largeInUse": false,
                 "measurable": true
             })
         );
@@ -595,12 +605,12 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&measuring).unwrap(),
-            json!({"state":"measuring","kind":"processor","largeOffered":false,"largeSlow":false,"measurable":true})
+            json!({"state":"measuring","kind":"processor","largeOffered":false,"largeSlow":false,"largeInUse":false,"measurable":true})
         );
         // Without the graphics-card build there is nothing to measure.
         assert_eq!(
             serde_json::to_value(SpeechDevice::processor()).unwrap(),
-            json!({"state":"ready","kind":"processor","largeOffered":false,"largeSlow":false,"measurable":false})
+            json!({"state":"ready","kind":"processor","largeOffered":false,"largeSlow":false,"largeInUse":false,"measurable":false})
         );
         // What `cue setup` prints reads back as the same device.
         let printed = serde_json::to_string_pretty(&status).unwrap();

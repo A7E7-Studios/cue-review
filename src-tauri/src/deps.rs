@@ -995,11 +995,14 @@ impl Measured {
         self.cards.iter().find(|card| card.index == chosen)
     }
     /// Whether the larger model is offered: the chosen card ran the sample
-    /// in two thirds of the processor's time or less ([`offers_large`]).
+    /// with the small model in two thirds of the processor's time or less
+    /// ([`offers_large`]). A measurement made with base judges nothing.
     fn large_offered(&self) -> bool {
-        self.chosen_card()
-            .and_then(|card| card.ms)
-            .is_some_and(|ms| offers_large(self.processor_ms, ms))
+        self.model == SMALL.name
+            && self
+                .chosen_card()
+                .and_then(|card| card.ms)
+                .is_some_and(|ms| offers_large(self.processor_ms, ms))
     }
     /// Whether the larger model, timed on the card, was slower than the
     /// processor with the small model, or failed there.
@@ -1024,9 +1027,14 @@ fn offers_large(processor_ms: u64, card_ms: u64) -> bool {
     card_ms * 3 <= processor_ms * 2
 }
 /// Whether the devices are to be measured: nothing was saved, or it was
-/// saved on another computer than `now`.
-fn needs_measuring(saved: Option<&Measured>, now: &Computer) -> bool {
-    saved.is_none_or(|saved| saved.computer != *now)
+/// saved on another computer than `now`, or with another model than `model`,
+/// the one the sample is timed with now ([`sample_model`]), so a measurement
+/// made with base before the small models were there is made again with
+/// small.
+fn needs_measuring(saved: Option<&Measured>, now: &Computer, model: Option<&SpeechModel>) -> bool {
+    saved.is_none_or(|saved| {
+        saved.computer != *now || model.is_some_and(|model| saved.model != model.name)
+    })
 }
 /// Whether the larger model waits to be timed on the chosen card: it is
 /// installed and offered, and the card has not stopped.
@@ -1052,8 +1060,8 @@ pub(crate) struct Run {
 /// A measurement stopped before its end, because a recording started.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Cut;
-/// Runs the sample once on a device with a model.
-type Sampler<'a> = &'a dyn Fn(On, &'static SpeechModel) -> Result<Run, Cut>;
+/// Runs the sample once on a device with a model; two runs can go at once.
+type Sampler<'a> = &'a (dyn Fn(On, &'static SpeechModel) -> Result<Run, Cut> + Sync);
 
 /// A device's counted time from its two runs: the second one's, when both
 /// ended well and, on a card, each log shows that card in use. The first
@@ -1112,12 +1120,40 @@ fn measure_with(
     }))
 }
 /// Times the larger model on `card`, once after its download: twice, the
-/// second run counted as in the measurement ([`counted`]), so a first run
-/// that builds the card's pipelines does not count.
+/// second run counted as in the measurement, then twice at the same time, as
+/// the two tracks of a take run ([`large_time`]).
 fn time_large(card: u32, sample: Sampler<'_>) -> Result<LargeTime, Cut> {
     let first = sample(On::Card(card), &LARGE)?;
     let second = sample(On::Card(card), &LARGE)?;
-    Ok(counted([&first, &second], Some(card)).map_or(LargeTime::Failed, LargeTime::Ms))
+    if counted([&first, &second], Some(card)).is_none() {
+        return Ok(LargeTime::Failed);
+    }
+    let (one, other) = std::thread::scope(|scope| {
+        let other = scope.spawn(|| sample(On::Card(card), &LARGE));
+        let one = sample(On::Card(card), &LARGE);
+        let other = other
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (one, other)
+    });
+    let (one, other) = (one?, other?);
+    let time = large_time([&first, &second], [&one, &other], card);
+    eprintln!(
+        "large-v3-turbo on card {card}: {} ms, two at once {} and {} ms: {time:?}",
+        second.ms, one.ms, other.ms
+    );
+    Ok(time)
+}
+/// The larger model's time on `card`: the second of its two runs one after
+/// the other (`timed`), when both ended well on the card, and so did both of
+/// the two it ran at the same time (`together`). Otherwise it failed: a card
+/// with too little memory for two would fail every take with two tracks.
+/// The card itself goes on with the small models.
+fn large_time(timed: [&Run; 2], together: [&Run; 2], card: u32) -> LargeTime {
+    match (counted(timed, Some(card)), counted(together, Some(card))) {
+        (Some(ms), Some(_)) => LargeTime::Ms(ms),
+        _ => LargeTime::Failed,
+    }
 }
 /// Measures the devices into `root`'s saved measurement when they are due
 /// (`asked`, or [`needs_measuring`]), then times the larger model when it
@@ -1130,8 +1166,9 @@ fn measure_into(
     sample: Sampler<'_>,
 ) -> Result<(), Cut> {
     let mut saved = load_measured(root);
-    if asked || needs_measuring(saved.as_ref(), &computer) {
-        let Some(model) = sample_model(models) else {
+    let model = sample_model(models);
+    if asked || needs_measuring(saved.as_ref(), &computer, model) {
+        let Some(model) = model else {
             return Ok(());
         };
         saved = measure_with(computer, model, sample)?;
@@ -1212,11 +1249,16 @@ impl Facts {
     pub fn large(&self) -> bool {
         self.card().is_some() && self.large_fits()
     }
-    /// Where transcription runs, for Settings and `cue setup`. While
-    /// measuring, the card and the offer are the last measurement's.
+    /// Where transcription runs, for Settings and `cue setup`. The card and
+    /// the larger model's offer come from a measurement of this computer as
+    /// it is, or while measuring from the last one; a saved measurement of
+    /// the computer as it was reports none.
     pub fn device(&self) -> SpeechDevice {
         let card = self.card();
-        let measured = self.saved.as_ref().filter(|_| self.card_build);
+        let measured = self
+            .saved
+            .as_ref()
+            .filter(|_| self.card_build && (self.current || self.measuring));
         let chosen = measured.and_then(Measured::chosen_card);
         SpeechDevice {
             state: if self.measuring {
@@ -1236,6 +1278,7 @@ impl Facts {
             }),
             large_offered: measured.is_some_and(Measured::large_offered),
             large_slow: self.large_installed && measured.is_some_and(Measured::large_slow),
+            large_in_use: self.large(),
             measurable: self.card_build,
         }
     }
@@ -1286,7 +1329,7 @@ pub(crate) fn stop_card_in(root: &Path, why: &str) {
 
 /// The measurement in the background.
 #[derive(Default)]
-struct Measuring {
+pub(crate) struct Measuring {
     /// One is queued or runs.
     running: bool,
     /// Stops the one that runs.
@@ -1305,7 +1348,7 @@ fn locked_measuring(state: &Mutex<Measuring>) -> std::sync::MutexGuard<'_, Measu
 /// to run: the person asked for one now (`asked`) or before it could run to
 /// its end, or `due` says so. `None` while one is queued or runs, or when
 /// none is to run.
-fn claim_measuring_in(
+pub(crate) fn claim_measuring_in(
     state: &Mutex<Measuring>,
     asked: bool,
     due: impl FnOnce() -> bool,
@@ -1326,7 +1369,7 @@ fn claim_measuring_in(
 /// Releases the measurement. One that ran to its `finished` end settles a
 /// request; one cut short runs again at the next idle moment, when it is
 /// still due or was asked for.
-fn finish_measuring_in(state: &Mutex<Measuring>, finished: bool) {
+pub(crate) fn finish_measuring_in(state: &Mutex<Measuring>, finished: bool) {
     let mut measuring = locked_measuring(state);
     measuring.running = false;
     measuring.cancel = None;
@@ -1335,15 +1378,15 @@ fn finish_measuring_in(state: &Mutex<Measuring>, finished: bool) {
     }
 }
 /// Stops the measurement that is queued or runs.
-fn cancel_measuring_in(state: &Mutex<Measuring>) {
+pub(crate) fn cancel_measuring_in(state: &Mutex<Measuring>) {
     if let Some(cancel) = &locked_measuring(state).cancel {
         cancel.store(true, Ordering::Release);
     }
 }
 /// Takes the measurement for the app's worker ([`claim_measuring_in`]): due
 /// when the Vulkan build, the sample and a model to time it with are there,
-/// and the saved measurement is missing or from another computer, or the
-/// larger model waits to be timed.
+/// and the saved measurement is missing, from another computer or made with
+/// another model ([`needs_measuring`]), or the larger model waits to be timed.
 pub fn claim_measuring(asked: bool) -> Option<Arc<AtomicBool>> {
     if card_build().is_none() || sample_file().is_none() {
         return None;
@@ -1352,7 +1395,7 @@ pub fn claim_measuring(asked: bool) -> Option<Arc<AtomicBool>> {
     sample_model(&models)?;
     claim_measuring_in(measuring_state(), asked, || {
         let saved = load_measured(&data_root());
-        needs_measuring(saved.as_ref(), &this_computer())
+        needs_measuring(saved.as_ref(), &this_computer(), sample_model(&models))
             || saved.is_some_and(|saved| large_due(&saved, LARGE.installed_in(&models)))
     })
 }
@@ -1383,7 +1426,9 @@ pub fn measure_devices(cancel: &AtomicBool) {
 pub fn give_up_measuring() {
     finish_measuring_in(measuring_state(), false);
 }
-/// Stops a measurement that is queued or runs, because a recording starts.
+/// Stops a measurement that is queued or runs, because a recording starts or
+/// a transcription wants the inference lock: it runs again at the next idle
+/// moment.
 pub fn cancel_measuring() {
     cancel_measuring_in(measuring_state());
 }
@@ -1519,20 +1564,31 @@ fn this_computer() -> Computer {
         runtime: [tool("whisper-cli").ok(), card_build()]
             .into_iter()
             .flatten()
-            .map(|build| written(&build))
+            .map(|build| build_key(&build))
             .collect(),
         adapters: display_adapters(),
     }
 }
-/// A file's path, size and the time it was written, in seconds.
-fn written(path: &Path) -> String {
+/// What names a build of `whisper-cli` in a measurement: its folder and
+/// file name, its size and the time it was written, in seconds. Not its full
+/// path: the app finds the bundled runtime through its resource folder,
+/// which Windows gives it as a verbatim path (`\\?\C:\…`), and `cue` beside
+/// its own executable (`C:\…`), and both are to agree on the same file.
+fn build_key(path: &Path) -> String {
     let meta = path.metadata().ok();
     let size = meta.as_ref().map_or(0, |meta| meta.len());
     let at = meta
         .and_then(|meta| meta.modified().ok())
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |since| since.as_secs());
-    format!("{} {size} {at}", path.display())
+    build_key_of(path, size, at)
+}
+fn build_key_of(path: &Path, size: u64, at: u64) -> String {
+    let name = |name: Option<&std::ffi::OsStr>| {
+        name.map_or_else(String::new, |name| name.to_string_lossy().to_lowercase())
+    };
+    let folder = name(path.parent().and_then(Path::file_name));
+    format!("{folder}/{} {size} {at}", name(path.file_name()))
 }
 /// The display adapters and their driver versions, from the registry's
 /// display class (`HKLM\SYSTEM\CurrentControlSet\Control\Class\
@@ -2294,7 +2350,10 @@ whisper_print_timings:    total time =  2541.21 ms
         starts: bool,
         /// The run at which a recording cuts the measurement short.
         cut_at: Option<usize>,
-        runs: std::cell::RefCell<Vec<(On, &'static str)>>,
+        /// The card has memory for the larger model once, not twice: of two
+        /// runs of it at the same time, one fails.
+        large_once: bool,
+        runs: Mutex<Vec<(On, &'static str)>>,
     }
     impl Bench {
         fn new(processor_ms: u64, cards: &[(&'static str, u64, bool)]) -> Self {
@@ -2304,6 +2363,7 @@ whisper_print_timings:    total time =  2541.21 ms
                 large_ms: 2_000,
                 starts: true,
                 cut_at: None,
+                large_once: false,
                 runs: Default::default(),
             }
         }
@@ -2318,18 +2378,26 @@ whisper_print_timings:    total time =  2541.21 ms
             }
         }
         fn sample(&self, on: On, model: &'static SpeechModel) -> Result<Run, Cut> {
-            let mut runs = self.runs.borrow_mut();
+            let mut runs = self.runs.lock().unwrap();
             if Some(runs.len()) == self.cut_at {
                 return Err(Cut);
             }
             let warm = !runs.iter().any(|(done, _)| *done == on);
+            let large_runs = runs.iter().filter(|(_, name)| *name == LARGE.name).count();
             runs.push((on, model.name));
+            drop(runs);
             let card = match on {
                 On::Processor => return Ok(run(true, self.processor_ms, PROCESSOR_BUILD)),
                 On::Card(_) if !self.starts => return Ok(run(false, 30, "")),
                 On::Card(card) => card,
             };
             Ok(match self.cards.get(card as usize) {
+                // The second of two at the same time runs out of memory.
+                Some(_) if model == &LARGE && self.large_once && large_runs == 3 => run(
+                    false,
+                    900,
+                    "ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory",
+                ),
                 Some(&(_, ms, used)) => {
                     let ms = if model == &LARGE { self.large_ms } else { ms };
                     let warm_up = if warm { 16_000 } else { 0 };
@@ -2339,7 +2407,7 @@ whisper_print_timings:    total time =  2541.21 ms
             })
         }
         fn runs(&self) -> Vec<(On, &'static str)> {
-            self.runs.take()
+            std::mem::take(&mut *self.runs.lock().unwrap())
         }
         fn measure(&self) -> Option<Measured> {
             measure_with(computer(), &SMALL, &|on, model| self.sample(on, model)).unwrap()
@@ -2349,9 +2417,8 @@ whisper_print_timings:    total time =  2541.21 ms
         Computer {
             app: "0.3.0".into(),
             runtime: vec![
-                r"C:\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe 2610688 1763500000".into(),
-                r"C:\CueReview\tools\whisper-b5454\vulkan\whisper-cli.exe 47901184 1763500000"
-                    .into(),
+                "avx2/whisper-cli.exe 2610688 1763500000".into(),
+                "vulkan/whisper-cli.exe 47901184 1763500000".into(),
             ],
             adapters: vec![
                 Adapter {
@@ -2473,6 +2540,7 @@ whisper_print_timings:    total time =  2541.21 ms
                 }),
                 large_offered: true,
                 large_slow: false,
+                large_in_use: false,
                 measurable: true,
             }
         );
@@ -2530,7 +2598,7 @@ whisper_print_timings:    total time =  2541.21 ms
         let sample = |on, model| bench.sample(on, model);
         // The first start: nothing is saved, so the devices are measured and
         // the result saved beside the settings.
-        assert!(needs_measuring(None, &computer()));
+        assert!(needs_measuring(None, &computer(), Some(&SMALL)));
         measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
         assert_eq!(bench.runs().len(), 6);
         let saved = load_measured(root.path()).unwrap();
@@ -2538,7 +2606,7 @@ whisper_print_timings:    total time =  2541.21 ms
         let file = fs::read_to_string(root.path().join("speech-device.json")).unwrap();
         assert!(file.contains("\"processorMs\": 2700"), "{file}");
         // Later starts use it without measuring.
-        assert!(!needs_measuring(Some(&saved), &computer()));
+        assert!(!needs_measuring(Some(&saved), &computer(), Some(&SMALL)));
         measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
         assert!(bench.runs().is_empty());
         // A new version of the app, another runtime, an updated driver, a
@@ -2563,7 +2631,10 @@ whisper_print_timings:    total time =  2541.21 ms
                 })
             }),
         ] {
-            assert!(needs_measuring(Some(&saved), &other), "{other:?}");
+            assert!(
+                needs_measuring(Some(&saved), &other, Some(&SMALL)),
+                "{other:?}"
+            );
         }
         measure_into(
             root.path(),
@@ -2589,7 +2660,25 @@ whisper_print_timings:    total time =  2541.21 ms
         let runs = bench.runs();
         assert_eq!(runs.len(), 6);
         assert!(runs.iter().all(|(_, model)| *model == "base"));
-        assert_eq!(load_measured(empty.path()).unwrap().model, "base");
+        let with_base = load_measured(empty.path()).unwrap();
+        assert_eq!(with_base.model, "base");
+        // Against the processor running base the larger model is neither
+        // offered nor timed.
+        assert!(!with_base.large_offered() && !large_due(&with_base, true));
+        assert!(!needs_measuring(Some(&with_base), &computer(), Some(&BASE)));
+        // Once the small models are there, as after a fresh install, the
+        // devices are measured again with small, and then not again.
+        assert!(needs_measuring(Some(&with_base), &computer(), Some(&SMALL)));
+        let both = models(&[&BASE, &SMALL]);
+        measure_into(empty.path(), computer(), false, both.path(), &sample).unwrap();
+        let runs = bench.runs();
+        assert_eq!(runs.len(), 6);
+        assert!(runs.iter().all(|(_, model)| *model == "small"));
+        let with_small = load_measured(empty.path()).unwrap();
+        assert_eq!(with_small.model, "small");
+        assert!(with_small.large_offered());
+        measure_into(empty.path(), computer(), false, both.path(), &sample).unwrap();
+        assert!(bench.runs().is_empty());
 
         // In the background, one at a time.
         let state = Mutex::new(Measuring::default());
@@ -2798,6 +2887,7 @@ whisper_print_timings:    total time =  2541.21 ms
                 }),
                 large_offered: true,
                 large_slow: false,
+                large_in_use: false,
                 measurable: true,
             }
         );
@@ -2820,6 +2910,7 @@ whisper_print_timings:    total time =  2541.21 ms
         };
         assert_eq!(on.card(), Some(0));
         assert_eq!(takes.run_on(on.card(), "de").model, large());
+        assert!(on.device().large_in_use);
     }
 
     #[test]
@@ -2842,7 +2933,8 @@ whisper_print_timings:    total time =  2541.21 ms
         // Nothing changed on the computer, so nothing measures by itself.
         assert!(!needs_measuring(
             load_measured(root.path()).as_ref(),
-            &computer()
+            &computer(),
+            Some(&SMALL)
         ));
         let state = Mutex::new(Measuring::default());
         assert!(claim_measuring_in(&state, false, || false).is_none());
@@ -2917,6 +3009,7 @@ whisper_print_timings:    total time =  2541.21 ms
             ..ready(timed.clone())
         };
         assert!(!waiting.large_fits() && !waiting.large());
+        assert!(!waiting.device().large_in_use);
         // Installed, then timed once on the card: its time is due.
         let untimed = fast();
         assert!(large_due(&untimed, true));
@@ -2941,10 +3034,8 @@ whisper_print_timings:    total time =  2541.21 ms
         .unwrap();
         assert_eq!(
             bench.runs(),
-            [
-                (On::Card(0), "large-v3-turbo"),
-                (On::Card(0), "large-v3-turbo")
-            ]
+            [(On::Card(0), "large-v3-turbo"); 4],
+            "two one after the other, then two at the same time"
         );
         let saved = load_measured(root.path()).unwrap();
         assert_eq!(
@@ -2953,6 +3044,13 @@ whisper_print_timings:    total time =  2541.21 ms
             "the second run counts"
         );
         assert!(!large_due(&saved, true), "timed once");
+        // Before that timing, Settings do not say it transcribes.
+        let untimed_facts = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(fast())
+        };
+        assert!(!untimed_facts.large() && !untimed_facts.device().large_in_use);
 
         // Installed and timed no slower than the processor with the small
         // model: Large transcribes every take on the card, in every language,
@@ -2964,6 +3062,7 @@ whisper_print_timings:    total time =  2541.21 ms
         };
         assert!(fits.large());
         assert!(!fits.device().large_slow);
+        assert!(fits.device().large_in_use);
         let takes = TakeModels {
             english: ModelChoice {
                 path: PathBuf::from("models").join(SMALL_EN.file),
@@ -3041,6 +3140,7 @@ whisper_print_timings:    total time =  2541.21 ms
             ),
         ] {
             assert!(!facts.large(), "{why}");
+            assert!(!facts.device().large_in_use, "{why}");
             assert_eq!(
                 FinalRun::on(facts.card(), facts.large().then(large), small()),
                 FinalRun::processor(small()),
@@ -3156,6 +3256,154 @@ whisper_print_timings:    total time =  2541.21 ms
         assert_eq!(*order.borrow(), ["large-v3-turbo"]);
         assert!(!LARGE.installed_in(dir.path()) && SMALL.installed_in(dir.path()));
         assert!(locked(&state).error.is_none());
+    }
+
+    #[test]
+    fn the_larger_model_must_fit_twice_on_the_card() {
+        let card_0 = format!("{VULKAN_DEVICES}{ON_CARD_0}");
+        let fell_back = format!("{VULKAN_DEVICES}{NO_SUCH_CARD}");
+        let fine = |ms| run(true, ms, &card_0);
+        let (one, two) = (fine(18_000), fine(2_000));
+        // Two runs at the same time on the card, as both tracks of a take:
+        // when both end well there, the second run of the two before counts.
+        assert_eq!(
+            large_time([&one, &two], [&fine(2_600), &fine(2_700)], 0),
+            LargeTime::Ms(2_000)
+        );
+        // One of them failing, or ending on the processor, is a larger model
+        // that does not fit.
+        let out_of_memory = run(false, 900, "ErrorOutOfDeviceMemory");
+        for other in [&out_of_memory, &run(true, 9_000, &fell_back)] {
+            assert_eq!(
+                large_time([&one, &two], [&fine(2_600), other], 0),
+                LargeTime::Failed
+            );
+        }
+        assert_eq!(
+            large_time([&one, &run(false, 1, "")], [&fine(1), &fine(1)], 0),
+            LargeTime::Failed
+        );
+
+        // A card with memory for one run of it: timed, then failed with two.
+        let root = tempfile::tempdir().unwrap();
+        save_measured(root.path(), &fast());
+        let bench = Bench {
+            large_once: true,
+            ..Bench::new(2_700, &[(RTX, 1_300, true)])
+        };
+        let with_large = models(&[&BASE, &SMALL, &LARGE]);
+        measure_into(
+            root.path(),
+            computer(),
+            false,
+            with_large.path(),
+            &|on, model| bench.sample(on, model),
+        )
+        .unwrap();
+        assert_eq!(bench.runs(), [(On::Card(0), "large-v3-turbo"); 4]);
+        let saved = load_measured(root.path()).unwrap();
+        assert_eq!(saved.large, Some(LargeTime::Failed));
+        // As for a slow larger model: Settings say so and the small models
+        // go on transcribing on the card, which is not stopped.
+        assert!(!saved.stopped && !large_due(&saved, true));
+        let facts = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(saved)
+        };
+        assert_eq!(facts.card(), Some(0));
+        assert!(!facts.large());
+        let device = facts.device();
+        assert_eq!(device.kind, DeviceKind::GraphicsCard);
+        assert!(device.large_slow && !device.large_in_use);
+    }
+
+    #[test]
+    fn a_measurement_of_the_computer_as_it_was_reports_no_card() {
+        // After an update, before the app has measured again: `cue setup`
+        // names the processor and no card, and offers nothing.
+        let stale = Facts {
+            current: false,
+            large_chosen: true,
+            large_installed: true,
+            ..ready(Measured {
+                large: Some(LargeTime::Failed),
+                ..fast()
+            })
+        };
+        assert_eq!(stale.card(), None);
+        assert_eq!(stale.device(), processor_here());
+        // While the app measures again, the last result is shown.
+        let measuring = Facts {
+            measuring: true,
+            ..stale
+        };
+        let device = measuring.device();
+        assert_eq!(device.state, DeviceState::Measuring);
+        assert_eq!(device.kind, DeviceKind::Processor);
+        assert!(device.card.is_some() && device.large_offered && device.large_slow);
+    }
+
+    #[test]
+    fn a_build_is_known_by_its_folder_name_size_and_time_whatever_its_path() {
+        let key = |path: &str, size, at| build_key_of(Path::new(path), size, at);
+        // The app's verbatim resource path and `cue`'s plain one, for the
+        // same file, name the same build.
+        if cfg!(windows) {
+            for (path, other) in [
+                (
+                    r"\?\C:\Program Files\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe",
+                    r"C:\Program Files\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe",
+                ),
+                (
+                    r"C:\Users\a\AppData\Local\CueReview\tools/whisper-b5454\vulkan\whisper-cli.exe",
+                    r"C:\Program Files\CueReview\tools\whisper-b5454\Vulkan\WHISPER-CLI.EXE",
+                ),
+            ] {
+                assert_eq!(
+                    key(path, 47_901_696, 1_795_112_311),
+                    key(other, 47_901_696, 1_795_112_311),
+                    "{path}"
+                );
+            }
+        }
+        assert_eq!(
+            key(
+                "/opt/cuereview/tools/whisper-b5454/whisper-cli",
+                2_383_360,
+                1_795_112_311
+            ),
+            key(
+                "/usr/lib/cuereview/tools/whisper-b5454/whisper-cli",
+                2_383_360,
+                1_795_112_311
+            )
+        );
+        assert_eq!(
+            key(
+                "/x/tools/whisper-b5454/whisper-cli.exe",
+                2_383_360,
+                1_795_112_311
+            ),
+            "whisper-b5454/whisper-cli.exe 2383360 1795112311"
+        );
+        // Another build, size or time is another runtime.
+        let avx2 = key("/x/avx2/whisper-cli.exe", 1, 2);
+        assert_ne!(avx2, key("/x/vulkan/whisper-cli.exe", 1, 2));
+        assert_ne!(avx2, key("/x/avx2/whisper-cli.exe", 3, 2));
+        assert_ne!(avx2, key("/x/avx2/whisper-cli.exe", 1, 4));
+        // Read from a real file through both kinds of path.
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("avx2");
+        fs::create_dir(&folder).unwrap();
+        let plain = folder.join("whisper-cli.exe");
+        fs::write(&plain, b"build").unwrap();
+        let read = build_key(&plain);
+        assert!(read.starts_with("avx2/whisper-cli.exe 5 "), "{read}");
+        if cfg!(windows) {
+            let verbatim = PathBuf::from(format!(r"\\?\{}", plain.display()));
+            assert_eq!(build_key(&verbatim), read);
+        }
     }
 
     #[test]

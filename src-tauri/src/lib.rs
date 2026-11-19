@@ -312,7 +312,7 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             };
             let result = copied.and_then(|(length, echo)| {
                 {
-                    let _inference = s.inference.lock().map_err(|e| e.to_string())?;
+                    let _inference = lock_inference(&s)?;
                     if cancel.load(Ordering::Acquire) {
                         return Err("Live transcription cancelled.".into());
                     }
@@ -417,7 +417,7 @@ fn redo_provisional(
     stretches: &mut stretches::Stretches,
     redo: &mut stretches::Redo,
 ) -> stretches::Redone {
-    let Ok(_inference) = s.inference.lock() else {
+    let Ok(_inference) = lock_inference(s) else {
         return stretches::Redone::Later("The speech runtime is unavailable.".into());
     };
     transcribe::redo_provisional(
@@ -486,7 +486,7 @@ fn delete_session_from_store(s: &Shared, id: &str) -> Result<(), String> {
     };
     // A refinement of it holds the inference lock until its Whisper is gone.
     let _inference = if refining {
-        Some(s.inference.lock().map_err(|e| e.to_string())?)
+        Some(lock_inference(s)?)
     } else {
         None
     };
@@ -642,12 +642,30 @@ async fn test_speech_devices(s: CmdState<'_>) -> Result<SpeechDevice, String> {
     })
     .await
 }
+/// Takes the inference lock for Whisper work: a recording's live
+/// transcription, the pass after Stop, Retry, the refinement, a delete that
+/// waits for one. A measurement of the devices that holds the lock or waits
+/// for it is stopped first ([`deps::cancel_measuring`]), so no transcription
+/// waits for one; it runs again at the next idle moment. The measurement
+/// itself takes the lock without this.
+fn lock_inference(s: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    lock_after(&s.inference, deps::cancel_measuring)
+}
+/// Locks `inference` once `stop_measuring` has stopped a measurement.
+fn lock_after(
+    inference: &Mutex<()>,
+    stop_measuring: impl FnOnce(),
+) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    stop_measuring();
+    inference.lock().map_err(|e| e.to_string())
+}
 /// Measures the devices on a thread of its own when that is due or `asked`
 /// ([`deps::claim_measuring`]): under the inference lock, so no
 /// transcription runs meanwhile, and only while nothing records. A recording
-/// that starts cuts it short ([`deps::cancel_measuring`]), and it runs again
-/// at the next idle moment, when the pass that refines a transcript after
-/// Stop has ended.
+/// that starts, or a transcription that wants the lock ([`lock_inference`]),
+/// cuts it short ([`deps::cancel_measuring`]), and it runs again at the next
+/// idle moment, when the pass that refines a transcript after Stop has
+/// ended.
 fn spawn_measure(s: &Shared, asked: bool) {
     // While a recording runs nothing is claimed, so its stretches keep
     // their device.
@@ -809,7 +827,7 @@ fn spawn_refine(s: &Shared, id: &str) {
     let _ = std::thread::Builder::new()
         .name("refine-transcript".into())
         .spawn(move || {
-            let outcome = state.inference.lock().ok().and_then(|_inference| {
+            let outcome = lock_inference(&state).ok().and_then(|_inference| {
                 let recording = state
                     .runtime
                     .lock()
@@ -941,11 +959,7 @@ fn start_recording_with(
 fn finish_transcription(job: ProcessingJob) {
     let s = &job.state;
     let id = &job.id;
-    let result = s
-        .inference
-        .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|_guard| transcribe::transcribe(&s.store, id));
+    let result = lock_inference(s).and_then(|_guard| transcribe::transcribe(&s.store, id));
     // Re-read under the session lock so a concurrent rename is kept.
     let saved = s.store.update_session(id, |session| {
         match &result {
@@ -1003,11 +1017,8 @@ fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
         _ => return Err(format!("Take {index} has no usable video.")),
     }
     takes::set_status(&s.store, id, index, TakeStatus::Transcribing)?;
-    let result = s
-        .inference
-        .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|_guard| transcribe::transcribe_take(&s.store, id, index));
+    let result =
+        lock_inference(s).and_then(|_guard| transcribe::transcribe_take(&s.store, id, index));
     let status = if result.is_ok() {
         TakeStatus::Ready
     } else {
@@ -1547,6 +1558,41 @@ mod orchestration_tests {
         assert!(theirs.load(Ordering::Acquire));
         assert!(!other.load(Ordering::Acquire));
         assert_eq!(state.runtime.lock().unwrap().refining.len(), 1);
+    }
+    #[test]
+    fn a_transcription_stops_a_measurement_which_runs_again_when_idle() {
+        let inference = Arc::new(Mutex::new(()));
+        let measuring = Arc::new(Mutex::new(deps::Measuring::default()));
+        let cancel = deps::claim_measuring_in(&measuring, false, || true).unwrap();
+        // The measurement holds the inference lock and times its sample
+        // until it is stopped, as a run of the sample is killed then.
+        let (held, holding) = std::sync::mpsc::channel();
+        let worker = {
+            let (inference, measuring) = (inference.clone(), measuring.clone());
+            std::thread::spawn(move || {
+                let _lock = inference.lock().unwrap();
+                held.send(()).unwrap();
+                let began = Instant::now();
+                while !cancel.load(Ordering::Acquire) {
+                    assert!(began.elapsed() < Duration::from_secs(30), "never stopped");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                deps::finish_measuring_in(&measuring, false);
+            })
+        };
+        holding.recv().unwrap();
+        // Retry, the pass after Stop or the refinement asks for the lock: the
+        // measurement gives up at once instead of keeping it to its end.
+        let began = Instant::now();
+        let lock = lock_after(&inference, || deps::cancel_measuring_in(&measuring)).unwrap();
+        assert!(began.elapsed() < Duration::from_secs(10));
+        worker.join().unwrap();
+        drop(lock);
+        // At the next idle moment it is still due, and runs again.
+        assert!(deps::claim_measuring_in(&measuring, false, || true).is_some());
+        // Without a measurement the lock is taken as before.
+        let state = Mutex::new(deps::Measuring::default());
+        drop(lock_after(&inference, || deps::cancel_measuring_in(&state)).unwrap());
     }
     #[test]
     fn changing_the_language_starts_its_model_download() {
