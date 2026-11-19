@@ -8,8 +8,8 @@ nearest the code it changes.
 ## 1. The Vulkan build and the bundle
 
 - [x] 1.1 The build script builds the `vulkan` variant with Ninja in a short directory when the SDK is present, copies `jfk.wav`, and fails with `--require-vulkan` without the SDK; test: node scripts/build-speech-runtime.mjs --require-vulkan
-- [x] 1.2 The bundle carries and verifies the variant and the sample on Windows x64; test: node scripts/verify-bundle.mjs
-- [ ] 1.3 The Windows job installs the pinned Vulkan SDK and passes `--require-vulkan`; test: the pull request's `check windows-x64` job
+- [x] 1.2 The bundle carries and verifies the variant and the sample on Windows x64; test: node scripts/verify-bundle.mjs, in that job
+- [x] 1.3 The Windows job installs the pinned Vulkan SDK and passes `--require-vulkan`; test: the pull request's `build without signing credentials / windows-x64` job
 - [x] 1.4 Update README.md (building the runtime, installer size) to state what the code does; test: node tools/gate/gate.mjs --local
 
 ## 2. Measuring and choosing the device (after 1)
