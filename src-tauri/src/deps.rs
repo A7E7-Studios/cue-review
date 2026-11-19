@@ -1399,8 +1399,9 @@ pub(crate) fn cancel_measuring_in(state: &Mutex<Measuring>) {
 }
 /// Takes the measurement for the app's worker ([`claim_measuring_in`]): due
 /// when the Vulkan build, the sample and a model to time it with are there,
-/// and the saved measurement is missing, from another computer or made with
-/// another model ([`needs_measuring`]), or the larger model waits to be timed.
+/// and the saved measurement is missing, from another computer, made on
+/// another sample, or made with base where a small model is now installed
+/// ([`needs_measuring`]), or the larger model waits to be timed.
 pub fn claim_measuring(asked: bool) -> Option<Arc<AtomicBool>> {
     if card_build().is_none() || sample_file().is_none() {
         return None;
@@ -1419,9 +1420,10 @@ pub fn measure_devices(cancel: &AtomicBool) {
     let asked = locked_measuring(measuring_state()).asked;
     let finished = match sample_file() {
         Some(jfk) => {
-            // A scratch file: the runtime folder may be read-only.
-            let sample =
-                std::env::temp_dir().join(format!("cuereview-sample-{}.wav", uuid::Uuid::new_v4()));
+            // One scratch file in the data root, as the runtime folder may be
+            // read-only: each measurement writes it anew, so one cut short by
+            // a quit or a crash leaves no more than this file behind.
+            let sample = data_root().join(SAMPLE_FILE);
             let finished = match twice(&jfk, &sample) {
                 Ok(()) => {
                     let models = models_dir();
@@ -1480,6 +1482,8 @@ fn wake_measuring() {
 /// played twice back to back, 22 s, as long as a stretch, so loading the
 /// model, 1.6 GB for the larger one, does not decide the time.
 pub(crate) const SAMPLE: &str = "jfk.wav twice";
+/// The doubled sample a measurement writes and removes, in the data root.
+const SAMPLE_FILE: &str = "speech-sample.wav";
 /// whisper.cpp's own sample, 11 s of speech, in the runtime folder.
 fn sample_file() -> Option<PathBuf> {
     let sample = locate("whisper-cli").ok()?.parent()?.join("jfk.wav");

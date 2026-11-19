@@ -108,6 +108,7 @@ Default storage is `%LOCALAPPDATA%\CueReview` on Windows, `~/Library/Application
 CueReview\
   settings.json            app-wide preferences (the vocabulary, the language, the model, the graphics-card switch), shared by the app and cue
   speech-device.json       where transcription runs: the last timing of the processor and the graphics cards
+  speech-sample.wav        the sample the app times them with, while it does
   section-order.json       sidebar section order
   projects\<id>.json       sections
   locks\<id>.lock          per-session write locks, outside the session folders
