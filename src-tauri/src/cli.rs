@@ -339,9 +339,9 @@ const SPECS: &[Spec] = &[
         required: 0,
         options: &[switch(
             "--install",
-            "Download and install the transcription tools, the base model and every model the chosen language needs, both small models for Auto (the only network access); takes the recording lock",
+            "Download and install the transcription tools, the base model and every model the chosen language needs, both small models for Auto, and the larger model when Large is chosen in Settings (the only network access); takes the recording lock",
         )],
-        notes: "",
+        notes: "speechDevice names where transcription runs (graphicsCard or processor) from the measurement the app saved; cue never measures the devices.",
     },
     Spec {
         name: "sources",

@@ -65,12 +65,28 @@ pub fn save(root: &Path, settings: &Settings) -> Result<Settings, String> {
     // Auto is the default, so it is not written; an unknown language (from
     // a hand-edited file) reads as Auto and is dropped.
     let language = chosen_language(settings).map(str::to_owned);
+    // Standard and the switch on are the defaults, so neither is written.
     let stored = Settings {
         vocabulary: normalize_vocabulary(settings.vocabulary.as_deref().unwrap_or(""))?,
         language,
+        model: large_chosen(settings).then(|| LARGE.into()),
+        graphics_card: (!graphics_card_on(settings)).then_some(false),
     };
     write_json(&path(root), &stored)?;
     Ok(stored)
+}
+
+/// What `model` holds when the larger model is chosen.
+const LARGE: &str = "large";
+/// Whether the larger model is chosen in Settings; anything but `"large"`
+/// is Standard.
+pub fn large_chosen(settings: &Settings) -> bool {
+    settings.model.as_deref() == Some(LARGE)
+}
+/// Whether transcription may use the graphics card: the switch is on unless
+/// it was turned off.
+pub fn graphics_card_on(settings: &Settings) -> bool {
+    settings.graphics_card != Some(false)
 }
 
 /// Terms are separated by commas or new lines. Each is trimmed with its inner
@@ -325,6 +341,9 @@ pub fn held_language(settings: &Settings, detected: Option<&str>) -> Option<&'st
 
 const BASE_ARGS: [&str; 2] = ["-ojf", "-ng"];
 const TAIL_ARGS: [&str; 3] = ["-nf", "-nth", "0.3"];
+/// Whisper threads of a run on a graphics card, which does the heavy work
+/// itself: whisper-cli's default.
+pub const CARD_THREADS: usize = 4;
 
 /// Whisper decoding options for every final and live transcription.
 ///
@@ -337,7 +356,29 @@ const TAIL_ARGS: [&str; 3] = ["-nf", "-nth", "0.3"];
 /// `language` is the language of this run, which the caller knows: the take's,
 /// or [`AUTO`], which anything but a code of the speech model becomes.
 pub fn decoding_args(settings: &Settings, model: &Path, language: &str) -> Vec<String> {
-    decoding_args_with(settings, language, |prompt| prompt_tokens(model, prompt))
+    decoding_args_on(settings, model, language, None)
+}
+/// [`decoding_args`] for a run on the Vulkan build's graphics card `card`
+/// (`-dev <card>` instead of `-ng`), or on the processor with `None`. The
+/// token probe counts the prompt on the processor either way.
+pub fn decoding_args_on(
+    settings: &Settings,
+    model: &Path,
+    language: &str,
+    card: Option<u32>,
+) -> Vec<String> {
+    let mut args = decoding_args_with(settings, language, |prompt| prompt_tokens(model, prompt));
+    if let Some(card) = card {
+        on_card(&mut args, card);
+    }
+    args
+}
+/// Turns the arguments of a processor run into those of a run on `card`:
+/// its `-ng`, which always comes before a prompt, becomes `-dev <card>`.
+fn on_card(args: &mut Vec<String>, card: u32) {
+    if let Some(at) = args.iter().position(|arg| arg == "-ng") {
+        args.splice(at..=at, ["-dev".to_owned(), card.to_string()]);
+    }
 }
 
 fn decoding_args_with(
@@ -606,6 +647,89 @@ mod tests {
         let at = args.iter().position(|arg| arg == "--prompt").unwrap();
         assert_eq!(args[at + 1], prompt);
         assert_eq!(args.len(), 12);
+    }
+
+    #[test]
+    fn a_run_on_the_graphics_card_names_the_card_instead_of_the_processor() {
+        let root = tempfile::tempdir().unwrap();
+        let model = root.path().join("no-model.bin");
+        // The processor's runs keep today's options.
+        assert_eq!(
+            decoding_args_on(&Settings::default(), &model, "en", None),
+            TODAY
+        );
+        assert_eq!(
+            decoding_args_on(&Settings::default(), &model, "de", Some(1)),
+            ["-l", "de", "-ojf", "-dev", "1", "-mc", "0", "-nf", "-nth", "0.3"]
+        );
+        // A prompt that reads like the flag stays the prompt.
+        let mut prompted = decoding_args_with(&vocabulary("-ng"), "en", |_| Some(2));
+        on_card(&mut prompted, 0);
+        assert_eq!(
+            prompted,
+            [
+                "-l",
+                "en",
+                "-ojf",
+                "-dev",
+                "0",
+                "-mc",
+                "3",
+                "--prompt",
+                "-ng",
+                "--carry-initial-prompt",
+                "-nf",
+                "-nth",
+                "0.3",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_model_and_the_switch_are_stored_only_when_they_differ_from_the_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let file = || std::fs::read_to_string(path(root.path())).unwrap();
+        // Standard and the switch on are not written.
+        let defaults = save(root.path(), &Settings::default()).unwrap();
+        assert!(!large_chosen(&defaults) && graphics_card_on(&defaults));
+        assert_eq!(file(), "{}");
+        let chosen = Settings {
+            language: Some("de".into()),
+            model: Some("large".into()),
+            graphics_card: Some(false),
+            ..Default::default()
+        };
+        let saved = save(root.path(), &chosen).unwrap();
+        assert_eq!(saved, chosen);
+        assert!(large_chosen(&saved) && !graphics_card_on(&saved));
+        assert_eq!(
+            file(),
+            "{\n  \"language\": \"de\",\n  \"model\": \"large\",\n  \"graphicsCard\": false\n}"
+        );
+        assert_eq!(load(root.path()), saved);
+        // Saving the vocabulary keeps both, as the dialog sends them back.
+        let worded = save(
+            root.path(),
+            &Settings {
+                vocabulary: Some("CueReview".into()),
+                ..load(root.path())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (worded.model, worded.graphics_card),
+            (chosen.model, Some(false))
+        );
+        // Anything else reads as Standard and the switch on, and is dropped.
+        std::fs::write(
+            path(root.path()),
+            r#"{"model":"medium","graphicsCard":true}"#,
+        )
+        .unwrap();
+        let odd = load(root.path());
+        assert!(!large_chosen(&odd) && graphics_card_on(&odd));
+        assert_eq!(save(root.path(), &odd).unwrap(), Settings::default());
+        assert_eq!(file(), "{}");
     }
 
     #[test]

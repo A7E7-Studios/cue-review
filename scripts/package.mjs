@@ -64,6 +64,9 @@ const resources = { [cli.replaceAll('\\', '/')]: `cue${platform.suffix}` };
 const speechDir = join(root, '.local/bundle-tools/tools/whisper-b5454');
 const speechReady = ['whisper-cli', 'whisper-vad-speech-segments'].every(name => existsSync(join(speechDir, name + platform.suffix)));
 if (requireSpeech && !speechReady) throw new Error('Build the speech runtime first: node scripts/build-speech-runtime.mjs');
+// The Windows x64 runtime also holds the Vulkan build and the sample the app times it with.
+const speechMissing = platform.name === 'windows-x64' ? ['vulkan/whisper-cli.exe', 'jfk.wav'].filter(path => !existsSync(join(speechDir, path))) : [];
+if (requireSpeech && speechMissing.length) throw new Error(`The speech runtime lacks ${speechMissing.join(' and ')}: build it with the Vulkan SDK, node scripts/build-speech-runtime.mjs --require-vulkan`);
 if (speechReady) {
   const manifest = JSON.parse(readFileSync(join(speechDir, 'runtime.json'), 'utf8'));
   if (manifest.target !== triple) throw new Error(`Speech runtime target ${manifest.target} does not match ${triple}.`);

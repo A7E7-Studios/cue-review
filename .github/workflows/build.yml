@@ -71,8 +71,30 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }} --lib
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }} --all-targets -- -D warnings
+      # The Windows runtime's Vulkan build needs the Vulkan SDK: a pinned LunarG installer, checked
+      # against its SHA-256 before it runs, installed with LunarG's documented unattended command
+      # (https://vulkan.lunarg.com/doc/sdk/latest/windows/getting_started.html). It also installs
+      # the Vulkan loader, which the build's smoke runs need.
+      - name: Install the Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VULKAN_SDK_VERSION: 1.4.363.0
+          VULKAN_SDK_SHA256: 94a82d378f7a5e3e54c9db7d2fb7016af136e14ac0a18dbf0f2f67a36352d141
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+          curl.exe --fail --location --silent --show-error --retry 3 --output $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+          if ($LASTEXITCODE -ne 0) { throw "The Vulkan SDK download failed with $LASTEXITCODE." }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          if ($hash -ne $env:VULKAN_SDK_SHA256) { throw "The Vulkan SDK installer's SHA-256 is $hash, not the pinned $env:VULKAN_SDK_SHA256." }
+          $sdk = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          $install = Start-Process -FilePath $installer -ArgumentList '--root', $sdk, '--accept-licenses', '--default-answer', '--confirm-command', 'install' -NoNewWindow -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "The Vulkan SDK installer exited with $($install.ExitCode)." }
+          if (-not (Test-Path -LiteralPath "$sdk\Bin\glslc.exe")) { throw "The Vulkan SDK at $sdk has no glslc." }
+          Write-Output "Vulkan loader installed: $(Test-Path -LiteralPath "$env:SystemRoot\System32\vulkan-1.dll")"
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build bundled speech runtime
-        run: node scripts/build-speech-runtime.mjs
+        run: node scripts/build-speech-runtime.mjs ${{ runner.os == 'Windows' && '--require-vulkan' || '' }}
       - name: Package desktop installers
         run: node scripts/package.mjs --target ${{ matrix.target }} --require-speech-runtime
       - name: Verify bundled executables

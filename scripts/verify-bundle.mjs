@@ -74,11 +74,22 @@ try {
       run(join(resourceDir, build, name + suffix), ['-h']);
     }
   }
+  if (process.platform === 'win32' && process.arch === 'x64') {
+    // Windows x64 also ships the Vulkan build and the sample the app times it with. The Vulkan
+    // build imports vulkan-1.dll and does not start without a Vulkan loader, so it runs only where
+    // one is installed (the Vulkan SDK installs one); elsewhere it is checked for presence.
+    const vulkan = join(resourceDir, 'tools/whisper-b5454/vulkan/whisper-cli.exe');
+    for (const path of [vulkan, join(resourceDir, 'tools/whisper-b5454/jfk.wav')]) {
+      if (!existsSync(path)) throw new Error(`Bundled ${path} is missing.`);
+    }
+    if (existsSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/vulkan-1.dll'))) run(vulkan, ['-h']);
+    else console.log('No Vulkan loader (vulkan-1.dll) on this computer: the bundled Vulkan whisper-cli was checked for presence only.');
+  }
   const setup = JSON.parse(run(cli, ['setup'], true));
   for (const name of ['whisper-cli', 'whisper-vad-speech-segments']) {
     if (!setup.dependencies.some(dependency => dependency.name === name && dependency.available)) throw new Error(`Installed cue cannot discover bundled ${name}.`);
   }
-  console.log('Packaged CLI and both bundled speech executables passed smoke checks.');
+  console.log('Packaged CLI and the bundled speech executables passed smoke checks.');
 } finally {
   if (mountedDmg) {
     run('hdiutil', ['detach', mountedDmg]);

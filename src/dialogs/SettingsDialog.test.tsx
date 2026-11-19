@@ -1,8 +1,9 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
-import type { LanguageModel, Settings, SetupStatus } from '../backend';
+import type { ReactElement } from 'react';
+import type { LanguageModel, Settings, SetupStatus, SpeechDevice } from '../backend';
 import type { WindowTheme } from '../chrome/windowApi';
 import { SPEECH_LANGUAGES } from '../stories/fixtures';
 import { estimateTokens, FONT_CREDIT, normalizeVocabulary, SettingsDialog } from './SettingsDialog';
@@ -18,29 +19,50 @@ function Harness({ initial = {}, setup = ready, installing = false, error, save 
   const [theme, setTheme] = useState<WindowTheme>('light');
   return <SettingsDialog open onClose={handlers.close} theme={theme} onTheme={next => { handlers.theme(next); setTheme(next); }}
     setup={setup} installing={installing} onInstall={handlers.install} onCheckAgain={handlers.checkAgain}
-    onPollLanguageModels={() => handlers.poll()} onDownloadLanguageModels={async () => { await handlers.download(); }} languages={SPEECH_LANGUAGES}
+    onPollLanguageModels={() => handlers.poll()} onDownloadLanguageModels={async () => { await handlers.download(); }}
+    onPollSpeechDevice={() => handlers.pollDevice()} onTestSpeechDevices={async () => { await handlers.test(); }} languages={SPEECH_LANGUAGES}
     settings={settings} onSaveSettings={async next => { handlers.save(next); setSettings(await save(next)); }} error={error}/>;
 }
-const handlers = { close: vi.fn(), theme: vi.fn(), install: vi.fn(), checkAgain: vi.fn(), poll: vi.fn(), download: vi.fn(), save: vi.fn() };
+const handlers = { close: vi.fn(), theme: vi.fn(), install: vi.fn(), checkAgain: vi.fn(), poll: vi.fn(), download: vi.fn(), save: vi.fn(), pollDevice: vi.fn(), test: vi.fn() };
 
 beforeEach(() => {
   document.documentElement.dataset.motion = 'reduced';
   for (const handler of Object.values(handlers)) handler.mockReset();
   handlers.poll.mockResolvedValue(undefined);
+  handlers.pollDevice.mockResolvedValue(undefined);
 });
 afterEach(() => { delete document.documentElement.dataset.motion; vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 const field = () => screen.getByRole('textbox', { name: 'Vocabulary' });
 /** The Recording tools row of a capability, apart from the Transcription section's heading. */
 const toolRow = (label: string) => within(screen.getByRole('region', { name: 'Recording tools' })).getByText(label).parentElement;
-const TOTAL = { 'small.en': 487_614_201, small: 487_601_967 };
+const TOTAL = { 'small.en': 487_614_201, small: 487_601_967, 'large-v3-turbo': 1_624_555_275 };
 /** A model's state; ready and whole unless told otherwise. */
 const model = (name: LanguageModel['model'], state: Partial<LanguageModel> = {}): LanguageModel => ({ model: name, state: 'ready', receivedBytes: TOTAL[name], totalBytes: TOTAL[name], ...state });
 const withModels = (...models: LanguageModel[]): SetupStatus => ({ ...ready, languageModels: models });
 /** Auto's two models, ready unless told otherwise. */
 const auto = (english: Partial<LanguageModel> = {}, multilingual: Partial<LanguageModel> = {}) => withModels(model('small.en', english), model('small', multilingual));
 const transcription = () => within(screen.getByRole('region', { name: 'Transcription' }));
-const modelRow = (name: 'English' | 'Multilingual') => transcription().getByText(`${name} model`).parentElement;
+const modelRow = (name: 'English' | 'Multilingual' | 'Large') => transcription().getByText(`${name} model`).parentElement;
+
+const CARD = 'NVIDIA GeForce RTX 5090';
+/** A graphics card fast enough for Large, transcribing; changed where told. */
+const fastCard = (facts: Partial<SpeechDevice> = {}): SpeechDevice => ({ state: 'ready', kind: 'graphicsCard', name: CARD, card: { name: CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true, ...facts });
+const PROCESSOR: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true };
+const MEASURING: SpeechDevice = { state: 'measuring', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true };
+const STOPPED: SpeechDevice = { state: 'ready', kind: 'processor', card: { name: CARD, stopped: true }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
+const NO_GRAPHICS_BUILD: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: false };
+/** The fast card while the backend tries Large on it, after its download: a measurement, the processor transcribing. */
+const LARGE_TRIAL: SpeechDevice = { state: 'measuring', kind: 'processor', card: { name: CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
+/** Auto's two models ready, unless other models are given, on the given device. */
+const on = (speechDevice: SpeechDevice, setup: SetupStatus = auto()): SetupStatus => ({ ...setup, speechDevice });
+/** Large chosen: the large model first, in the given state, then Auto's two ready. */
+const withLarge = (large: Partial<LanguageModel> = {}) => withModels(model('large-v3-turbo', large), model('small.en'), model('small'));
+/** The "Runs on" line: the fold's summary, or a plain line when there is nothing to unfold. */
+const deviceLine = () => transcription().getByText('Runs on').parentElement!;
+const fold = () => deviceLine().parentElement!;
+const unfold = async (user: ReturnType<typeof userEvent.setup>) => { await user.click(deviceLine()); expect(fold()).toHaveAttribute('open'); };
+const cardSwitch = () => screen.getByRole('switch', { name: 'Use the graphics card' });
 async function enter(text: string) {
   const user = userEvent.setup();
   await user.clear(field());
@@ -216,7 +238,8 @@ describe('SettingsDialog', () => {
       const [open, setOpen] = useState(true);
       return <><button onClick={() => setOpen(true)}>Open settings</button>
         <SettingsDialog open={open} onClose={() => setOpen(false)} theme="light" onTheme={() => {}} setup={ready} installing={false}
-          onInstall={() => {}} onCheckAgain={() => {}} onPollLanguageModels={async () => {}} onDownloadLanguageModels={async () => {}} languages={SPEECH_LANGUAGES} settings={{ vocabulary: 'Figtree' }} onSaveSettings={async () => {}}/></>;
+          onInstall={() => {}} onCheckAgain={() => {}} onPollLanguageModels={async () => {}} onDownloadLanguageModels={async () => {}}
+          onPollSpeechDevice={async () => {}} onTestSpeechDevices={async () => {}} languages={SPEECH_LANGUAGES} settings={{ vocabulary: 'Figtree' }} onSaveSettings={async () => {}}/></>;
     }
     render(<Reopen/>);
     await user.type(field(), ', Nadia');
@@ -349,7 +372,8 @@ describe('SettingsDialog', () => {
     handlers.poll.mockImplementation(() => new Promise<void>(resolve => { reply = resolve; }));
     const downloading = auto({}, { state: 'downloading', receivedBytes: 212_000_000 });
     const dialog = (open: boolean) => <SettingsDialog open={open} onClose={() => {}} theme="light" onTheme={() => {}} setup={downloading} installing={false}
-      onInstall={() => {}} onCheckAgain={() => {}} onPollLanguageModels={() => handlers.poll()} onDownloadLanguageModels={async () => {}} languages={[]} settings={{}} onSaveSettings={async () => {}}/>;
+      onInstall={() => {}} onCheckAgain={() => {}} onPollLanguageModels={() => handlers.poll()} onDownloadLanguageModels={async () => {}}
+      onPollSpeechDevice={async () => {}} onTestSpeechDevices={async () => {}} languages={[]} settings={{}} onSaveSettings={async () => {}}/>;
     const { rerender } = render(dialog(true));
     act(() => { vi.advanceTimersByTime(1000); });
     expect(handlers.poll).toHaveBeenCalledOnce();
@@ -456,3 +480,291 @@ describe('SettingsDialog', () => {
     expect(handlers.poll).not.toHaveBeenCalled();
   });
 });
+
+describe('SettingsDialog: the graphics card', () => {
+  it('names the device transcription runs on', async () => {
+    const user = userEvent.setup();
+    // A graphics card that transcribes: one folded line under the models, naming it.
+    const { unmount } = render(<Harness setup={on(fastCard())}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on NVIDIA GeForce RTX 5090$/);
+    expect(fold()).not.toHaveAttribute('open');
+    expect(fold().previousElementSibling).toHaveTextContent(/^Auto detects/);
+    expect(cardSwitch()).not.toBeVisible();
+    expect(transcription().queryByText(/stopped/)).not.toBeInTheDocument();
+    unmount();
+
+    // The processor: the same line, and nothing about a card when it unfolds.
+    const processor = render(<Harness setup={on(PROCESSOR)}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor$/);
+    await unfold(user);
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    expect(transcription().queryByRole('combobox', { name: 'Model' })).not.toBeInTheDocument();
+    // While the devices are measured, the processor transcribes and the line says the card is being tested.
+    processor.rerender(<Harness setup={on(MEASURING)}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · testing the graphics card…$/);
+    processor.unmount();
+
+    // A card that stopped: the line warns, its fold opens by itself and names the card.
+    render(<Harness setup={on(STOPPED)}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · the graphics card stopped$/);
+    expect(fold()).toHaveAttribute('open');
+    expect(fold()).toHaveAttribute('data-warning');
+    expect(transcription().getByText('The NVIDIA GeForce RTX 5090 stopped during a transcription, so the processor transcribes until it is tested again.')).toBeVisible();
+    expect(cardSwitch()).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Test the graphics card again' })).toBeVisible();
+    // A runtime without the graphics-card build (macOS, Linux): the processor, as a plain line with nothing to unfold.
+    cleanupAndRender(<Harness setup={on(NO_GRAPHICS_BUILD)}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor$/);
+    expect(deviceLine().tagName).toBe('P');
+    expect(transcription().queryByText('Runs on')!.closest('details')).toBeNull();
+    // Without a device in the status there is no line.
+    cleanupAndRender(<Harness setup={auto()}/>);
+    expect(transcription().queryByText('Runs on')).not.toBeInTheDocument();
+  });
+
+  it('turns the graphics card off for transcription', async () => {
+    const user = userEvent.setup();
+    let reject = false;
+    render(<Harness initial={{ vocabulary: 'Figtree', model: 'large' }} setup={on(fastCard({ largeInUse: true }), withLarge())}
+      save={settings => reject ? Promise.reject('Settings could not be saved: access is denied.') : Promise.resolve(settings)}/>);
+    await unfold(user);
+    expect(cardSwitch()).toHaveAttribute('aria-checked', 'true');
+    expect(cardSwitch()).toHaveAccessibleDescription('Turn it off if a game or headset app stutters while you record.');
+
+    // Off saves graphicsCard: false with the other choices, shows the processor at once and reads the device again.
+    await user.click(cardSwitch());
+    expect(handlers.save).toHaveBeenLastCalledWith({ vocabulary: 'Figtree', model: 'large', graphicsCard: false });
+    expect(cardSwitch()).toHaveAttribute('aria-checked', 'false');
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor$/);
+    await waitFor(() => expect(handlers.pollDevice).toHaveBeenCalledOnce());
+    // Large waits for the card; the small models transcribe.
+    expect(modelRow('Large')).toHaveTextContent('Needs the graphics card');
+    expect(modelRow('Large')).not.toHaveAttribute('data-available');
+    expect(transcription().getByText('With the graphics card off, the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText(/^Fallback/)).not.toBeInTheDocument();
+
+    // On removes it again.
+    await user.click(cardSwitch());
+    expect(JSON.stringify(handlers.save.mock.lastCall![0])).toBe('{"vocabulary":"Figtree","model":"large"}');
+    expect(deviceLine()).toHaveTextContent(/^Runs on NVIDIA GeForce RTX 5090$/);
+    await waitFor(() => expect(handlers.pollDevice).toHaveBeenCalledTimes(2));
+
+    // A refused save puts the switch back and says why.
+    reject = true;
+    await user.click(cardSwitch());
+    expect(await within(fold()).findByRole('alert')).toHaveTextContent('Settings could not be saved: access is denied.');
+    expect(cardSwitch()).toHaveAttribute('aria-checked', 'true');
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks for the graphics card to be tested again', async () => {
+    const user = userEvent.setup();
+    let finish!: () => void;
+    handlers.test.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    const { rerender } = render(<Harness setup={on(STOPPED)}/>);
+    const test = screen.getByRole('button', { name: 'Test the graphics card again' });
+    await user.click(test);
+    expect(handlers.test).toHaveBeenCalledOnce();
+    // Inert while it starts and while the devices are measured: focus stays on it.
+    expect(test).toHaveAttribute('aria-disabled', 'true');
+    await user.click(test);
+    expect(handlers.test).toHaveBeenCalledOnce();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let reply!: () => void;
+    handlers.pollDevice.mockImplementation(() => new Promise<void>(resolve => { reply = resolve; }));
+    rerender(<Harness setup={on({ ...MEASURING, card: STOPPED.card, largeOffered: true })}/>);
+    await act(async () => { finish(); });
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · testing the graphics card…$/);
+    expect(test).toHaveAttribute('aria-disabled', 'true');
+    expect(test).toHaveFocus();
+
+    // The device is read about each second while it is measured, the next read only after the last reply.
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.pollDevice).toHaveBeenCalledOnce();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.pollDevice).toHaveBeenCalledOnce();
+    await act(async () => { reply(); });
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(2);
+
+    // The card measured fastest again: it transcribes, and the reading stops.
+    rerender(<Harness setup={on(fastCard())}/>);
+    await act(async () => { reply(); });
+    expect(deviceLine()).toHaveTextContent(/^Runs on NVIDIA GeForce RTX 5090$/);
+    expect(fold()).not.toHaveAttribute('data-warning');
+    expect(screen.queryByRole('button', { name: 'Test the graphics card again' })).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+
+    // Without a card that beat the processor, the fold offers the test too; a refusal shows in it.
+    handlers.test.mockRejectedValueOnce('The graphics card is tested once the recording stops.');
+    cleanupAndRender(<Harness setup={on(PROCESSOR)}/>);
+    await unfold(user);
+    await user.click(screen.getByRole('button', { name: 'Test the graphics card again' }));
+    expect(await within(fold()).findByRole('alert')).toHaveTextContent('The graphics card is tested once the recording stops.');
+    expect(screen.getByRole('button', { name: 'Test the graphics card again' })).not.toHaveAttribute('aria-disabled');
+
+    // A runtime without the graphics-card build has nothing to test: no button, even for a stopped card.
+    cleanupAndRender(<Harness setup={on({ ...STOPPED, measurable: false })}/>);
+    expect(fold()).toHaveAttribute('open');
+    expect(cardSwitch()).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Test the graphics card again' })).not.toBeInTheDocument();
+    cleanupAndRender(<Harness setup={on(NO_GRAPHICS_BUILD)}/>);
+    expect(screen.queryByRole('button', { name: 'Test the graphics card again' })).not.toBeInTheDocument();
+  });
+
+  it('offers the larger model on a fast graphics card', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<Harness initial={{ vocabulary: 'Figtree' }} setup={on(fastCard())}/>);
+    // The Model select sits under Language, Standard chosen, and the note names Large's download.
+    const select = transcription().getByRole<HTMLSelectElement>('combobox', { name: 'Model' });
+    expect(transcription().getByRole('combobox', { name: 'Language' }).parentElement!.nextElementSibling).toContainElement(select);
+    expect([...select.options].map(option => option.label)).toEqual(['Standard', 'Large']);
+    expect(select).toHaveDisplayValue('Standard');
+    expect(transcription().getByText("Auto detects each take's language: English takes use the English model, every other language the multilingual one. Large reads every language more clearly on this graphics card; a 1.6 GB download.")).toBeVisible();
+
+    // Choosing saves at once with the other choices; the backend starts the download, so the models are read.
+    await user.selectOptions(select, 'large');
+    expect(handlers.save).toHaveBeenLastCalledWith({ vocabulary: 'Figtree', model: 'large' });
+    expect(select).toHaveDisplayValue('Large');
+    await waitFor(() => expect(handlers.poll).toHaveBeenCalledOnce());
+    await user.selectOptions(select, '');
+    expect(JSON.stringify(handlers.save.mock.lastCall![0])).toBe('{"vocabulary":"Figtree"}');
+    expect(select).toHaveDisplayValue('Standard');
+    unmount();
+
+    // Large downloaded and being tried on the card, which the backend reports as a measurement: it reads Ready, and the
+    // small models transcribe until it has been.
+    const tried = render(<Harness initial={{ model: 'large' }} setup={on(LARGE_TRIAL, withLarge())}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · testing the graphics card…$/);
+    expect(modelRow('Large')).toHaveTextContent('Ready');
+    expect(modelRow('Large')).toHaveAttribute('data-available');
+    expect(transcription().getByText('Large is being tried on the graphics card; until then, the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText('The large model transcribes every language on the graphics card.')).not.toBeInTheDocument();
+    expect(fold()).not.toContainElement(modelRow('English'));
+    tried.unmount();
+
+    // Large in use, as the backend says: its row first, and the small models in the fold as the fallback.
+    const inUse = render(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeInUse: true }), withLarge())}/>);
+    expect(transcription().getAllByText(/ model$/).map(item => item.textContent)).toEqual(['Large model', 'English model', 'Multilingual model']);
+    expect(modelRow('Large')).toHaveTextContent('Ready');
+    expect(modelRow('Large')).toHaveAttribute('data-available');
+    expect(transcription().getByText('The large model transcribes every language on the graphics card.')).toBeVisible();
+    expect(fold()).toContainElement(modelRow('English'));
+    expect(modelRow('English')).not.toBeVisible();
+    await unfold(user);
+    expect(within(fold()).getByText('Fallback when the graphics card is off:')).toBeVisible();
+    expect(modelRow('English')).toBeVisible();
+    expect(modelRow('Multilingual')).toHaveTextContent('Ready');
+    // Tried and did not keep up (slower than the processor, or too big beside a second track): said plainly, and the
+    // small models stay in the list.
+    inUse.rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeSlow: true }), withLarge())}/>);
+    expect(transcription().getByText('The large model did not keep up on this graphics card, so the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText(/being tried/)).not.toBeInTheDocument();
+    expect(fold()).not.toContainElement(modelRow('English'));
+    inUse.unmount();
+
+    // A refused choice puts the select back and says why.
+    render(<Harness setup={on(fastCard())} save={() => Promise.reject('Settings could not be saved: access is denied.')}/>);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'large');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Settings could not be saved: access is denied.');
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveDisplayValue('Standard');
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveAccessibleDescription('Settings could not be saved: access is denied.');
+  });
+
+  it('does not offer the larger model without a fast graphics card', () => {
+    for (const device of [PROCESSOR, MEASURING, fastCard({ largeOffered: false })]) {
+      const { unmount } = render(<Harness setup={on(device)}/>);
+      expect(transcription().queryByRole('combobox', { name: 'Model' })).not.toBeInTheDocument();
+      expect(transcription().getByText("Auto detects each take's language: English takes use the English model, every other language the multilingual one.")).toBeVisible();
+      expect(transcription().queryByText(/Large/)).not.toBeInTheDocument();
+      unmount();
+    }
+    // A card faster than the processor but not enough for Large still transcribes.
+    render(<Harness setup={on(fastCard({ largeOffered: false }))}/>);
+    expect(deviceLine()).toHaveTextContent(/^Runs on NVIDIA GeForce RTX 5090$/);
+
+    // Large saved and installed, but the last measurement no longer offers it: the Model select stays so Standard can
+    // be chosen again, Large is neither in use nor being tried, and the device is not read again for it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    cleanupAndRender(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeOffered: false }), withLarge())}/>);
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveDisplayValue('Large');
+    expect(modelRow('Large')).toHaveTextContent('Needs a faster graphics card');
+    expect(modelRow('Large')).not.toHaveAttribute('data-available');
+    expect(transcription().getByText('This graphics card is not fast enough for the large model, so the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText(/being tried|transcribes every language/)).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
+    // The same on the processor, no card faster than it.
+    cleanupAndRender(<Harness initial={{ model: 'large' }} setup={on(PROCESSOR, withLarge())}/>);
+    expect(modelRow('Large')).toHaveTextContent('Needs the graphics card');
+    expect(transcription().getByText('Without the graphics card, the English and multilingual models transcribe.')).toBeVisible();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
+  });
+
+  it("shows the larger model's download progress", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const downloading = (receivedBytes: number) => on(fastCard(), withLarge({ state: 'downloading', receivedBytes }));
+    const { rerender, unmount } = render(<Harness initial={{ model: 'large' }} setup={downloading(640_000_000)}/>);
+    expect(transcription().getAllByText(/ model$/).map(item => item.textContent)).toEqual(['Large model', 'English model', 'Multilingual model']);
+    expect(modelRow('Large')).toHaveTextContent('Downloading · 640 of 1,625 MB');
+    const bar = screen.getByRole('progressbar', { name: 'Large model download' });
+    expect(bar).toHaveAttribute('aria-valuenow', '640');
+    expect(bar).toHaveAttribute('aria-valuemax', '1625');
+    expect(bar).toHaveAttribute('aria-valuetext', '640 of 1,625 MB');
+    expect(modelRow('English')).toHaveTextContent('Ready');
+    expect(modelRow('Multilingual')).toHaveTextContent('Ready');
+    expect(transcription().getByText('Until it finishes, the English and multilingual models transcribe.')).toBeVisible();
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.poll).toHaveBeenCalledOnce();
+    await act(async () => {});
+    rerender(<Harness initial={{ model: 'large' }} setup={downloading(1_200_000_000)}/>);
+    expect(modelRow('Large')).toHaveTextContent('Downloading · 1,200 of 1,625 MB');
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.poll).toHaveBeenCalledTimes(2);
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
+    // Once it is ready, the models are no longer read; the device is read at once, then each second while the
+    // backend tries Large on the card, which it reports as a measurement, until it is in use.
+    await act(async () => {});
+    rerender(<Harness initial={{ model: 'large' }} setup={on(LARGE_TRIAL, withLarge())}/>);
+    expect(modelRow('Large')).toHaveTextContent('Ready');
+    expect(modelRow('Large')).toHaveAttribute('data-available');
+    expect(deviceLine()).toHaveTextContent(/^Runs on the processor · testing the graphics card…$/);
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(handlers.pollDevice).toHaveBeenCalledOnce();
+    expect(transcription().getByText('Large is being tried on the graphics card; until then, the English and multilingual models transcribe.')).toBeVisible();
+    await act(async () => {});
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(2);
+    await act(async () => {});
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(3);
+    await act(async () => {});
+    rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeInUse: true }), withLarge())}/>);
+    expect(transcription().getByText('The large model transcribes every language on the graphics card.')).toBeVisible();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(handlers.poll).toHaveBeenCalledTimes(2);
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+    unmount();
+
+    // A failed download says so as the other rows do, and one Try again fetches it; its end is a reason to read the device too.
+    const user = userEvent.setup();
+    const failed = render(<Harness initial={{ model: 'large' }} setup={downloading(640_000_000)}/>);
+    failed.rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge({ state: 'failed', receivedBytes: 0, error: 'The download was cut off.' }))}/>);
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(4);
+    expect(modelRow('Large')).toHaveTextContent('Download failed');
+    expect(modelRow('Large')!.nextElementSibling).toHaveTextContent('The download was cut off. The English and multilingual models transcribe until it is installed.');
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(handlers.download).toHaveBeenCalledOnce();
+  });
+});
+
+/** Replaces whatever is rendered with `element`. */
+function cleanupAndRender(element: ReactElement) {
+  cleanup();
+  return render(element);
+}

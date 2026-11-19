@@ -6,7 +6,7 @@ import type { Settings as AppSettings, SetupStatus, SpeechLanguage } from '../ba
 import type { WindowTheme } from '../chrome/windowApi';
 import { SettingsDialog } from '../dialogs/SettingsDialog';
 import { Dialog } from '../ui/Dialog';
-import { configureLanguageModels, configureScenario } from './backend.fixture';
+import { configureLanguageModels, configureScenario, configureSpeechDevice, SPEECH_DEVICES } from './backend.fixture';
 
 type Props = { busy: boolean; error: boolean; destructive: boolean; initiallyOpen: boolean };
 function DialogExample({ busy, error, destructive, initiallyOpen }: Props) {
@@ -30,12 +30,16 @@ function DialogExample({ busy, error, destructive, initiallyOpen }: Props) {
     </Dialog>
   </div>;
 }
-/** `language` absent is Auto; `models` sets the states of the models it needs (a model not named is ready). */
-type SettingsProps = { scenario?: 'fresh' | 'setup'; desktop?: boolean; installing?: boolean; error?: string; vocabulary?: string; language?: string; models?: Parameters<typeof configureLanguageModels>[1] };
-// The real Settings dialog over the workshop backend: saving, setup checks,
-// installation and the language models' downloads change only in-memory fixtures.
-function SettingsExample({ scenario = 'fresh', desktop = true, installing: startInstalling = false, error, vocabulary, language, models }: SettingsProps) {
-  useState(() => { configureScenario(scenario); configureLanguageModels(language, models); return true; });
+/**
+ * `language` absent is Auto; `models` sets the states of the models it needs (a model not named is ready). `device` is
+ * what the devices measured (the processor unless named), `choices` the Model and graphics-card switch saved in Settings.
+ */
+type SettingsProps = { scenario?: 'fresh' | 'setup'; desktop?: boolean; installing?: boolean; error?: string; vocabulary?: string; language?: string; models?: Parameters<typeof configureLanguageModels>[1];
+  device?: keyof typeof SPEECH_DEVICES; choices?: Parameters<typeof configureSpeechDevice>[1] };
+// The real Settings dialog over the workshop backend: saving, setup checks, installation, the language
+// models' downloads and the devices' measurement change only in-memory fixtures.
+function SettingsExample({ scenario = 'fresh', desktop = true, installing: startInstalling = false, error, vocabulary, language, models, device = 'processor', choices }: SettingsProps) {
+  useState(() => { configureScenario(scenario); configureLanguageModels(language, models); configureSpeechDevice(SPEECH_DEVICES[device], choices); return true; });
   const [open, setOpen] = useState(true);
   const [theme, setTheme] = useState<WindowTheme>(() => document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const [setup, setSetup] = useState<SetupStatus | null>(null);
@@ -63,8 +67,10 @@ function SettingsExample({ scenario = 'fresh', desktop = true, installing: start
       theme={theme} onTheme={next => { setTheme(next); document.documentElement.dataset.theme = next; }}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={() => void backend.setup().then(setSetup)}
       onPollLanguageModels={async () => { if (!desktop) return; const models = await backend.languageModels(); setSetup(current => current && { ...current, languageModels: models }); }}
-      onDownloadLanguageModels={backend.downloadLanguageModels} languages={languages}
-      settings={settings} onSaveSettings={async next => setSettings(await backend.saveSettings(next))} error={problem}/>
+      onDownloadLanguageModels={backend.downloadLanguageModels}
+      onPollSpeechDevice={async () => { if (!desktop) return; const speechDevice = await backend.getSpeechDevice(); setSetup(current => current && { ...current, speechDevice }); }}
+      onTestSpeechDevices={async () => { const speechDevice = await backend.testSpeechDevices(); setSetup(current => current && { ...current, speechDevice }); }}
+      languages={languages} settings={settings} onSaveSettings={async next => setSettings(await backend.saveSettings(next))} error={problem}/>
   </div>;
 }
 
@@ -116,6 +122,31 @@ export const SettingsModelMissing: Story = settingsStory({ language: 'en', model
 export const SettingsFixedLanguage: Story = settingsStory({ language: 'pl' });
 /** Before transcription is installed: no download to start, and installing fetches the models. */
 export const SettingsModelBeforeInstall: Story = settingsStory({ scenario: 'setup', language: 'de', models: { small: { state: 'missing', receivedBytes: 0 } } });
+/** Opens the "Runs on" fold, as a person does to reach the graphics-card switch; focus stays where the dialog put it. */
+const unfold: Story['play'] = async ({ canvasElement }) => {
+  const page = within(canvasElement.ownerDocument.body);
+  const fold = (await page.findByText('Runs on')).closest('details')!;
+  fold.open = true;
+  await waitFor(() => expect(page.getByRole('switch', { name: 'Use the graphics card' })).toBeVisible());
+};
+/** A graphics card fast enough for Large, Standard chosen: the Model select, and the device as one folded line. */
+export const SettingsFastGraphicsCard: Story = settingsStory({ device: 'fastCard' });
+/** No usable graphics card: the processor transcribes, and Settings gains only the device line. */
+export const SettingsProcessorOnly: Story = settingsStory({ device: 'processor' });
+/** A runtime without the graphics-card build (macOS, Linux): a plain line with nothing to unfold. */
+export const SettingsWithoutGraphicsBuild: Story = settingsStory({ device: 'noGraphicsBuild' });
+/** The devices still being measured, the processor transcribing meanwhile. */
+export const SettingsMeasuringDevices: Story = settingsStory({ device: 'measuring' });
+/** Large chosen while it downloads: the small models transcribe until it finishes. */
+export const SettingsLargeDownloading: Story = settingsStory({ device: 'fastCard', choices: { model: 'large' }, models: { 'large-v3-turbo': { state: 'downloading', receivedBytes: 640_000_000 } } });
+/** Large downloaded and being tried on the card, which the backend reports as a measurement: it reads Ready, and the small models transcribe until it has been. */
+export const SettingsLargeBeingTried: Story = settingsStory({ device: 'largeTrial', choices: { model: 'large' } });
+/** Large in use, the fold open: the switch, and the small models as the fallback. */
+export const SettingsLargeInUse: Story = { ...settingsStory({ device: 'largeInUse', choices: { model: 'large' } }), play: unfold };
+/** The switch turned off with Large chosen: Large needs the graphics card, so the small models transcribe. */
+export const SettingsGraphicsCardOff: Story = { ...settingsStory({ device: 'fastCard', choices: { model: 'large', graphicsCard: false } }), play: unfold };
+/** The graphics card stopped during a transcription: the warning, its fold open by itself, and Test the graphics card again. */
+export const SettingsGraphicsCardStopped: Story = settingsStory({ device: 'cardStopped' });
 /** The Language list: Auto first, then English and German, then every other language by name. */
 export const SettingsLanguageList: Story = {
   ...settingsStory(),

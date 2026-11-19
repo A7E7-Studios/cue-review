@@ -312,7 +312,7 @@ fn live_transcription(s: Shared, id: String, cancel: Arc<AtomicBool>, take: Opti
             };
             let result = copied.and_then(|(length, echo)| {
                 {
-                    let _inference = s.inference.lock().map_err(|e| e.to_string())?;
+                    let _inference = lock_inference(&s)?;
                     if cancel.load(Ordering::Acquire) {
                         return Err("Live transcription cancelled.".into());
                     }
@@ -417,7 +417,7 @@ fn redo_provisional(
     stretches: &mut stretches::Stretches,
     redo: &mut stretches::Redo,
 ) -> stretches::Redone {
-    let Ok(_inference) = s.inference.lock() else {
+    let Ok(_inference) = lock_inference(s) else {
         return stretches::Redone::Later("The speech runtime is unavailable.".into());
     };
     transcribe::redo_provisional(
@@ -486,7 +486,7 @@ fn delete_session_from_store(s: &Shared, id: &str) -> Result<(), String> {
     };
     // A refinement of it holds the inference lock until its Whisper is gone.
     let _inference = if refining {
-        Some(s.inference.lock().map_err(|e| e.to_string())?)
+        Some(lock_inference(s)?)
     } else {
         None
     };
@@ -602,9 +602,103 @@ async fn install_transcription(s: CmdState<'_>) -> Result<SetupStatus, String> {
         let _guard = s.installer.lock().map_err(|e| e.to_string())?;
         let status = deps::install_transcription()?;
         deps::start_language_models_download()?;
+        // Base is there now to time the devices with.
+        spawn_measure(&s, false);
         Ok(status)
     })
     .await
+}
+/// Where transcription runs, for the light poll while the devices are
+/// measured.
+#[tauri::command]
+async fn get_speech_device() -> Result<SpeechDevice, String> {
+    blocking(|| Ok(deps::speech_device_status())).await
+}
+/// "Test the graphics card again": measures the devices again in the
+/// background and returns where transcription runs, now measuring. Refused
+/// without the graphics-card build of the runtime, and while a recording
+/// runs.
+#[tauri::command]
+async fn test_speech_devices(s: CmdState<'_>) -> Result<SpeechDevice, String> {
+    let s = s.inner().clone();
+    blocking(move || {
+        if deps::card_build().is_none() {
+            return Err(
+                "This computer's speech runtime has no graphics-card build to test.".into(),
+            );
+        }
+        if s.runtime
+            .lock()
+            .map_err(|e| e.to_string())?
+            .active
+            .is_some()
+        {
+            return Err(
+                "The graphics card can be tested again once the recording has stopped.".into(),
+            );
+        }
+        spawn_measure(&s, true);
+        Ok(deps::speech_device_status())
+    })
+    .await
+}
+/// Takes the inference lock for Whisper work: a recording's live
+/// transcription, the pass after Stop, Retry, the refinement, a delete that
+/// waits for one. A measurement of the devices that holds the lock or waits
+/// for it is stopped first ([`deps::cancel_measuring`]), so no transcription
+/// waits for one; it runs again at the next idle moment. The measurement
+/// itself takes the lock without this.
+fn lock_inference(s: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    lock_after(&s.inference, deps::cancel_measuring)
+}
+/// Locks `inference` once `stop_measuring` has stopped a measurement.
+fn lock_after(
+    inference: &Mutex<()>,
+    stop_measuring: impl FnOnce(),
+) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    stop_measuring();
+    inference.lock().map_err(|e| e.to_string())
+}
+/// Measures the devices on a thread of its own when that is due or `asked`
+/// ([`deps::claim_measuring`]): under the inference lock, so no
+/// transcription runs meanwhile, and only while nothing records. A recording
+/// that starts, or a transcription that wants the lock ([`lock_inference`]),
+/// cuts it short ([`deps::cancel_measuring`]), and it runs again at the next
+/// idle moment, when the pass that refines a transcript after Stop has
+/// ended.
+fn spawn_measure(s: &Shared, asked: bool) {
+    // While a recording runs nothing is claimed, so its stretches keep
+    // their device.
+    if s.runtime
+        .lock()
+        .map_or(true, |runtime| runtime.active.is_some())
+    {
+        return;
+    }
+    let Some(cancel) = deps::claim_measuring(asked) else {
+        return;
+    };
+    let state = s.clone();
+    let spawned = std::thread::Builder::new()
+        .name("measure-devices".into())
+        .spawn(move || {
+            let Ok(_inference) = state.inference.lock() else {
+                deps::give_up_measuring();
+                return;
+            };
+            let recording = state
+                .runtime
+                .lock()
+                .map_or(true, |runtime| runtime.active.is_some());
+            if recording || cancel.load(Ordering::Acquire) {
+                deps::give_up_measuring();
+                return;
+            }
+            deps::measure_devices(&cancel);
+        });
+    if spawned.is_err() {
+        deps::give_up_measuring();
+    }
 }
 /// Starts or restarts downloading whichever models the chosen language needs
 /// and are missing, for example after a download failed.
@@ -733,7 +827,7 @@ fn spawn_refine(s: &Shared, id: &str) {
     let _ = std::thread::Builder::new()
         .name("refine-transcript".into())
         .spawn(move || {
-            let outcome = state.inference.lock().ok().and_then(|_inference| {
+            let outcome = lock_inference(&state).ok().and_then(|_inference| {
                 let recording = state
                     .runtime
                     .lock()
@@ -752,6 +846,8 @@ fn spawn_refine(s: &Shared, id: &str) {
             if let Some(Err(error)) = outcome {
                 eprintln!("The transcript of {id} was not refined: {error}");
             }
+            // An idle moment: a measurement a recording cut short runs now.
+            spawn_measure(&state, false);
         });
 }
 fn spawn_live(s: &Shared, id: &str, cancel: Arc<AtomicBool>, take: Option<TakeRef>) {
@@ -835,6 +931,7 @@ fn start_recording_with(
         }
         // Whisper beside a capture runs only with the live threads.
         stop_refining(&mut runtime, None);
+        deps::cancel_measuring();
         match start(
             config,
             &s.store.session_dir(&session.id)?,
@@ -862,11 +959,7 @@ fn start_recording_with(
 fn finish_transcription(job: ProcessingJob) {
     let s = &job.state;
     let id = &job.id;
-    let result = s
-        .inference
-        .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|_guard| transcribe::transcribe(&s.store, id));
+    let result = lock_inference(s).and_then(|_guard| transcribe::transcribe(&s.store, id));
     // Re-read under the session lock so a concurrent rename is kept.
     let saved = s.store.update_session(id, |session| {
         match &result {
@@ -924,11 +1017,8 @@ fn run_take(s: &Shared, id: &str, index: u32) -> Result<(), String> {
         _ => return Err(format!("Take {index} has no usable video.")),
     }
     takes::set_status(&s.store, id, index, TakeStatus::Transcribing)?;
-    let result = s
-        .inference
-        .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|_guard| transcribe::transcribe_take(&s.store, id, index));
+    let result =
+        lock_inference(s).and_then(|_guard| transcribe::transcribe_take(&s.store, id, index));
     let status = if result.is_ok() {
         TakeStatus::Ready
     } else {
@@ -1180,6 +1270,7 @@ fn start_take_with(
     let folder = takes::take_dir(&s.store.session_dir(id)?, take.index);
     // Whisper beside a capture runs only with the live threads.
     stop_refining(&mut runtime, None);
+    deps::cancel_measuring();
     match start(config, &folder, muted) {
         Ok(active) => {
             let session = started.session.clone();
@@ -1236,16 +1327,23 @@ fn save_settings(s: CmdState<'_>, settings: Settings) -> Result<Settings, String
         let _ = deps::start_language_models_download();
     })
 }
-/// Saves the settings and calls `language_changed` when the language did.
+/// Saves the settings and calls `models_changed` when the language or the
+/// model did, which changes the models to download.
 fn save_settings_in(
     root: &std::path::Path,
     settings: &Settings,
-    language_changed: impl FnOnce(),
+    models_changed: impl FnOnce(),
 ) -> Result<Settings, String> {
-    let before = settings::chosen_language(&settings::load(root));
+    let models = |settings: &Settings| {
+        (
+            settings::chosen_language(settings),
+            settings::large_chosen(settings),
+        )
+    };
+    let before = models(&settings::load(root));
     let saved = settings::save(root, settings)?;
-    if settings::chosen_language(&saved) != before {
-        language_changed();
+    if models(&saved) != before {
+        models_changed();
     }
     Ok(saved)
 }
@@ -1318,16 +1416,24 @@ pub fn run() {
             }
             app.asset_protocol_scope()
                 .allow_directory(store.root.join("sessions"), true)?;
-            // An installation that lacks a model its language needs fetches it now.
-            let _ = deps::start_language_models_download();
-            app.manage(Arc::new(AppState {
+            let state: Shared = Arc::new(AppState {
                 store,
                 _ownership: ownership,
                 runtime: Mutex::new(Runtime::default()),
                 installer: Mutex::new(()),
                 inference: Mutex::new(()),
                 preview: Mutex::new(preview::Preview::default()),
-            }));
+            });
+            app.manage(state.clone());
+            // A finished download of the larger model wakes the measurement,
+            // which times it on the graphics card.
+            let worker = state.clone();
+            deps::set_measuring_worker(move || spawn_measure(&worker, false));
+            // An installation that lacks a model its choices need fetches it now.
+            let _ = deps::start_language_models_download();
+            // The first start, or one after the app, the runtime or a display
+            // driver changed, measures the devices in the background.
+            spawn_measure(&state, false);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1368,6 +1474,8 @@ pub fn run() {
             install_transcription,
             download_language_models,
             get_language_models,
+            get_speech_device,
+            test_speech_devices,
             get_languages,
             get_agent_handoff,
             open_session_folder,
@@ -1452,6 +1560,41 @@ mod orchestration_tests {
         assert_eq!(state.runtime.lock().unwrap().refining.len(), 1);
     }
     #[test]
+    fn a_transcription_stops_a_measurement_which_runs_again_when_idle() {
+        let inference = Arc::new(Mutex::new(()));
+        let measuring = Arc::new(Mutex::new(deps::Measuring::default()));
+        let cancel = deps::claim_measuring_in(&measuring, false, || true).unwrap();
+        // The measurement holds the inference lock and times its sample
+        // until it is stopped, as a run of the sample is killed then.
+        let (held, holding) = std::sync::mpsc::channel();
+        let worker = {
+            let (inference, measuring) = (inference.clone(), measuring.clone());
+            std::thread::spawn(move || {
+                let _lock = inference.lock().unwrap();
+                held.send(()).unwrap();
+                let began = Instant::now();
+                while !cancel.load(Ordering::Acquire) {
+                    assert!(began.elapsed() < Duration::from_secs(30), "never stopped");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                deps::finish_measuring_in(&measuring, false);
+            })
+        };
+        holding.recv().unwrap();
+        // Retry, the pass after Stop or the refinement asks for the lock: the
+        // measurement gives up at once instead of keeping it to its end.
+        let began = Instant::now();
+        let lock = lock_after(&inference, || deps::cancel_measuring_in(&measuring)).unwrap();
+        assert!(began.elapsed() < Duration::from_secs(10));
+        worker.join().unwrap();
+        drop(lock);
+        // At the next idle moment it is still due, and runs again.
+        assert!(deps::claim_measuring_in(&measuring, false, || true).is_some());
+        // Without a measurement the lock is taken as before.
+        let state = Mutex::new(deps::Measuring::default());
+        drop(lock_after(&inference, || deps::cancel_measuring_in(&state)).unwrap());
+    }
+    #[test]
     fn changing_the_language_starts_its_model_download() {
         let root = tempfile::tempdir().unwrap();
         let started = std::cell::Cell::new(0);
@@ -1493,6 +1636,28 @@ mod orchestration_tests {
         })
         .unwrap();
         assert_eq!(started.get(), 4, "Auto stays Auto");
+        // Choosing Large fetches it; the switch fetches nothing; Standard
+        // again stops a download it has no use for.
+        let large = Settings {
+            model: Some("large".into()),
+            ..Default::default()
+        };
+        save_settings_in(root.path(), &large, || started.set(started.get() + 1)).unwrap();
+        assert_eq!(started.get(), 5);
+        let switched_off = Settings {
+            graphics_card: Some(false),
+            ..large.clone()
+        };
+        save_settings_in(root.path(), &switched_off, || {
+            started.set(started.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(started.get(), 5, "the switch downloads nothing");
+        save_settings_in(root.path(), &Settings::default(), || {
+            started.set(started.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(started.get(), 6);
     }
     #[test]
     fn shell_folder_resolves_the_physical_path_and_preserves_spaces() {

@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { backend, videoUrl } from './backend';
-import type { Project, RecordingStatus, Session, Settings, SetupStatus, SpeechLanguage, Transcript } from './backend';
+import type { Project, RecordingStatus, Session, Settings, SetupStatus, SpeechDevice, SpeechLanguage, Transcript } from './backend';
 import { CompactDragStrip, TitleBar } from './chrome/TitleBar';
 import { platform as detectPlatform } from './chrome/windowApi';
 import type { Platform } from './chrome/windowApi';
@@ -147,6 +147,8 @@ export default function App({ platform: requested }: AppProps = {}) {
   const settingsShown = useRef(false);
   /** Setup reads sent, and the latest one whose reply is shown, so an older reply never replaces a newer one. */
   const setupReads = useRef({ sent: 0, shown: 0 });
+  /** The same for the speech device, which full setup reads, the measuring poll and the test all bring. */
+  const deviceReads = useRef({ sent: 0, shown: 0 });
 
   const recording = status.state === 'recording';
   /** The runtime transcribes one job at a time and refuses a new capture meanwhile, whichever recording it is. */
@@ -646,16 +648,35 @@ export default function App({ platform: requested }: AppProps = {}) {
     finally { setInstalling(false); }
   };
   /**
-   * A full setup reply always shows the tools; its language models only when no later read has shown the
-   * models already. The light poll shows only the models, and only while Settings is open.
+   * A full setup reply always shows the tools; its language models and speech device only when no later read
+   * has shown them already. The light polls show only the models or the device, and only while Settings is open.
    */
   const readSetup = async () => {
     const ticket = ++setupReads.current.sent;
+    const deviceTicket = ++deviceReads.current.sent;
     const value = await backend.setup();
     const stale = ticket < setupReads.current.shown;
     if (!stale) setupReads.current.shown = ticket;
-    setSetup(current => stale && current ? { ...value, languageModels: current.languageModels } : value);
+    const staleDevice = deviceTicket < deviceReads.current.shown;
+    if (!staleDevice) deviceReads.current.shown = deviceTicket;
+    setSetup(current => current ? {
+      ...value,
+      ...(stale && { languageModels: current.languageModels }),
+      ...(staleDevice && { speechDevice: current.speechDevice }),
+    } : value);
   };
+  /** Shows a speech device that the poll or the test read, unless a later read has shown one already. */
+  const readDevice = async (read: () => Promise<SpeechDevice>, whileShown: boolean) => {
+    const ticket = ++deviceReads.current.sent;
+    const device = await read();
+    if (ticket < deviceReads.current.shown || (whileShown && !settingsShown.current)) return;
+    deviceReads.current.shown = ticket;
+    setSetup(current => current && { ...current, speechDevice: device });
+  };
+  /** The light read Settings polls while the devices are measured. */
+  const pollSpeechDevice = () => readDevice(backend.getSpeechDevice, true);
+  /** Test the graphics card again: the reply, now measuring, starts the poll. */
+  const testSpeechDevices = () => readDevice(backend.testSpeechDevices, false);
   /** Settings reads it on opening and on Check again. */
   const refreshSetup = () => void readSetup().catch(reportFromSettings);
   /** The light read Settings polls while a language model downloads. */
@@ -843,7 +864,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       onOpen={openResult} fallbackFocusRef={sheet}/>
     <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fallbackFocusRef={sheet} theme={theme} onTheme={setTheme}
       setup={setup} installing={installing} onInstall={() => void install()} onCheckAgain={refreshSetup}
-      onPollLanguageModels={pollLanguageModels} onDownloadLanguageModels={backend.downloadLanguageModels} languages={languages}
+      onPollLanguageModels={pollLanguageModels} onDownloadLanguageModels={backend.downloadLanguageModels}
+      onPollSpeechDevice={pollSpeechDevice} onTestSpeechDevices={testSpeechDevices} languages={languages}
       settings={settings} onSaveSettings={saveSettings} error={settingsOpen ? dialogError : undefined}/>
     <NameDialog state={dialog} busy={busy} error={dialog ? dialogError : ''} fallbackFocusRef={sheet}
       onChange={value => setDialog(current => current && { ...current, value })} onClose={() => setDialog(null)} onSubmit={event => void submitDialog(event)}/>

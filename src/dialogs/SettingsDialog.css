@@ -111,6 +111,43 @@
 .settings-progress { height: 4px; margin-top: 2px; overflow: hidden; border-radius: var(--radius-pill); background: var(--color-divider); }
 .settings-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--color-accent); }
 
+/* The Model select sits under Language, 8px apart, as the two fields of one group; the model rows
+   start 6px below the last field. */
+.settings-transcription > .settings-row + .settings-row { margin-top: 8px; }
+.settings-transcription > .settings-row + .settings-status { margin-top: 6px; }
+
+/* Where transcription runs: one folded line under the models, "Runs on" as the Technical details
+   summary is set and the device in text colour; red with the warning icon once the card stopped.
+   Its marker is the native one at 8px, so the line reads as part of the section. With nothing to
+   unfold it is a plain line, set the same without the marker. */
+.settings-device { margin-top: 9px; }
+.settings-device[open] { padding-bottom: 4px; }
+.settings-device > summary,
+.settings-device-line {
+  width: fit-content;
+  padding: 6px 0;
+  border-radius: var(--radius-field);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-control);
+}
+.settings-device > summary { cursor: pointer; }
+.settings-device > summary::marker { font-size: 8px; }
+.settings-device > summary > :first-child { margin-left: 5px; }
+.settings-device > summary:hover .settings-device-label { color: var(--color-text); }
+.settings-device > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.settings-device-label { font-weight: var(--font-weight-strong); }
+.settings-device-name { margin: 0 3px; color: var(--color-text); font-weight: 500; }
+.settings-device[data-warning] > summary,
+.settings-device[data-warning] > summary:hover .settings-device-label,
+.settings-device[data-warning] .settings-device-name { color: var(--color-status-recording-text); }
+.settings-device[data-warning] .settings-device-name { font-weight: 400; }
+.settings-device > summary svg { width: 14px; height: 14px; margin-right: 5px; vertical-align: -2px; }
+.settings-device > .settings-issue { margin-top: 9px; line-height: 1.5; }
+.settings-device > .ui-switch-row { margin-top: 2px; }
+.settings-device > .settings-issue + .ui-switch-row { margin-top: 4px; }
+.settings-device > .settings-actions { margin-top: 9px; }
+.settings-fallback { margin-top: 6px; }
+
 .settings-tool-actions { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .settings-details { flex: 1; min-width: 0; }
 .settings-details > summary {

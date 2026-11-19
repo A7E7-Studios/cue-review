@@ -163,6 +163,52 @@ reads like bad hearing and neither the person nor the agent can tell what to cha
 - **THEN** each take carries its language code and whether it was detected
 - **PROOF** test: src-tauri/src/agent.rs::tests::the_transcript_reports_each_take_s_language
 
+### Requirement: A fast graphics card can run the larger model
+Settings SHALL offer a choice of model, Standard or Large (large-v3-turbo), on a computer whose
+graphics card transcribes with the large model no slower than its processor does with the small
+model, one run against one, and with Large chosen the app SHALL transcribe every take with it,
+held to the take's language, once the card has also run it twice at once, as the two tracks of a
+take run, because on such a card it costs no time, reads German and other languages clearly better
+than the small model, and can write the words of another language inside a take, which small.en
+cannot.
+
+#### Scenario: Settings offers the larger model on a fast graphics card
+- **GIVEN** a computer whose graphics card is fast enough for the larger model
+- **WHEN** the person opens Settings
+- **THEN** Settings offers the model choice with Standard chosen, and says that Large is a 1.6 GB
+  download
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::offers the larger model on a fast graphics card
+- **PROOF** desk: open
+
+#### Scenario: The larger model transcribes every language
+- **GIVEN** the larger model is chosen and its download has finished
+- **WHEN** a take is transcribed in English, German or any other language
+- **THEN** the larger model transcribes it on the graphics card, held to the take's language
+- **AND** until its download finishes the small models transcribe, and Settings shows its progress
+- **PROOF** test: src-tauri/src/deps.rs::tests::the_larger_model_transcribes_every_language_once_installed
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::shows the larger model's download progress
+- **PROOF** desk: open
+
+#### Scenario: Without the graphics card the small models transcribe
+- **GIVEN** the larger model is chosen and installed
+- **WHEN** the graphics card is turned off for transcription, or a run on it has failed
+- **THEN** takes are transcribed on the processor with the small models
+- **PROOF** test: src-tauri/src/deps.rs::tests::the_larger_model_never_runs_on_the_processor
+
+#### Scenario: Choosing Standard goes back to the small models
+- **GIVEN** Large is chosen
+- **WHEN** the person chooses Standard
+- **THEN** takes are transcribed with the small models again, and the large model stays installed
+- **PROOF** test: src-tauri/src/deps.rs::tests::standard_goes_back_to_the_small_models
+- **PROOF** desk: open
+
+#### Scenario: A slower computer is not offered the larger model
+- **GIVEN** a computer that transcribes on its processor, or whose graphics card is too slow for
+  the larger model
+- **WHEN** the person opens Settings
+- **THEN** Settings shows no model choice
+- **PROOF** test: src/dialogs/SettingsDialog.test.tsx::does not offer the larger model without a fast graphics card
+
 ### Requirement: The CLI installs and reports the language's models
 `cue setup --install` SHALL also download every model the chosen language needs, and `cue setup`
 SHALL report them as `languageModels`, because an agent setting up a computer without the app needs
