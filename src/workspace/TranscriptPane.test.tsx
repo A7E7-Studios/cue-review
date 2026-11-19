@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Transcript } from '../backend';
-import { germanChosenTranscript, germanRecordingTranscript, germanTwoTakeTranscript, transcript as phraseTranscript, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from '../stories/fixtures';
+import { germanChosenTranscript, germanRecordingTranscript, germanTwoTakeTranscript, oneThenTwoTracksSpokenMs, oneThenTwoTracksTranscript, transcript as phraseTranscript, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, twoLanguageTranscript,
+  twoTakeTranscript, twoTrackRecordingTranscript, twoTrackSpokenMs, twoTrackTranscript } from '../stories/fixtures';
 import { LIVE_NOTE, TranscriptPane } from './TranscriptPane';
 import type { TranscriptPaneProps } from './types';
 
@@ -13,6 +14,14 @@ const liveTranscript: Transcript = {
   takes: [{ index: 1, startMs: 0 }],
   segments: [...twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs), ...takeTwoLiveTranscript.segments],
 };
+/** The rows of `transcript` in the fixtures as the pane drew them before rows had tracks. */
+const ONE_TRACK_MARKUP = [
+  '<div class="cr-row is-current" data-row="0"><button type="button" class="cr-row-time" data-item="0:t" tabindex="0" aria-label="Seek to 0:00">0:00</button><div class="cr-row-body"><p class="cr-row-text"><button type="button" class="segment-text" data-item="0:s" tabindex="-1">The library feels clear and easy to navigate.</button></p></div></div>',
+  '<div class="cr-row" data-row="1"><button type="button" class="cr-row-time" data-item="1:t" tabindex="-1" aria-label="Seek to 0:05">0:05</button><div class="cr-row-body"><p class="cr-row-text"><span role="button" class="word" data-item="1:0" tabindex="-1" aria-label="Seek to When I select at 0:05">When I select</span> <span role="button" class="word" data-item="1:1" tabindex="-1" aria-label="Seek to this model, at 0:06">this model,</span> <span role="button" class="word" data-item="1:2" tabindex="-1" aria-label="Seek to the details should update alongside it. at 0:08">the details should update alongside it.</span></p></div></div>',
+  '<div class="cr-row" data-row="2"><button type="button" class="cr-row-time" data-item="2:t" tabindex="-1" aria-label="Seek to 0:12">0:12</button><div class="cr-row-body"><p class="cr-row-text"><button type="button" class="segment-text" data-item="2:s" tabindex="-1">The import action could be closer to the search field.</button></p></div></div>',
+  '<div class="cr-row" data-row="3"><button type="button" class="cr-row-time" data-item="3:t" tabindex="-1" aria-label="Seek to 0:19">0:19</button><div class="cr-row-body"><p class="cr-row-text"><button type="button" class="segment-text" data-item="3:s" tabindex="-1">Everything else is working as expected.</button></p></div></div>',
+  '<div class="cr-transcript-end" data-follow-end="true" aria-hidden="true"></div>',
+].join('');
 const scroller = () => document.querySelector<HTMLElement>('.cr-transcript-scroll')!;
 const tabStops = () => [...document.querySelectorAll<HTMLElement>('[data-item][tabindex="0"]:not(:disabled)')];
 
@@ -221,6 +230,132 @@ describe('TranscriptPane while recording', () => {
     expect(screen.queryByText(/detecting language/)).not.toBeInTheDocument();
     rerender(<TranscriptPane {...recording(germanRecordingTranscript, 'en')}/>);
     expect(screen.getByText('Take 2 · recording · English')).toBeVisible();
+  });
+});
+
+describe('TranscriptPane with two tracks', () => {
+  const rowOf = (name: string) => screen.getByRole('button', { name }).closest<HTMLElement>('.cr-row')!;
+  const tag = (row: HTMLElement) => row.querySelector('.cr-track-tag');
+  it('marks each row of a two-track take with its track', async () => {
+    const user = userEvent.setup();
+    const onSeek = vi.fn();
+    render(<TranscriptPane {...props({ transcript: twoTrackTranscript, timeMs: twoTrackSpokenMs, onSeek, languages: SPEECH_LANGUAGES })}/>);
+    const rows = [...document.querySelectorAll<HTMLElement>('.cr-row')];
+    // Every row carries its segment's track: the call's on the left, the reviewer's set in with the time after the words.
+    expect(rows.map(row => row.dataset.track)).toEqual(twoTrackTranscript.segments.map(segment => segment.track));
+    expect(rows.filter(row => row.dataset.track === 'microphone')).toHaveLength(5);
+    // No other mark at rest: no tag, no track name in the text.
+    expect(document.querySelector('.cr-track-tag')).toBeNull();
+    expect(screen.queryByText(/Microphone|Computer audio/)).not.toBeInTheDocument();
+    // The current row, the spoken word, past rows and word seek work on both sides.
+    const grid = screen.getByRole('button', { name: 'Seek to grid at 0:22' });
+    expect(grid).toHaveClass('spoken');
+    expect(rowOf('Seek to 0:21, microphone')).toHaveClass('is-current');
+    expect(rowOf('Seek to 0:16, microphone')).toHaveClass('is-past');
+    expect(rowOf('Seek to 0:11, computer audio')).toHaveClass('is-past');
+    expect(rowOf('Seek to 0:27, computer audio')).not.toHaveClass('is-past');
+    await user.click(screen.getByRole('button', { name: 'Seek to 0:38, microphone' }));
+    await user.click(screen.getByRole('button', { name: 'Seek to Okay, at 0:00' }));
+    expect(onSeek.mock.calls.map(call => call[0])).toEqual([38000, 0]);
+    // Find in transcript finds on both sides.
+    await user.click(screen.getByRole('button', { name: 'Find in transcript' }));
+    await user.type(screen.getByRole('searchbox', { name: 'Find in transcript' }), 'grid');
+    expect(screen.getByRole('status')).toHaveTextContent('1 of 4');
+    expect([...document.querySelectorAll<HTMLElement>('.cr-row.is-match')].map(row => row.dataset.track)).toEqual(['system', 'microphone', 'microphone', 'microphone']);
+  });
+  it("names a row's track on hover and focus and to a screen reader", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<><button>Before</button><TranscriptPane {...props({ transcript: twoTrackTranscript, timeMs: twoTrackSpokenMs, languages: SPEECH_LANGUAGES })}/></>);
+    // A screen reader hears the track with each row's time.
+    expect(screen.getByRole('button', { name: 'Seek to 0:00, computer audio' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Seek to 0:16, microphone' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Seek to 0:16' })).not.toBeInTheDocument();
+    // Hover: the tag above the row names its track, hidden from the reader who already heard it.
+    const mic = rowOf('Seek to 0:16, microphone');
+    await user.hover(mic);
+    expect(tag(mic)).toHaveTextContent(/^Microphone$/);
+    expect(tag(mic)).toHaveAttribute('aria-hidden', 'true');
+    expect(tag(mic)!.querySelector('svg')).not.toBeNull();
+    expect(document.querySelectorAll('.cr-track-tag')).toHaveLength(1);
+    await user.unhover(mic);
+    expect(tag(mic)).toBeNull();
+    // Keyboard focus into a row shows it too, and moves with the focus.
+    screen.getByRole('button', { name: 'Find in transcript' }).focus();
+    await user.tab();
+    const grid = screen.getByRole('button', { name: 'Seek to grid at 0:22' });
+    expect(grid).toHaveFocus();
+    expect(tag(rowOf('Seek to 0:21, microphone'))).toHaveTextContent('Microphone');
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('button', { name: 'Seek to 0:27, computer audio' })).toHaveFocus();
+    expect(tag(rowOf('Seek to 0:21, microphone'))).toBeNull();
+    expect(tag(rowOf('Seek to 0:27, computer audio'))).toHaveTextContent(/^Computer audio$/);
+    await user.tab({ shift: true });
+    await user.tab({ shift: true });
+    expect(document.querySelector('.cr-track-tag')).toBeNull();
+    // When the take's tracks differ in language the tag names the row's.
+    rerender(<><button>Before</button><TranscriptPane {...props({ transcript: twoLanguageTranscript, timeMs: twoTrackSpokenMs, languages: SPEECH_LANGUAGES })}/></>);
+    const call = rowOf('Seek to 0:27, computer audio');
+    await user.hover(call);
+    expect(tag(call)).toHaveTextContent('Computer audio · German');
+    await user.hover(rowOf('Seek to 0:38, microphone'));
+    expect(tag(rowOf('Seek to 0:38, microphone'))).toHaveTextContent('Microphone · English');
+  });
+  it('names the two languages at their sides of the take line when the tracks differ', () => {
+    const { rerender } = render(<TranscriptPane {...props({ transcript: twoLanguageTranscript, timeMs: twoTrackSpokenMs, languages: SPEECH_LANGUAGES })}/>);
+    const line = document.querySelector<HTMLElement>('.cr-take-divider')!;
+    expect(line).toHaveTextContent('Computer audio: German Take 1 · 0:00 · detected Microphone: English');
+    const [left, right] = line.querySelectorAll('b');
+    expect(left).toHaveTextContent('German');
+    expect(right).toHaveTextContent('English');
+    expect(line.querySelector('i')).toHaveTextContent(/^Take 1 · 0:00 · detected$/);
+    // The same language on both, or one known: the take line as before.
+    rerender(<TranscriptPane {...props({ transcript: twoTrackTranscript, timeMs: twoTrackSpokenMs, languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.getByText('Take 1 · 0:00 · English, detected')).toBeVisible();
+    rerender(<TranscriptPane {...props({ transcript: { ...twoLanguageTranscript, trackLanguages: { system: { language: 'de', languageDetected: true } } }, timeMs: twoTrackSpokenMs, languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.getByText('Take 1 · 0:00 · English, detected')).toBeVisible();
+    // While recording: the live take line splits once both are decided.
+    rerender(<TranscriptPane {...props({ mode: 'recording', status: 'recording', transcript: { ...twoTrackRecordingTranscript, trackLanguages: twoLanguageTranscript.trackLanguages }, timeMs: 63500, languages: SPEECH_LANGUAGES })}/>);
+    expect(document.querySelector('.cr-take-divider')).toHaveTextContent('Computer audio: German Take 1 · recording · detected Microphone: English');
+    expect(document.querySelector('.cr-take-divider')).toHaveAttribute('data-live');
+  });
+  it('shows one live box per side while both tracks are heard, with the note once', () => {
+    render(<TranscriptPane {...props({ mode: 'recording', status: 'recording', transcript: twoTrackRecordingTranscript, timeMs: 63500, languages: SPEECH_LANGUAGES })}/>);
+    expect(screen.getByText('Take 1 · recording · English, detected')).toBeVisible();
+    const tails = [...document.querySelectorAll<HTMLElement>('.cr-row.is-tail')];
+    expect(tails.map(row => row.dataset.track)).toEqual(['system', 'microphone']);
+    expect(tails[0]).toHaveTextContent('That number is in the dialog, but not on');
+    expect(tails[1]).toHaveTextContent('Then put it on the');
+    tails.forEach(tail => expect(tail.querySelector('.cr-row-text .cr-live-caret')).not.toBeNull());
+    expect(screen.getAllByText(LIVE_NOTE)).toHaveLength(1);
+    expect(within(tails[1]).getByText(LIVE_NOTE)).toBeVisible();
+    expect(within(tails[1]).getByRole('button', { name: 'Seek to 1:01, microphone' })).toBeDisabled();
+    // The finished rows of both tracks are ordinary rows.
+    expect(document.querySelectorAll('.cr-row:not(.is-tail)')).toHaveLength(10);
+    // One side quiet: its box goes, the other keeps the note.
+    cleanup();
+    render(<TranscriptPane {...props({ mode: 'recording', status: 'recording', transcript: { ...twoTrackRecordingTranscript, segments: twoTrackRecordingTranscript.segments.slice(0, -1) }, timeMs: 63500 })}/>);
+    const [only] = document.querySelectorAll<HTMLElement>('.cr-row.is-tail');
+    expect(document.querySelectorAll('.cr-row.is-tail')).toHaveLength(1);
+    expect(only).toHaveAttribute('data-track', 'system');
+    expect(within(only).getByText(LIVE_NOTE)).toBeVisible();
+  });
+  it('renders a one-track transcript exactly as before', async () => {
+    const user = userEvent.setup();
+    render(<TranscriptPane {...props({ transcript: phraseTranscript, timeMs: 0 })}/>);
+    expect(scroller().innerHTML).toBe(ONE_TRACK_MARKUP);
+    await user.hover(document.querySelector('.cr-row')!);
+    expect(scroller().innerHTML).toBe(ONE_TRACK_MARKUP);
+    cleanup();
+    // A one-track take before a two-track take keeps its plain rows.
+    render(<TranscriptPane {...props({ transcript: oneThenTwoTracksTranscript, timeMs: oneThenTwoTracksSpokenMs, languages: SPEECH_LANGUAGES })}/>);
+    const rows = [...document.querySelectorAll<HTMLElement>('.cr-row')];
+    expect(rows.slice(0, 4).map(row => row.dataset.track)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(screen.getByRole('button', { name: 'Seek to 0:00' })).toBeVisible();
+    expect(rows.slice(4).every(row => row.dataset.track)).toBe(true);
+    expect(screen.getByText('Take 1 · 0:00 · English, detected')).toBeVisible();
+    expect(screen.getByText('Take 2 · 0:24 · English, detected')).toBeVisible();
+    await user.hover(rows[0]);
+    expect(document.querySelector('.cr-track-tag')).toBeNull();
   });
 });
 

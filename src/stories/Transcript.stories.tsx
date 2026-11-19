@@ -4,7 +4,8 @@ import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test';
 import type { Segment, Transcript } from '../backend';
 import { TranscriptPane } from '../workspace/TranscriptPane';
 import type { TranscriptPaneProps } from '../workspace/types';
-import { germanChosenTranscript, germanRecordingTranscript, germanTwoTakeTranscript, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, twoTakeTranscript } from './fixtures';
+import { germanChosenTranscript, germanRecordingTranscript, germanTwoTakeTranscript, oneThenTwoTracksSpokenMs, oneThenTwoTracksTranscript, runOfTenSpokenMs, runOfTenTranscript, SPEECH_LANGUAGES, takeTwoLiveTranscript, takeTwoStartMs, twoLanguageTranscript, twoTakeTranscript,
+  twoTrackRecordingTranscript, twoTrackSpokenMs, twoTrackTranscript } from './fixtures';
 
 const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.startMs < takeTwoStartMs);
 const PHRASES = [
@@ -27,12 +28,16 @@ const longSegments: Segment[] = Array.from({ length: 480 }, (_, index) => {
 const longTranscript: Transcript = { segments: longSegments, takes: [{ index: 1, startMs: 0 }, { index: 2, startMs: 800000 }, { index: 3, startMs: 1800000 }] };
 const DURATIONS = { review: 134000, long: longSegments.length * 5000 };
 
-type Scenario = 'review' | 'recording-take-2' | 'recording-long' | 'recording-take-2-waiting' | 'processing' | 'error' | 'error-after-take' | 'empty' | 'long' | 'languages' | 'language-chosen' | 'recording-detecting';
+const SCENARIOS = ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'empty', 'long', 'languages', 'language-chosen', 'recording-detecting',
+  'two-tracks', 'two-tracks-run', 'two-languages', 'one-then-two-tracks', 'recording-two-tracks'] as const;
+type Scenario = typeof SCENARIOS[number];
+/** Where playback stands when a scenario opens: a spoken word in view. */
+const START: Partial<Record<Scenario, number>> = { long: 600000, 'two-tracks': twoTrackSpokenMs, 'two-tracks-run': runOfTenSpokenMs, 'two-languages': twoTrackSpokenMs, 'one-then-two-tracks': oneThenTwoTracksSpokenMs };
 interface Args { scenario: Scenario; playing: boolean }
 
 function Column({ scenario, playing: initiallyPlaying }: Args) {
   const long = scenario === 'long';
-  const [time, setTime] = useState(long ? 600000 : 33200);
+  const [time, setTime] = useState(START[scenario] ?? 33200);
   const [playing, setPlaying] = useState(initiallyPlaying);
   const [notice, setNotice] = useState('');
   const duration = long ? DURATIONS.long : DURATIONS.review;
@@ -59,6 +64,14 @@ function Column({ scenario, playing: initiallyPlaying }: Args) {
     'language-chosen': { ...base, mode: 'review', transcript: germanChosenTranscript },
     // Take 2 records under Auto and its language is not decided yet.
     'recording-detecting': { mode: 'recording', transcript: germanRecordingTranscript, timeMs: takeTwoStartMs + 8000, onSeek: setTime, status: 'recording', liveTake: { index: 2, startMs: takeTwoStartMs }, languages: SPEECH_LANGUAGES },
+    // Transcribed from the microphone and the computer's audio: the call on the left, the reviewer set in from the left.
+    'two-tracks': { ...base, mode: 'review', transcript: twoTrackTranscript },
+    'two-tracks-run': { ...base, mode: 'review', transcript: runOfTenTranscript },
+    // The call in German, the reviewer in English: the take line names each track's language at its side.
+    'two-languages': { ...base, mode: 'review', transcript: twoLanguageTranscript },
+    'one-then-two-tracks': { ...base, mode: 'review', transcript: oneThenTwoTracksTranscript },
+    // A first recording with both tracks producing live words: one live box per side, the note once.
+    'recording-two-tracks': { mode: 'recording', transcript: twoTrackRecordingTranscript, timeMs: 63500, onSeek: setTime, status: 'recording', languages: SPEECH_LANGUAGES },
   }[scenario] as TranscriptPaneProps;
   return <div style={{ height: '100vh', display: 'flex', justifyContent: 'flex-end', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
     <div style={{ flex: 1, minWidth: 0, padding: 24, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start', fontSize: 12.5, color: 'var(--color-text-secondary)' }}>
@@ -74,7 +87,7 @@ const meta = {
   title: 'Workspace/Transcript',
   component: Column,
   args: { scenario: 'review', playing: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-long', 'recording-take-2-waiting', 'processing', 'error', 'error-after-take', 'empty', 'long', 'languages', 'language-chosen', 'recording-detecting'] } },
+  argTypes: { scenario: { control: 'select', options: SCENARIOS } },
   render: args => <Column key={args.scenario} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Column>;
@@ -105,6 +118,56 @@ export const TakeLanguages: Story = {
 export const TakeLanguagesDark: Story = { args: { scenario: 'languages' }, globals: { theme: 'dark' } };
 export const TakeLanguageChosen: Story = { args: { scenario: 'language-chosen' } };
 export const RecordingDetectingLanguage: Story = { args: { scenario: 'recording-detecting' } };
+/** Two tracks: computer-audio rows as every row, microphone rows set in from the left with their time on the right. */
+export const TwoTracks: Story = {
+  args: { scenario: 'two-tracks' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('button', { name: 'Seek to 0:21, microphone' })).toBeVisible();
+    await expect(canvas.getByRole('button', { name: 'Seek to 0:27, computer audio' })).toBeVisible();
+  },
+};
+export const TwoTracksDark: Story = { args: { scenario: 'two-tracks' }, globals: { theme: 'dark' } };
+/** Hovering a row shows the tag that names its track; no text moves. */
+export const TwoTracksHover: Story = {
+  args: { scenario: 'two-tracks' },
+  play: async ({ canvasElement }) => {
+    const row = within(canvasElement).getByRole('button', { name: 'Seek to 0:16, microphone' }).closest<HTMLElement>('.cr-row')!;
+    await userEvent.hover(row);
+    await waitFor(() => expect(row.querySelector('.cr-track-tag')).toHaveTextContent('Microphone'));
+  },
+};
+/** Keyboard focus in a row shows the same tag. */
+export const TwoTracksFocus: Story = {
+  args: { scenario: 'two-tracks' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    canvas.getByRole('button', { name: 'Find in transcript' }).focus();
+    await userEvent.tab();
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}');
+    const time = canvas.getByRole('button', { name: 'Seek to 0:38, microphone' });
+    await expect(time).toHaveFocus();
+    await waitFor(() => expect(time.closest('.cr-row')!.querySelector('.cr-track-tag')).toHaveTextContent('Microphone'));
+  },
+};
+export const TwoTracksRunOfTen: Story = { args: { scenario: 'two-tracks-run' } };
+export const TwoTrackLanguages: Story = {
+  args: { scenario: 'two-languages' },
+  play: async ({ canvasElement }) => {
+    await expect(canvasElement.querySelector('.cr-take-divider')).toHaveTextContent('Computer audio: German Take 1 · 0:00 · detected Microphone: English');
+  },
+};
+export const TwoTrackLanguagesHover: Story = {
+  args: { scenario: 'two-languages' },
+  play: async ({ canvasElement }) => {
+    const row = within(canvasElement).getByRole('button', { name: 'Seek to 0:27, computer audio' }).closest<HTMLElement>('.cr-row')!;
+    await userEvent.hover(row);
+    await waitFor(() => expect(row.querySelector('.cr-track-tag')).toHaveTextContent('Computer audio · German'));
+  },
+};
+export const OneThenTwoTracks: Story = { args: { scenario: 'one-then-two-tracks' } };
+export const RecordingTwoTracks: Story = { args: { scenario: 'recording-two-tracks' } };
+export const RecordingTwoTracksDark: Story = { args: { scenario: 'recording-two-tracks' }, globals: { theme: 'dark' } };
 
 export const FindInTranscript: Story = {
   play: async ({ canvasElement }) => {

@@ -67,6 +67,13 @@ describe('recording transcript', () => {
     expect(merged.error).toBe('Live transcription paused.');
     expect(recordingTranscript({ segments: [segment(0, 'One')] }, { ...status, takeIndex: 2, takeOffsetMs: 10000, liveTranscript: undefined }).takes).toEqual([{ index: 1, startMs: 0 }]);
   });
+  it("keeps each track's language for the saved take and the take being recorded", () => {
+    const german = { language: 'de', languageDetected: true }, english = { language: 'en', languageDetected: true };
+    const merged = recordingTranscript({ ...english, trackLanguages: { system: german, microphone: english }, segments: [segment(0, 'One')] },
+      { state: 'recording', takeIndex: 2, takeOffsetMs: 10000, liveTranscript: { segments: [], trackLanguages: { system: german } } });
+    expect(merged.takes).toEqual([{ index: 1, startMs: 0, ...english, trackLanguages: { system: german, microphone: english } }]);
+    expect(merged.trackLanguages).toEqual({ system: german });
+  });
 });
 
 describe('shortcut matching', () => {

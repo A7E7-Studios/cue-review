@@ -166,13 +166,87 @@ pub struct Take {
 pub struct TakeMark {
     pub index: u32,
     pub start_ms: u64,
-    /// The language the take was transcribed in. `None` for a take without
-    /// words and in transcripts saved before takes kept their language.
+    /// The language the take was transcribed in: its microphone track's
+    /// when it has two tracks, or its system track's when the microphone has
+    /// no words. `None` for a take without words and in transcripts saved
+    /// before takes kept their language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Whether Auto found `language`; false when it was chosen in Settings.
     #[serde(default, skip_serializing_if = "is_false")]
     pub language_detected: bool,
+    /// Each track's language, for a take transcribed from two tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_languages: Option<TrackLanguages>,
+}
+
+/// One of the two audio tracks a take can be transcribed from. Serialized
+/// as `"microphone"` or `"system"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Track {
+    /// What the microphone heard: `mic.wav`.
+    Microphone,
+    /// What the computer played: `system.wav`.
+    System,
+}
+impl Track {
+    /// The take's audio file of this track.
+    pub fn file(self) -> &'static str {
+        match self {
+            Track::Microphone => "mic.wav",
+            Track::System => "system.wav",
+        }
+    }
+    /// `"microphone"` or `"system"`, as it is serialized.
+    pub fn name(self) -> &'static str {
+        match self {
+            Track::Microphone => "microphone",
+            Track::System => "system",
+        }
+    }
+}
+
+/// The language one track of a take was transcribed in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackLanguage {
+    pub language: String,
+    /// Whether Auto found `language`; false when it was chosen in Settings.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub language_detected: bool,
+}
+/// The languages of a take transcribed from two tracks. A track without
+/// words, or not decided yet while it records, has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackLanguages {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<TrackLanguage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<TrackLanguage>,
+}
+impl TrackLanguages {
+    /// The two tracks' languages, each with whether Auto found it; `None`
+    /// when neither track has one.
+    pub fn of(microphone: Option<(String, bool)>, system: Option<(String, bool)>) -> Option<Self> {
+        let language = |found: Option<(String, bool)>| {
+            found.map(|(language, language_detected)| TrackLanguage {
+                language,
+                language_detected,
+            })
+        };
+        let languages = Self {
+            microphone: language(microphone),
+            system: language(system),
+        };
+        (languages != Self::default()).then_some(languages)
+    }
+    /// The language a reader that knows one per take is given: the
+    /// microphone's, or the system's when the microphone has none.
+    pub fn first(&self) -> Option<&TrackLanguage> {
+        self.microphone.as_ref().or(self.system.as_ref())
+    }
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -221,6 +295,10 @@ pub struct Segment {
     pub end_ms: u64,
     pub text: String,
     pub words: Vec<Word>,
+    /// The track it was heard on, in a take transcribed from two tracks.
+    /// `None` in a take with one track and in transcripts made earlier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +310,12 @@ pub struct Transcript {
     /// Whether Auto found `language`; false when it was chosen in Settings.
     #[serde(default, skip_serializing_if = "is_false")]
     pub language_detected: bool,
+    /// Each track's language when the take was transcribed from two tracks;
+    /// `language` is then the microphone's, or the system's when the
+    /// microphone has no words. In a session with takes it is the first
+    /// take's, as `language` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_languages: Option<TrackLanguages>,
     pub status: Option<String>,
     pub error: Option<String>,
     /// Where each take starts on the session timeline. Empty for sessions
@@ -586,6 +670,7 @@ mod tests {
             start_ms: 150000,
             language: Some("de".into()),
             language_detected: true,
+            track_languages: None,
         });
         let value = serde_json::to_value(&transcript).unwrap();
         assert_eq!(
@@ -600,6 +685,58 @@ mod tests {
         let restored: Transcript = serde_json::from_value(value).unwrap();
         assert_eq!(restored.takes, transcript.takes);
         assert!(restored.language_detected);
+        // A take transcribed from two tracks: each row's track, and each
+        // track's language on the take and on the transcript.
+        let row = |track| Segment {
+            id: "segment-0".into(),
+            start_ms: 0,
+            end_ms: 10,
+            text: "Hi".into(),
+            words: Vec::new(),
+            track,
+        };
+        for (track, name) in [(Track::System, "system"), (Track::Microphone, "microphone")] {
+            assert_eq!(
+                serde_json::to_value(row(Some(track))).unwrap()["track"],
+                json!(name)
+            );
+            assert_eq!(track.name(), name);
+        }
+        assert!(serde_json::to_value(row(None))
+            .unwrap()
+            .get("track")
+            .is_none());
+        let read: Segment = serde_json::from_value(
+            json!({"id":"s","startMs":0,"endMs":1,"text":"","words":[],"track":"microphone"}),
+        )
+        .unwrap();
+        assert_eq!(read.track, Some(Track::Microphone));
+        assert_eq!(
+            (Track::Microphone.file(), Track::System.file()),
+            ("mic.wav", "system.wav")
+        );
+        let languages = TrackLanguages::of(Some(("de".into(), true)), Some(("en".into(), false)));
+        transcript.track_languages = languages.clone();
+        transcript.takes[1].track_languages = languages.clone();
+        let value = serde_json::to_value(&transcript).unwrap();
+        let expected = json!({"microphone":{"language":"de","languageDetected":true},
+            "system":{"language":"en"}});
+        assert_eq!(value["trackLanguages"], expected);
+        assert_eq!(value["takes"][1]["trackLanguages"], expected);
+        assert!(value["takes"][0].get("trackLanguages").is_none());
+        let restored: Transcript = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.track_languages, languages);
+        assert_eq!(restored.takes, transcript.takes);
+        // A track without words has no language, and without either there
+        // is nothing to write; the first is the microphone's when it has one.
+        assert_eq!(TrackLanguages::of(None, None), None);
+        let system_only = TrackLanguages::of(None, Some(("en".into(), true))).unwrap();
+        assert_eq!(
+            serde_json::to_value(&system_only).unwrap(),
+            json!({"system":{"language":"en","languageDetected":true}})
+        );
+        assert_eq!(system_only.first().unwrap().language, "en");
+        assert_eq!(languages.unwrap().first().unwrap().language, "de");
 
         let mut status = RecordingStatus {
             state: "idle".into(),
