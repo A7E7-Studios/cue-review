@@ -2419,6 +2419,7 @@ Speech segment 0: start = 1.0, end = 2.0
         // larger model.
         let measured = Measured {
             computer: Default::default(),
+            sample: deps::SAMPLE.into(),
             model: "small".into(),
             processor_ms: 2_700,
             cards: vec![CardTime {

@@ -928,6 +928,10 @@ pub struct Measured {
     /// The computer it was made on: when that changes, the devices are
     /// measured again.
     pub computer: Computer,
+    /// What was transcribed: [`SAMPLE`]. A measurement made on another
+    /// sample, or saved before this field, is made again.
+    #[serde(default)]
+    pub sample: String,
     /// The model the sample was transcribed with: `small`, else `small.en`,
     /// else `base` ([`sample_model`]).
     pub model: String,
@@ -1027,7 +1031,8 @@ fn offers_large(processor_ms: u64, card_ms: u64) -> bool {
     card_ms * 3 <= processor_ms * 2
 }
 /// Whether the devices are to be measured: nothing was saved, or it was
-/// saved on another computer than `now`, or with base while `model`, the
+/// saved on another computer than `now`, or on another sample than
+/// [`SAMPLE`], or with base while `model`, the
 /// one the sample is timed with now ([`sample_model`]), is a small model: a
 /// measurement made before the small models were there is made again with
 /// one. Small and small.en are the same size, so one measured with either
@@ -1035,6 +1040,7 @@ fn offers_large(processor_ms: u64, card_ms: u64) -> bool {
 fn needs_measuring(saved: Option<&Measured>, now: &Computer, model: Option<&SpeechModel>) -> bool {
     saved.is_none_or(|saved| {
         saved.computer != *now
+            || saved.sample != SAMPLE
             || (!small_sized(&saved.model) && model.is_some_and(|model| small_sized(model.name)))
     })
 }
@@ -1118,6 +1124,7 @@ fn measure_with(
     }
     Ok(Some(Measured {
         computer,
+        sample: SAMPLE.into(),
         model: model.name.into(),
         processor_ms,
         chosen: fastest(processor_ms, &cards),
@@ -1411,18 +1418,35 @@ pub fn claim_measuring(asked: bool) -> Option<Arc<AtomicBool>> {
 pub fn measure_devices(cancel: &AtomicBool) {
     let asked = locked_measuring(measuring_state()).asked;
     let finished = match sample_file() {
-        Some(sample) => {
-            let models = models_dir();
-            let threads = crate::transcribe::whole_take_threads();
-            let sampler = |on: On, model: &'static SpeechModel| {
-                let Ok(command) =
-                    sample_command(on, &model.path_in(&models), model.dtw, &sample, threads)
-                else {
-                    return Ok(Run::default());
-                };
-                run_sample(command, cancel, SAMPLE_TIMEOUT)
+        Some(jfk) => {
+            // A scratch file: the runtime folder may be read-only.
+            let sample =
+                std::env::temp_dir().join(format!("cuereview-sample-{}.wav", uuid::Uuid::new_v4()));
+            let finished = match twice(&jfk, &sample) {
+                Ok(()) => {
+                    let models = models_dir();
+                    let threads = crate::transcribe::whole_take_threads();
+                    let sampler = |on: On, model: &'static SpeechModel| {
+                        let Ok(command) = sample_command(
+                            on,
+                            &model.path_in(&models),
+                            model.dtw,
+                            &sample,
+                            threads,
+                        ) else {
+                            return Ok(Run::default());
+                        };
+                        run_sample(command, cancel, SAMPLE_TIMEOUT)
+                    };
+                    measure_into(&data_root(), this_computer(), asked, &models, &sampler).is_ok()
+                }
+                Err(error) => {
+                    eprintln!("The devices were not measured: {error}");
+                    true
+                }
             };
-            measure_into(&data_root(), this_computer(), asked, &models, &sampler).is_ok()
+            let _ = fs::remove_file(&sample);
+            finished
         }
         None => true,
     };
@@ -1452,6 +1476,10 @@ fn wake_measuring() {
     }
 }
 
+/// What every run of a measurement transcribes: whisper.cpp's `jfk.wav`
+/// played twice back to back, 22 s, as long as a stretch, so loading the
+/// model, 1.6 GB for the larger one, does not decide the time.
+pub(crate) const SAMPLE: &str = "jfk.wav twice";
 /// whisper.cpp's own sample, 11 s of speech, in the runtime folder.
 fn sample_file() -> Option<PathBuf> {
     let sample = locate("whisper-cli").ok()?.parent()?.join("jfk.wav");
@@ -1465,9 +1493,38 @@ fn sample_model(models: &Path) -> Option<&'static SpeechModel> {
         .into_iter()
         .find(|model| model.installed_in(models))
 }
+/// Writes [`SAMPLE`]: `jfk`'s speech twice back to back into `target`. Its
+/// header must say 16 kHz mono 16-bit PCM, what the speech runtime takes;
+/// anything else is refused and nothing is measured.
+fn twice(jfk: &Path, target: &Path) -> Result<(), String> {
+    let mut reader = hound::WavReader::open(jfk).map_err(|e| format!("{}: {e}", jfk.display()))?;
+    let spec = reader.spec();
+    if (
+        spec.channels,
+        spec.sample_rate,
+        spec.bits_per_sample,
+        spec.sample_format,
+    ) != (1, 16_000, 16, hound::SampleFormat::Int)
+    {
+        return Err(format!(
+            "{} is not 16 kHz mono 16-bit PCM: {spec:?}",
+            jfk.display()
+        ));
+    }
+    let samples = reader
+        .samples::<i16>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut writer = hound::WavWriter::create(target, spec).map_err(|e| e.to_string())?;
+    for &sample in samples.iter().chain(&samples) {
+        writer.write_sample(sample).map_err(|e| e.to_string())?;
+    }
+    writer.finalize().map_err(|e| e.to_string())
+}
 /// How long one run of the sample may take; a run still going then counts as
-/// failed.
-const SAMPLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// failed. Generous: the plain build on a slow processor takes many times
+/// the sample's 22 s.
+const SAMPLE_TIMEOUT: Duration = Duration::from_secs(180);
 /// The command of one run of the sample.
 fn sample_command(
     on: On,
@@ -2613,8 +2670,24 @@ whisper_print_timings:    total time =  2541.21 ms
         assert_eq!((saved.chosen, saved.model.as_str()), (Some(0), "small"));
         let file = fs::read_to_string(root.path().join("speech-device.json")).unwrap();
         assert!(file.contains("\"processorMs\": 2700"), "{file}");
+        assert_eq!(saved.sample, "jfk.wav twice");
         // Later starts use it without measuring.
         assert!(!needs_measuring(Some(&saved), &computer(), Some(&SMALL)));
+        // One made on another sample is made again: a single jfk.wav, as
+        // before, or a file without the field.
+        let single = Measured {
+            sample: "jfk.wav".into(),
+            ..saved.clone()
+        };
+        assert!(needs_measuring(Some(&single), &computer(), Some(&SMALL)));
+        let mut old = serde_json::to_value(&saved).unwrap();
+        old.as_object_mut().unwrap().remove("sample");
+        let old: Measured = serde_json::from_value(old).unwrap();
+        assert!(needs_measuring(Some(&old), &computer(), Some(&SMALL)));
+        save_measured(root.path(), &single);
+        measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
+        assert_eq!(bench.runs().len(), 6);
+        assert_eq!(load_measured(root.path()).unwrap().sample, "jfk.wav twice");
         measure_into(root.path(), computer(), false, installed.path(), &sample).unwrap();
         assert!(bench.runs().is_empty());
         // A new version of the app, another runtime, an updated driver, a
@@ -3460,6 +3533,81 @@ whisper_print_timings:    total time =  2541.21 ms
             let verbatim = PathBuf::from(format!(r"\\?\{}", plain.display()));
             assert_eq!(build_key(&verbatim), read);
         }
+    }
+
+    #[test]
+    fn the_sample_is_jfk_twice_back_to_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = |name: &str, spec: hound::WavSpec, count: i32| {
+            let path = dir.path().join(name);
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            for sample in 0..count {
+                match spec.sample_format {
+                    hound::SampleFormat::Int => writer.write_sample(sample as i16).unwrap(),
+                    hound::SampleFormat::Float => writer.write_sample(sample as f32).unwrap(),
+                }
+            }
+            writer.finalize().unwrap();
+            path
+        };
+        let speech = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let jfk = wav("jfk.wav", speech, 1_600);
+        let target = dir.path().join("twice.wav");
+        twice(&jfk, &target).unwrap();
+        let reader = hound::WavReader::open(&target).unwrap();
+        assert_eq!(reader.spec(), speech);
+        assert_eq!(reader.duration(), 3_200);
+        let samples: Vec<i16> = reader.into_samples().map(Result::unwrap).collect();
+        let once: Vec<i16> = (0..1_600).collect();
+        assert_eq!(samples, [once.clone(), once].concat());
+        // The header: the RIFF size and the data chunk's.
+        let bytes = fs::read(&target).unwrap();
+        assert_eq!(bytes.len(), 44 + 6_400);
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            36 + 6_400
+        );
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 6_400);
+        // Anything but 16 kHz mono 16-bit PCM, or no file, measures nothing.
+        for (name, spec) in [
+            (
+                "stereo.wav",
+                hound::WavSpec {
+                    channels: 2,
+                    ..speech
+                },
+            ),
+            (
+                "44100.wav",
+                hound::WavSpec {
+                    sample_rate: 44_100,
+                    ..speech
+                },
+            ),
+            (
+                "float.wav",
+                hound::WavSpec {
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                    ..speech
+                },
+            ),
+        ] {
+            let other = wav(name, spec, 160);
+            let refused = dir.path().join(format!("twice-{name}"));
+            assert!(twice(&other, &refused).is_err(), "{name}");
+            assert!(!refused.exists(), "{name}");
+        }
+        assert!(twice(&dir.path().join("missing.wav"), &target).is_err());
+        fs::write(dir.path().join("broken.wav"), b"RIFF").unwrap();
+        assert!(twice(&dir.path().join("broken.wav"), &target).is_err());
     }
 
     #[test]

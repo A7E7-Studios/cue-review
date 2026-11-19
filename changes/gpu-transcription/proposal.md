@@ -75,6 +75,11 @@ the pinned revision, on ten minutes of German speech with the app's own argument
   two at once on the RTX 5090, against 3.5 s and 4.8 s for small on the processor. Rejected: the
   slower of two runs at once against one processor run, which passes here by 0.2 s; timing the
   processor two at once as well.
+- **Q25 The sample's length**: every sample run hears `jfk.wav` twice back to back, about 22 s,
+  as long as a stretch. On `jfk.wav` once (11 s), loading the 1.6 GB model is so much of the run
+  that Large against the processor with small flipped between measurements on the owner's PC
+  (Large 1.8 to 2.8 s, the processor 2.3 to 4.4 s), while on 20 s of German Large took 2.3 s
+  against 3.5 s. Rejected: keeping 11 s with a margin picked by hand; keeping it as built.
 - **Look**: Model choice (`look.md`): a Model select, Standard or Large, and one folded "Runs on"
   line holding the switch. Rejected: two switches; a Graphics card section of its own.
 - **Another engine**: faster-whisper (CTranslate2) was weighed on the owner's question and not
