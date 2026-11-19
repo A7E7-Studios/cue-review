@@ -88,8 +88,9 @@ the pinned revision, on ten minutes of German speech with the app's own argument
   of a card's first Vulkan run (16 s here) off the first recording.
 - The larger model never runs on the processor: with the switch off or a failed card, the small
   models transcribe, so both stay installed.
-- The words shown while recording, the stretches and the pass after Stop all follow the chosen
-  device; the grey live guess and the refining pass stay as they are.
+- The words shown while recording, the stretches, the pass after Stop, Retry, `cue transcribe`
+  and the refining pass all follow the chosen device; the grey live guess and language detection
+  stay on the processor, where they are as fast.
 - The build server needs the Vulkan SDK and a short build path. That is a workflow change under
   `.github/`, a protected path, so the owner merges this pull request.
 - English on the larger model rests on published averages; the local English sample went the
