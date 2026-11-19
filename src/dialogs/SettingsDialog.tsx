@@ -208,11 +208,26 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   useEffect(() => { if (open) { setSaved(''); setLanguageProblem(''); setModelProblem(''); setDeviceProblem(''); setUnfolded(stopped); } }, [open]);
   useEffect(() => { if (stopped) setUnfolded(true); }, [stopped]);
 
-  // While a language model downloads, the states are read about each second so its progress moves;
-  // while the devices are measured, the device is, so the line changes once the measurement ends.
   const models = setup?.languageModels ?? [];
+  const large = models.find(model => model.model === LARGE);
+  /** Transcription runs on the graphics card now; the switch counts at once, before the device is read again. */
+  const onCard = cardOn && device?.kind === 'graphicsCard';
+  /** Large transcribes now, as the backend decided once it tried Large on the card. */
+  const largeInUse = onCard && !!device?.largeInUse && large?.state === 'ready';
+  /** Large is installed and chosen on a card in use, and not yet tried there: the backend tries it within seconds. */
+  const largeTrying = large?.state === 'ready' && onCard && !device?.largeInUse && !device?.largeSlow && !measuring;
+
+  // While a language model downloads, the states are read about each second so its progress moves;
+  // while the devices are measured or Large is tried, the device is, so the line and the note follow.
   useEverySecond(open && models.some(model => model.state === 'downloading'), readModel);
-  useEverySecond(open && measuring, readDevice);
+  useEverySecond(open && (measuring || largeTrying), readDevice);
+  // A download that ends (downloading, then ready or failed) can change what the backend transcribes with: one read.
+  const downloadingBefore = useRef<LanguageModel['model'][]>([]);
+  useEffect(() => {
+    const ended = downloadingBefore.current.some(name => { const state = models.find(model => model.model === name)?.state; return state === 'ready' || state === 'failed'; });
+    downloadingBefore.current = models.filter(model => model.state === 'downloading').map(model => model.model);
+    if (open && ended) void readDevice();
+  }, [setup?.languageModels, open]);
 
   // Choosing saves at once and keeps the vocabulary as stored; Auto saves no language. The backend
   // has marked the language's models downloading by the time it returns, so one read starts the progress.
@@ -277,7 +292,6 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   const auto = chosen === AUTO;
   const groups = languageGroups(languages, auto ? undefined : chosen);
   const named = groups.flat().find(item => item.code === chosen)?.name ?? chosen;
-  const large = models.find(model => model.model === LARGE);
   const small = models.filter(model => model.model !== LARGE);
   const waiting = models.filter(model => model.state !== 'ready');
   const waitingSmall = small.filter(model => model.state !== 'ready');
@@ -286,11 +300,8 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
   const scope = baseScope(auto, waitingSmall);
   const smallTranscribe = smallModelsTranscribe(small);
 
-  /** Transcription runs on the graphics card now; the switch counts at once, before the device is read again. */
-  const onCard = cardOn && device?.kind === 'graphicsCard';
   /** The Model select: offered on a card fast enough for Large, and kept while Large is saved so Standard can be chosen again. */
   const modelOffered = !!device?.largeOffered || storedModel === LARGE_CHOICE;
-  const largeInUse = large?.state === 'ready' && onCard && !device?.largeSlow;
   /** With Large in use, the small models move into the device's fold as the fallback. */
   const fallbackFolded = largeInUse && small.length > 0 && !waitingSmall.length;
   const rows = fallbackFolded ? models.filter(model => model.model === LARGE) : models;
@@ -307,7 +318,8 @@ export function SettingsDialog({ open, onClose, fallbackFocusRef, theme, onTheme
     if (!waiting.length) {
       if (large) {
         if (largeInUse) return 'The large model transcribes every language on the graphics card.';
-        if (device?.largeSlow && onCard) return `On this graphics card the large model is slower than the processor with the small models, so ${smallTranscribe}.`;
+        if (device?.largeSlow && onCard) return `The large model did not keep up on this graphics card, so ${smallTranscribe}.`;
+        if (largeTrying) return `Large is being tried on the graphics card; until then, ${smallTranscribe}.`;
         if (!cardOn) return `With the graphics card off, ${smallTranscribe}.`;
         if (stopped) return `With the graphics card stopped, ${smallTranscribe}.`;
         return `Without the graphics card, ${smallTranscribe}.`;

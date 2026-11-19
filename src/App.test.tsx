@@ -2028,9 +2028,9 @@ describe('local setup recovery and request races', () => {
   });
   it('tests the graphics card again and reads the device until the measurement ends', async () => {
     const card = { name: 'NVIDIA GeForce RTX 5090', stopped: true };
-    const stopped: SpeechDevice = { state: 'ready', kind: 'processor', card, largeOffered: true, largeSlow: false, measurable: true };
+    const stopped: SpeechDevice = { state: 'ready', kind: 'processor', card, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
     const measuring: SpeechDevice = { ...stopped, state: 'measuring' };
-    const measured: SpeechDevice = { state: 'ready', kind: 'graphicsCard', name: card.name, card: { ...card, stopped: false }, largeOffered: true, largeSlow: false, measurable: true };
+    const measured: SpeechDevice = { state: 'ready', kind: 'graphicsCard', name: card.name, card: { ...card, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
     setup = { ...readySetup, speechDevice: stopped };
     const user = await ready();
     backend.testSpeechDevices.mockResolvedValue(measuring);

@@ -36,6 +36,8 @@ const languageModels = (): LanguageModel[] => {
   if (advancing) {
     const receivedBytes = modelStates[advancing].receivedBytes + Math.ceil(TOTAL_BYTES[advancing] / 16);
     modelStates[advancing] = receivedBytes >= TOTAL_BYTES[advancing] ? READY : { ...modelStates[advancing], receivedBytes };
+    // As the app does, a finished large model is tried on the card before it transcribes.
+    if (advancing === 'large-v3-turbo' && modelStates[advancing].state === 'ready') deviceFacts = { ...deviceFacts, largeInUse: false, tries: 0 };
     // The next missing model follows once one finishes.
     const next = models.find(model => modelStates[model].state === 'missing');
     if (modelStates[advancing].state === 'ready' && next && scenario !== 'setup') modelStates[next] = { state: 'downloading', receivedBytes: 0, advancing: true };
@@ -53,33 +55,39 @@ export function configureLanguageModels(language: string | undefined, states: Pa
 
 // Where transcription runs, as `get_setup_status`, `get_speech_device` and `test_speech_devices` report it.
 // A measurement the workshop starts with Test the graphics card again ends after three reads with the card
-// working again; a configured one stays measuring, for a steady look. The switch sets where it runs.
+// working again; a configured one stays measuring, for a steady look. The switch sets where it runs. A large
+// model the workshop downloads is tried on the card for two reads, then transcribes; a configured one stays.
 export const GRAPHICS_CARD = 'NVIDIA GeForce RTX 5090';
-type DeviceFacts = Pick<SpeechDevice, 'state' | 'card' | 'largeOffered' | 'largeSlow' | 'measurable'> & { reads?: number };
+/** `largeInUse`: Large was tried on the card and keeps up, so it transcribes while chosen, installed and the card in use. */
+type DeviceFacts = Pick<SpeechDevice, 'state' | 'card' | 'largeOffered' | 'largeSlow' | 'largeInUse' | 'measurable'> & { reads?: number; tries?: number };
 /**
  * The devices' measured facts the stories start from (changes/gpu-transcription/look.md, every state drawn): a Windows
  * runtime with its graphics-card build, except `noGraphicsBuild`.
  */
 export const SPEECH_DEVICES = {
   /** A graphics card fast enough for Large. */
-  fastCard: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: false }, largeOffered: true, largeSlow: false, measurable: true },
+  fastCard: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true },
+  /** The same card, Large tried on it and keeping up. */
+  largeInUse: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: true, measurable: true },
   /** No card the speech runtime can use, or none faster than the processor. */
-  processor: { state: 'ready', largeOffered: false, largeSlow: false, measurable: true },
+  processor: { state: 'ready', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true },
   /** The first measurement, still running. */
-  measuring: { state: 'measuring', largeOffered: false, largeSlow: false, measurable: true },
+  measuring: { state: 'measuring', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true },
   /** The fast card stopped during a transcription. */
-  cardStopped: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: true }, largeOffered: true, largeSlow: false, measurable: true },
+  cardStopped: { state: 'ready', card: { name: GRAPHICS_CARD, stopped: true }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true },
   /** macOS, Linux, or a Windows runtime without the graphics-card build: nothing to measure. */
-  noGraphicsBuild: { state: 'ready', largeOffered: false, largeSlow: false, measurable: false },
+  noGraphicsBuild: { state: 'ready', largeOffered: false, largeSlow: false, largeInUse: false, measurable: false },
 } satisfies Record<string, DeviceFacts>;
 let deviceFacts: DeviceFacts = SPEECH_DEVICES.processor;
 const speechDevice = (advance = false): SpeechDevice => {
   if (advance && deviceFacts.reads !== undefined && ++deviceFacts.reads >= 3) {
     deviceFacts = { ...deviceFacts, state: 'ready', card: deviceFacts.card && { ...deviceFacts.card, stopped: false }, reads: undefined };
   }
+  if (advance && deviceFacts.tries !== undefined && ++deviceFacts.tries >= 2) deviceFacts = { ...deviceFacts, largeInUse: true, tries: undefined };
   const { state, card, largeOffered, largeSlow, measurable } = deviceFacts;
   const onCard = state === 'ready' && !!card && !card.stopped && settings.graphicsCard !== false;
-  return structuredClone({ state, kind: onCard ? 'graphicsCard' : 'processor', name: onCard ? card.name : undefined, card, largeOffered, largeSlow, measurable });
+  const largeInUse = deviceFacts.largeInUse && !largeSlow && onCard && settings.model === 'large' && modelStates['large-v3-turbo'].state === 'ready';
+  return structuredClone({ state, kind: onCard ? 'graphicsCard' : 'processor', name: onCard ? card.name : undefined, card, largeOffered, largeSlow, largeInUse, measurable });
 };
 /** The Settings stories' measured devices, and the model and switch chosen in Settings. */
 export function configureSpeechDevice(facts: DeviceFacts, choices: Pick<Settings, 'model' | 'graphicsCard'> = {}) {

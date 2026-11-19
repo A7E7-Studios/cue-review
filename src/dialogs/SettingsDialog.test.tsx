@@ -47,11 +47,11 @@ const modelRow = (name: 'English' | 'Multilingual' | 'Large') => transcription()
 
 const CARD = 'NVIDIA GeForce RTX 5090';
 /** A graphics card fast enough for Large, transcribing; changed where told. */
-const fastCard = (facts: Partial<SpeechDevice> = {}): SpeechDevice => ({ state: 'ready', kind: 'graphicsCard', name: CARD, card: { name: CARD, stopped: false }, largeOffered: true, largeSlow: false, measurable: true, ...facts });
-const PROCESSOR: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, measurable: true };
-const MEASURING: SpeechDevice = { state: 'measuring', kind: 'processor', largeOffered: false, largeSlow: false, measurable: true };
-const STOPPED: SpeechDevice = { state: 'ready', kind: 'processor', card: { name: CARD, stopped: true }, largeOffered: true, largeSlow: false, measurable: true };
-const NO_GRAPHICS_BUILD: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, measurable: false };
+const fastCard = (facts: Partial<SpeechDevice> = {}): SpeechDevice => ({ state: 'ready', kind: 'graphicsCard', name: CARD, card: { name: CARD, stopped: false }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true, ...facts });
+const PROCESSOR: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true };
+const MEASURING: SpeechDevice = { state: 'measuring', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: true };
+const STOPPED: SpeechDevice = { state: 'ready', kind: 'processor', card: { name: CARD, stopped: true }, largeOffered: true, largeSlow: false, largeInUse: false, measurable: true };
+const NO_GRAPHICS_BUILD: SpeechDevice = { state: 'ready', kind: 'processor', largeOffered: false, largeSlow: false, largeInUse: false, measurable: false };
 /** Auto's two models ready, unless other models are given, on the given device. */
 const on = (speechDevice: SpeechDevice, setup: SetupStatus = auto()): SetupStatus => ({ ...setup, speechDevice });
 /** Large chosen: the large model first, in the given state, then Auto's two ready. */
@@ -523,7 +523,7 @@ describe('SettingsDialog: the graphics card', () => {
   it('turns the graphics card off for transcription', async () => {
     const user = userEvent.setup();
     let reject = false;
-    render(<Harness initial={{ vocabulary: 'Figtree', model: 'large' }} setup={on(fastCard(), withLarge())}
+    render(<Harness initial={{ vocabulary: 'Figtree', model: 'large' }} setup={on(fastCard({ largeInUse: true }), withLarge())}
       save={settings => reject ? Promise.reject('Settings could not be saved: access is denied.') : Promise.resolve(settings)}/>);
     await unfold(user);
     expect(cardSwitch()).toHaveAttribute('aria-checked', 'true');
@@ -633,8 +633,17 @@ describe('SettingsDialog: the graphics card', () => {
     expect(select).toHaveDisplayValue('Standard');
     unmount();
 
-    // Large in use: its row first, and the small models in the fold as the fallback.
-    const inUse = render(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge())}/>);
+    // Large downloaded but not yet tried on the card: it reads Ready, and the small models transcribe until it has been.
+    const tried = render(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge())}/>);
+    expect(modelRow('Large')).toHaveTextContent('Ready');
+    expect(modelRow('Large')).toHaveAttribute('data-available');
+    expect(transcription().getByText('Large is being tried on the graphics card; until then, the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText('The large model transcribes every language on the graphics card.')).not.toBeInTheDocument();
+    expect(fold()).not.toContainElement(modelRow('English'));
+    tried.unmount();
+
+    // Large in use, as the backend says: its row first, and the small models in the fold as the fallback.
+    const inUse = render(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeInUse: true }), withLarge())}/>);
     expect(transcription().getAllByText(/ model$/).map(item => item.textContent)).toEqual(['Large model', 'English model', 'Multilingual model']);
     expect(modelRow('Large')).toHaveTextContent('Ready');
     expect(modelRow('Large')).toHaveAttribute('data-available');
@@ -645,9 +654,11 @@ describe('SettingsDialog: the graphics card', () => {
     expect(within(fold()).getByText('Fallback when the graphics card is off:')).toBeVisible();
     expect(modelRow('English')).toBeVisible();
     expect(modelRow('Multilingual')).toHaveTextContent('Ready');
-    // Slower on this card than the processor with the small model: said plainly, and the small models stay in the list.
+    // Tried and did not keep up (slower than the processor, or too big beside a second track): said plainly, and the
+    // small models stay in the list.
     inUse.rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeSlow: true }), withLarge())}/>);
-    expect(transcription().getByText('On this graphics card the large model is slower than the processor with the small models, so the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().getByText('The large model did not keep up on this graphics card, so the English and multilingual models transcribe.')).toBeVisible();
+    expect(transcription().queryByText(/being tried/)).not.toBeInTheDocument();
     expect(fold()).not.toContainElement(modelRow('English'));
     inUse.unmount();
 
@@ -692,19 +703,35 @@ describe('SettingsDialog: the graphics card', () => {
     expect(modelRow('Large')).toHaveTextContent('Downloading · 1,200 of 1,625 MB');
     act(() => { vi.advanceTimersByTime(1000); });
     expect(handlers.poll).toHaveBeenCalledTimes(2);
-    // Once it is ready, the reading stops.
+    expect(handlers.pollDevice).not.toHaveBeenCalled();
+    // Once it is ready, the models are no longer read; the device is read at once, then each second while the
+    // backend tries Large on the card, until it is in use.
     await act(async () => {});
     rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge())}/>);
     expect(modelRow('Large')).toHaveTextContent('Ready');
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(handlers.pollDevice).toHaveBeenCalledOnce();
+    expect(transcription().getByText('Large is being tried on the graphics card; until then, the English and multilingual models transcribe.')).toBeVisible();
+    await act(async () => {});
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(2);
+    await act(async () => {});
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(3);
+    await act(async () => {});
+    rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard({ largeInUse: true }), withLarge())}/>);
+    expect(transcription().getByText('The large model transcribes every language on the graphics card.')).toBeVisible();
     act(() => { vi.advanceTimersByTime(5000); });
     expect(handlers.poll).toHaveBeenCalledTimes(2);
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(3);
     vi.useRealTimers();
     unmount();
 
-    // A failed download says so as the other rows do, and one Try again fetches it.
+    // A failed download says so as the other rows do, and one Try again fetches it; its end is a reason to read the device too.
     const user = userEvent.setup();
-    render(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge({ state: 'failed', receivedBytes: 0, error: 'The download was cut off.' }))}/>);
+    const failed = render(<Harness initial={{ model: 'large' }} setup={downloading(640_000_000)}/>);
+    failed.rerender(<Harness initial={{ model: 'large' }} setup={on(fastCard(), withLarge({ state: 'failed', receivedBytes: 0, error: 'The download was cut off.' }))}/>);
+    expect(handlers.pollDevice).toHaveBeenCalledTimes(4);
     expect(modelRow('Large')).toHaveTextContent('Download failed');
     expect(modelRow('Large')!.nextElementSibling).toHaveTextContent('The download was cut off. The English and multilingual models transcribe until it is installed.');
     await user.click(screen.getByRole('button', { name: 'Try again' }));

@@ -79,8 +79,16 @@ export interface SpeechDevice {
   card?: { name: string; stopped: boolean };
   /** The card ran the sample in two thirds of the processor's time or less, so Settings offers Large. While measuring, the previous result's. */
   largeOffered: boolean;
-  /** Large is installed and was timed on the card slower than the processor with the small model, so the small models transcribe. */
+  /**
+   * Large was tried on the card after its download and did not keep up: slower than the processor with the small
+   * model, or too big beside a second track. The small models transcribe.
+   */
   largeSlow: boolean;
+  /**
+   * Large transcribes final runs now: the backend's own decision, once it has tried Large on the card. False until
+   * then, a few seconds after the download, and whenever the card is off, stopped or slow for it.
+   */
+  largeInUse: boolean;
   /**
    * The runtime has its graphics-card build (Windows x64), so the devices are measured and can be tested again. False on
    * macOS, Linux and a Windows runtime without it: Settings offers no test, and the line has nothing to unfold.
