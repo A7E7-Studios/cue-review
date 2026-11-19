@@ -928,8 +928,8 @@ pub struct Measured {
     /// The computer it was made on: when that changes, the devices are
     /// measured again.
     pub computer: Computer,
-    /// The model the sample was transcribed with: `small`, or `base` where
-    /// small was missing.
+    /// The model the sample was transcribed with: `small`, else `small.en`,
+    /// else `base` ([`sample_model`]).
     pub model: String,
     /// The processor build's counted time for the sample, in ms.
     pub processor_ms: u64,
@@ -976,8 +976,8 @@ pub enum LargeTime {
 #[serde(rename_all = "camelCase")]
 pub struct Computer {
     pub app: String,
-    /// Each build of `whisper-cli` that is timed: its path, size and the
-    /// time it was written.
+    /// Each build of `whisper-cli` that is timed: its folder and file name,
+    /// size and write time ([`build_key`]).
     pub runtime: Vec<String>,
     pub adapters: Vec<Adapter>,
 }
@@ -995,10 +995,10 @@ impl Measured {
         self.cards.iter().find(|card| card.index == chosen)
     }
     /// Whether the larger model is offered: the chosen card ran the sample
-    /// with the small model in two thirds of the processor's time or less
+    /// with a small model in two thirds of the processor's time or less
     /// ([`offers_large`]). A measurement made with base judges nothing.
     fn large_offered(&self) -> bool {
-        self.model == SMALL.name
+        small_sized(&self.model)
             && self
                 .chosen_card()
                 .and_then(|card| card.ms)
@@ -1027,14 +1027,21 @@ fn offers_large(processor_ms: u64, card_ms: u64) -> bool {
     card_ms * 3 <= processor_ms * 2
 }
 /// Whether the devices are to be measured: nothing was saved, or it was
-/// saved on another computer than `now`, or with another model than `model`,
-/// the one the sample is timed with now ([`sample_model`]), so a measurement
-/// made with base before the small models were there is made again with
-/// small.
+/// saved on another computer than `now`, or with base while `model`, the
+/// one the sample is timed with now ([`sample_model`]), is a small model: a
+/// measurement made before the small models were there is made again with
+/// one. Small and small.en are the same size, so one measured with either
+/// is not made again when the other arrives.
 fn needs_measuring(saved: Option<&Measured>, now: &Computer, model: Option<&SpeechModel>) -> bool {
     saved.is_none_or(|saved| {
-        saved.computer != *now || model.is_some_and(|model| saved.model != model.name)
+        saved.computer != *now
+            || (!small_sized(&saved.model) && model.is_some_and(|model| small_sized(model.name)))
     })
+}
+/// Whether a model is one of the two small ones, which share a size and
+/// time the same: the multilingual small model or small.en.
+fn small_sized(name: &str) -> bool {
+    name == SMALL.name || name == SMALL_EN.name
 }
 /// Whether the larger model waits to be timed on the chosen card: it is
 /// installed and offered, and the card has not stopped.
@@ -1451,9 +1458,10 @@ fn sample_file() -> Option<PathBuf> {
     sample.is_file().then_some(sample)
 }
 /// The model the sample is timed with: the multilingual small model, else
-/// base.
+/// small.en, which a computer held to English has instead and which times
+/// the same (the sample is English), else base.
 fn sample_model(models: &Path) -> Option<&'static SpeechModel> {
-    [&SMALL, &BASE]
+    [&SMALL, &SMALL_EN, &BASE]
         .into_iter()
         .find(|model| model.installed_in(models))
 }
@@ -2666,9 +2674,14 @@ whisper_print_timings:    total time =  2541.21 ms
         // offered nor timed.
         assert!(!with_base.large_offered() && !large_due(&with_base, true));
         assert!(!needs_measuring(Some(&with_base), &computer(), Some(&BASE)));
-        // Once the small models are there, as after a fresh install, the
-        // devices are measured again with small, and then not again.
+        // Once a small model is there, as after a fresh install, the devices
+        // are measured again with it, and then not again.
         assert!(needs_measuring(Some(&with_base), &computer(), Some(&SMALL)));
+        assert!(needs_measuring(
+            Some(&with_base),
+            &computer(),
+            Some(&SMALL_EN)
+        ));
         let both = models(&[&BASE, &SMALL]);
         measure_into(empty.path(), computer(), false, both.path(), &sample).unwrap();
         let runs = bench.runs();
@@ -2679,6 +2692,49 @@ whisper_print_timings:    total time =  2541.21 ms
         assert!(with_small.large_offered());
         measure_into(empty.path(), computer(), false, both.path(), &sample).unwrap();
         assert!(bench.runs().is_empty());
+        // Held to English, only small.en downloads: the sample is timed with
+        // it (base first, then small.en once it is there), and it offers the
+        // larger model as small does.
+        let english = tempfile::tempdir().unwrap();
+        measure_into(english.path(), computer(), false, base_only.path(), &sample).unwrap();
+        bench.runs();
+        let english_only = models(&[&BASE, &SMALL_EN]);
+        assert_eq!(sample_model(english_only.path()), Some(&SMALL_EN));
+        measure_into(
+            english.path(),
+            computer(),
+            false,
+            english_only.path(),
+            &sample,
+        )
+        .unwrap();
+        let runs = bench.runs();
+        assert_eq!(runs.len(), 6);
+        assert!(runs.iter().all(|(_, model)| *model == "small.en"));
+        let with_small_en = load_measured(english.path()).unwrap();
+        assert_eq!(with_small_en.model, "small.en");
+        assert!(with_small_en.large_offered() && large_due(&with_small_en, true));
+        // The multilingual small model arriving later, as with Auto, measures
+        // nothing again: the two small models time the same.
+        assert!(!needs_measuring(
+            Some(&with_small_en),
+            &computer(),
+            Some(&SMALL)
+        ));
+        assert!(!needs_measuring(
+            Some(&with_small),
+            &computer(),
+            Some(&SMALL_EN)
+        ));
+        let all = models(&[&BASE, &SMALL_EN, &SMALL]);
+        measure_into(english.path(), computer(), false, all.path(), &sample).unwrap();
+        assert!(bench.runs().is_empty());
+        // Nor does a small measurement go back to base.
+        assert!(!needs_measuring(
+            Some(&with_small),
+            &computer(),
+            Some(&BASE)
+        ));
 
         // In the background, one at a time.
         let state = Mutex::new(Measuring::default());
@@ -3352,7 +3408,7 @@ whisper_print_timings:    total time =  2541.21 ms
         if cfg!(windows) {
             for (path, other) in [
                 (
-                    r"\?\C:\Program Files\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe",
+                    r"\\?\C:\Program Files\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe",
                     r"C:\Program Files\CueReview\tools\whisper-b5454\avx2\whisper-cli.exe",
                 ),
                 (
