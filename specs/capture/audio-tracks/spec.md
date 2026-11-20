@@ -1,5 +1,6 @@
 ---
 title: Audio tracks
+review: unreviewed
 code:
   - src-tauri/src/capture.rs
   - src-tauri/Entitlements.plist
@@ -7,10 +8,11 @@ code:
 ---
 # Audio tracks
 
-## Purpose
+## Summary
 
-While a take records, the app writes the microphone and the system audio each to a track of its
-own, so the review sounds as it was spoken and stays in step with the video.
+While a take records, the app writes the microphone and the computer's audio each to a track of its
+own. You meet it whenever you play a review back: it sounds as it was spoken and stays in step with
+the video.
 
 ## Requirements
 
@@ -26,7 +28,6 @@ packets and dropping none, because a short hole every few packets is heard as cr
 - **AND** a recording of speech on the owner's microphone sounds as clean as the same microphone in
   Ableton
 - **PROOF** test: src-tauri/src/capture.rs::tests::drifting_jittering_audio_has_no_holes
-- **PROOF** desk: open
 
 ### Requirement: A track lasts as long as its take
 The app SHALL resample each track once when its take stops, so that it is exactly as long as the
@@ -71,7 +72,6 @@ because selecting a microphone must allow macOS to request and honor permission 
 - **WHEN** the person records a take while sound reaches that microphone and stops it
 - **THEN** the microphone track contains the captured sound rather than only silence
 - **AND** the finalized recording plays that sound
-- **PROOF** desk: open
 
 #### Scenario: The macOS installer contains microphone and camera entitlements
 - **WHEN** the macOS installer smoke check inspects the signed app

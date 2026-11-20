@@ -2,7 +2,6 @@
 title: Detect each take's language instead of assuming English
 capabilities:
   - transcription/speech-models
-review: unreviewed
 ---
 # Detect each take's language instead of assuming English
 
@@ -33,6 +32,14 @@ review.
   models by itself", "The models are ready".
 - The transcript says which language each take is in, and `cue` reports it: "The transcript names a
   detected language", "An agent reads each take's language".
+
+## Review
+
+At the desk, in the app installed over 0.3.0: Settings has Auto chosen, downloads the missing model,
+then shows both ready and offers every language. A short German review comes out in German while
+recording and after Stop, marked "German, detected"; Record more in English keeps the first take
+German; a language chosen in Settings is used as chosen; `cue transcribe` on a German recording that
+came out English reads it as German.
 
 ## Settled questions
 

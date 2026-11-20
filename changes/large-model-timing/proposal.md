@@ -2,7 +2,6 @@
 title: Judge the larger model by its transcribing time, not its loading
 capabilities:
   - transcription/speech-models
-review: unreviewed
 ---
 # Judge the larger model by its transcribing time, not its loading
 
@@ -29,6 +28,12 @@ microphone track took 113 s with Large on the card and 994 s with small on the p
   the next start, and the larger model timed again, so a computer that judged Large slow on whole
   runs judges it again without the person asking: "A measurement without transcribing times is
   made again".
+
+## Review
+
+At the desk, on the PC with the RTX 5090 and Large chosen: after the measurement the first start
+makes again in the background, `cue setup` reports Large in use and not slow, and a take is
+transcribed with Large.
 
 ## Settled questions
 

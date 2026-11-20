@@ -1,5 +1,5 @@
-// Pure functions: globs, diff parsing, Markdown, front matter, PROOF lines, specs, changes,
-// derived states, Doc-Impact, PR sections and the history rules.
+// Pure functions: globs, diff parsing, Markdown, front matter, PROOF lines, Looks lines, specs,
+// changes, derived states, boards, Doc-Impact, PR sections, the config and the history rules.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,15 +14,16 @@ import {
   parseProof,
   parseSpec,
   parseChange,
+  parseLook,
   scenarioSlug,
-  humanState,
-  capabilityState,
   requirementText,
   pathProblem,
+  isTested,
+  reviewState,
 } from '../lib/spec.mjs';
 import { readDocImpact } from '../lib/trailers.mjs';
 import { prSections } from '../lib/pr.mjs';
-import { blobSize } from '../lib/checks.mjs';
+import { blobSize, holdsId, networkLoads, MEDIA } from '../lib/checks.mjs';
 import { loadConfig } from '../lib/index.mjs';
 import { parseCatFileBatch } from '../lib/git.mjs';
 import { blobId, parseLock, owns } from '../lib/kit.mjs';
@@ -39,7 +40,7 @@ test('globs: ** spans folders, * stays in one', () => {
   assert.ok(matches('specs/a/b/spec.md', 'specs/**/spec.md'));
   assert.ok(matches('specs/a/b/spec.md', 'specs/**/*.md'));
   assert.ok(matches('changes/x/look.md', 'changes/**'));
-  assert.ok(matches('Packages/com.unity.xr.openxr/README.md', 'Packages/com.unity.*/**'));
+  assert.ok(matches('Packages/com.unity.textmeshpro/README.md', 'Packages/com.unity.*/**'));
   assert.ok(!matches('Packages/com.example.web/README.md', 'Packages/com.unity.*/**'));
   assert.ok(globToRegExp('Assets/TextMesh Pro/**').test('Assets/TextMesh Pro/a/b.cs'));
 });
@@ -174,8 +175,8 @@ test('markdown: a document\'s first heading and first paragraph, plain and clipp
 });
 
 test('front matter: scalars, lists, quotes; malformed lines, duplicates, no closing line', () => {
-  const ok = parseFrontMatter('---\ntitle: "Peer arrows"\ncode:\n  - a/\n  - \'b.cs\'\nreview: unreviewed\n---\n# Body\n');
-  assert.deepEqual(ok.data, { title: 'Peer arrows', code: ['a/', 'b.cs'], review: 'unreviewed' });
+  const ok = parseFrontMatter('---\ntitle: "Shared cursors"\ncode:\n  - a/\n  - \'b.cs\'\nreview: unreviewed\n---\n# Body\n');
+  assert.deepEqual(ok.data, { title: 'Shared cursors', code: ['a/', 'b.cs'], review: 'unreviewed' });
   assert.deepEqual(ok.problems, []);
   assert.equal(ok.bodyStart, 7);
   const crlf = parseFrontMatter('---\r\ntitle: x\r\n---\r\n');
@@ -190,47 +191,36 @@ test('front matter: scalars, lists, quotes; malformed lines, duplicates, no clos
   assert.equal(parseFrontMatter('# no front matter\n').present, false);
 });
 
-test('PROOF lines: every contract form parses', () => {
-  assert.deepEqual(parseProof(P('test: Assets/Scripts/Colocation/Tests/PeerArrowTests.cs::PeerArrowTests.PointsBehind')), {
+test('PROOF lines: a test path, optionally ::selector, and nothing else', () => {
+  assert.deepEqual(parseProof(P('test: Assets/Scripts/Collaboration/Tests/SharedCursorTests.cs::SharedCursorTests.ShowsOthers')), {
     check: 'test',
     state: 'test',
-    path: 'Assets/Scripts/Colocation/Tests/PeerArrowTests.cs',
-    selector: 'PeerArrowTests.PointsBehind',
+    path: 'Assets/Scripts/Collaboration/Tests/SharedCursorTests.cs',
+    selector: 'SharedCursorTests.ShowsOthers',
   });
   assert.deepEqual(parseProof(P('test: tools/x.sh')), { check: 'test', state: 'test', path: 'tools/x.sh' });
-  assert.deepEqual(parseProof(P('test: Assets/TextMesh Pro/T.cs')).path, 'Assets/TextMesh Pro/T.cs');
-  for (const c of ['desk', 'headset', 'two-headsets', 'printed-card', 'live-tenant']) assert.deepEqual(parseProof(P(`${c}: open`)), { check: c, state: 'open' });
-  assert.deepEqual(parseProof(P('headset: pass 2026-10-30, build 1.4.2, by owner')), { check: 'headset', state: 'pass', date: '2026-10-30', build: '1.4.2', by: 'owner' });
-  assert.deepEqual(parseProof(P('desk: pass 2026-10-30, build 1.4.2, by owner; looked fine')).note, 'looked fine');
-  assert.deepEqual(parseProof(P('headset: fail 2026-10-30, build 1.4.2 (stg), by owner; ring flickers')), {
-    check: 'headset',
-    state: 'fail',
-    date: '2026-10-30',
-    build: '1.4.2 (stg)',
-    by: 'owner',
-    note: 'ring flickers',
-  });
+  assert.deepEqual(parseProof(P('test: src/sync/')), { check: 'test', state: 'test', path: 'src/sync/' });
+  assert.equal(parseProof(P('test: Assets/TextMesh Pro/T.cs')).path, 'Assets/TextMesh Pro/T.cs');
 });
 
-test('PROOF lines: broken forms are errors', () => {
+test('PROOF lines: a human check is an error that points at the feature\'s review; broken test: forms are errors', () => {
   const err = (v) => parseProof(P(v)).error;
-  assert.match(err('headset: done'), /takes "open"/);
-  assert.match(err('device: open'), /unknown check "device"/);
-  assert.match(err('headset: fail 2026-10-30, build 1.4.2, by owner'), /says what failed/);
-  assert.match(err('headset: pass 2026-02-30, build 1.4.2, by owner'), /not a calendar date/);
-  assert.match(err('headset: pass 2026-10-30, build 1,4, by owner'), /takes "open"/);
-  assert.match(err('headset: pass 2026-10-30, build 1.4, by a, b'), /takes "open"/);
+  for (const v of ['desk: open', 'headset: pass 2026-10-30, build 1.4.2, by owner', 'desk: fail 2026-10-30, build 1, by owner; x']) {
+    assert.match(err(v), /a scenario is proven by tests only, "test: <path>\[::<selector>\]"; the owner reviews the feature, in its front matter/, v);
+  }
+  assert.equal(parseProof(P('desk: open')).check, 'desk');
   assert.match(err('test: `tools/x.sh`'), /without backticks/);
   assert.match(err('test: /abs/x.sh'), /absolute/);
   assert.match(err('test: tools\\x.sh'), /backslash/);
   assert.match(err('test: tools/../x.sh'), /"\.\."/);
   assert.match(err('test: tools/x.sh::'), /empty ::selector/);
   assert.match(err('test:'), /takes a repository path/);
-  assert.match(parseProof('- **PROOF** just words').error, /<check>: <value>/);
+  assert.match(parseProof('- **PROOF** just words').error, /reads "test: <path>\[::<selector>\]"/);
+  assert.match(parseProof('- **WHEN** x').error, /not a PROOF line/);
 });
 
 test('paths: relative, forward slashes, no dot segments', () => {
-  assert.equal(pathProblem('Assets/Scripts/Colocation/'), null);
+  assert.equal(pathProblem('Assets/Scripts/Collaboration/'), null);
   assert.equal(pathProblem('a.cs'), null);
   assert.match(pathProblem(''), /empty/);
   assert.match(pathProblem('C:/x'), /absolute/);
@@ -239,155 +229,248 @@ test('paths: relative, forward slashes, no dot segments', () => {
 });
 
 test('scenario slugs: lower-cased, runs of other characters one -, trimmed', () => {
-  assert.equal(scenarioSlug('A peer walks behind the user'), 'a-peer-walks-behind-the-user');
-  assert.equal(scenarioSlug('  Über -- 2 headsets! '), 'ber-2-headsets');
+  assert.equal(scenarioSlug('An edit made offline reaches the others'), 'an-edit-made-offline-reaches-the-others');
+  assert.equal(scenarioSlug('  Über -- 2 notes! '), 'ber-2-notes');
   assert.equal(scenarioSlug('!!!'), '');
 });
 
-test('spec: the contract example parses with no problems', () => {
-  const text = [
-    '---',
-    'title: Peer arrows',
-    'code:',
-    '  - Assets/Scripts/Colocation/',
-    '  - Assets/Scripts/Workspace/PeerArrows.cs',
-    '---',
-    '# Peer arrows',
-    '',
-    '## Purpose',
-    '',
-    'Plain language a non-developer understands,',
-    'over two lines.',
-    '',
-    '## Requirements',
-    '',
-    '### Requirement: Arrows point at peers out of view',
-    'The app SHALL show an arrow toward each peer outside the user\'s view, because a user otherwise',
-    'loses track of who is where.',
-    '',
-    '#### Scenario: A peer walks behind the user',
-    '- **GIVEN** two devices in one session',
-    '- **WHEN** one user walks behind the other',
-    '- **AND** keeps walking',
-    '  slowly',
-    '- **THEN** the other sees an arrow at the edge of view pointing at them',
-    '- **PROOF** test: Assets/Scripts/Colocation/Tests/PeerArrowTests.cs::PeerArrowTests.PointsBehind',
-    '- **PROOF** two-headsets: open',
-    '',
-  ].join('\n');
-  const s = parseSpec(text);
+/** The example of specs/README.md: front matter, Summary, Looks, a scenario with steps and one with a table. */
+const EXAMPLE = [
+  '---',
+  'title: Offline edits',
+  'review: unreviewed',
+  'code:',
+  '  - src/sync/',
+  '  - src/editor/OfflineBanner.ts',
+  '---',
+  '# Offline edits',
+  '',
+  '## Summary',
+  '',
+  'You can keep writing when the connection drops: the app keeps every edit and sends it when the',
+  'connection returns, and a banner says you are offline. You meet it on a train or in a lift.',
+  '',
+  '## Looks',
+  '',
+  '- looks/offline-banner.html#banner — The banner after five seconds offline',
+  '- page: /notes/<id> — Open a note, then turn off the network',
+  '',
+  '## Requirements',
+  '',
+  '### Requirement: Edits made offline are kept',
+  'When the connection drops, the app SHALL keep every edit and send it when the connection returns,',
+  'because a user otherwise loses work they believe is saved.',
+  '',
+  '#### Scenario: An edit made offline reaches the others',
+  '- **WHEN** a user edits a note offline and the connection returns',
+  '- **THEN** the edit reaches the other users of the note',
+  '- **PROOF** test: src/sync/offline.test.ts::keeps edits made offline',
+  '',
+  '#### Scenario: Edits wait as long as the connection is gone',
+  '| Offline for | The edits are sent |',
+  '|---|---|',
+  '| 5 seconds | when it returns |',
+  '| 3 days | when it returns |',
+  '- **PROOF** test: src/sync/offline.test.ts::keeps edits for days',
+  '',
+].join('\n');
+
+test('spec: the contract example parses with no problems, CRLF too', () => {
+  const s = parseSpec(EXAMPLE);
   assert.deepEqual(s.problems, []);
-  assert.equal(s.title, 'Peer arrows');
-  assert.deepEqual(s.code, ['Assets/Scripts/Colocation/', 'Assets/Scripts/Workspace/PeerArrows.cs']);
-  assert.equal(s.purpose, 'Plain language a non-developer understands, over two lines.');
-  const [r] = s.requirements;
-  assert.equal(r.name, 'Arrows point at peers out of view');
-  assert.match(r.text, /^The app SHALL .* loses track of who is where\.$/);
-  const [sc] = r.scenarios;
-  assert.equal(sc.slug, 'a-peer-walks-behind-the-user');
-  assert.equal(sc.text, 'GIVEN two devices in one session\nWHEN one user walks behind the other\nAND keeps walking slowly\nTHEN the other sees an arrow at the edge of view pointing at them');
+  assert.equal(s.title, 'Offline edits');
+  assert.equal(s.review, 'unreviewed');
+  assert.deepEqual(s.code, ['src/sync/', 'src/editor/OfflineBanner.ts']);
+  assert.match(s.summary, /^You can keep writing when the connection drops: .* or in a lift\.$/);
   assert.deepEqual(
-    sc.proofs.map((p) => [p.check, p.state]),
+    s.looks.map(({ n, ...l }) => l),
     [
-      ['test', 'test'],
-      ['two-headsets', 'open'],
+      { kind: 'board', board: 'looks/offline-banner.html', id: 'banner', caption: 'The banner after five seconds offline' },
+      { kind: 'page', target: '/notes/<id>', caption: 'Open a note, then turn off the network' },
     ],
   );
-  assert.deepEqual(parseSpec(text.replace(/\n/g, '\r\n')).problems, [], 'CRLF reads the same');
+  const [r] = s.requirements;
+  assert.equal(r.name, 'Edits made offline are kept');
+  assert.match(r.text, /^When the connection drops, the app SHALL .*, because a user otherwise loses work they believe is saved\.$/);
+  const [steps, table] = r.scenarios;
+  assert.equal(steps.slug, 'an-edit-made-offline-reaches-the-others');
+  assert.equal(steps.text, 'WHEN a user edits a note offline and the connection returns\nTHEN the edit reaches the other users of the note');
+  assert.equal(steps.table, null);
+  assert.deepEqual(steps.proofs.map((p) => [p.path, p.selector]), [['src/sync/offline.test.ts', 'keeps edits made offline']]);
+  assert.deepEqual(table.steps, []);
+  assert.deepEqual(table.table, { header: ['Offline for', 'The edits are sent'], rows: [['5 seconds', 'when it returns'], ['3 days', 'when it returns']] });
+  assert.equal(table.text, '| Offline for | The edits are sent |\n| 5 seconds | when it returns |\n| 3 days | when it returns |');
+  assert.deepEqual(parseSpec(EXAMPLE.replace(/\n/g, '\r\n')).problems, [], 'CRLF reads the same');
   assert.deepEqual(parseSpec(specText()).problems, []);
 });
 
-test('spec: front matter breaks', () => {
+test('spec: front matter needs title, review (one of three verdicts) and code, and no other key', () => {
   assert.match(problems(specText().replace(/^---\n/, '')), /no front matter/);
-  assert.match(problems(specText().replace('title: Peer arrows\n', '')), /lacks "title"/);
+  assert.match(problems(specText().replace('title: Shared cursors\n', '')), /lacks "title"/);
+  assert.match(problems(specText().replace('review: unreviewed\n', '')), /lacks "review"/);
+  for (const v of ['unreviewed', 'approved', 'changes-requested']) assert.deepEqual(parseSpec(specText({ review: v })).problems, [], v);
+  assert.equal(parseSpec(specText({ review: 'approved' })).review, 'approved');
+  for (const v of ['pass', 'open', 'Approved', 'reviewed']) assert.match(problems(specText({ review: v })), new RegExp(`review "${v}" is not unreviewed, approved, changes-requested`), v);
   assert.match(problems(specText({ code: [] })), /"code" needs at least one item/);
-  assert.match(problems(specText().replace('code:\n  - src/arrows/', 'code: src/arrows/')), /"code" must be a list/);
+  assert.match(problems(specText().replace('code:\n  - src/cursors/', 'code: src/cursors/')), /"code" must be a list/);
   assert.match(problems(specText({ code: ['../x'] })), /code: .*"\.\."/);
-  assert.match(problems(specText().replace('title: Peer arrows', 'title: Peer arrows\nowner: me')), /unknown front matter key "owner"/);
+  assert.match(problems(specText().replace('title: Shared cursors', 'title: Shared cursors\nowner: me')), /unknown front matter key "owner" \(one of title, review, code\)/);
+});
+
+test('spec: Summary, an optional Looks, then Requirements; the old Purpose section is no section', () => {
+  assert.deepEqual(parseSpec(specText({ looks: null })).problems, [], 'Looks is optional');
+  assert.deepEqual(parseSpec(specText({ looks: ['looks/board.html#main — The cursor', 'page: /notes/1 — Open a note'] })).problems, []);
+  // the format before this one: ## Purpose
+  const purpose = specText().replace('## Summary', '## Purpose');
+  assert.match(problems(purpose), /"## Purpose": a spec's sections are ## Summary, ## Looks and ## Requirements/);
+  assert.match(problems(purpose), /one "## Summary", not 0/);
+  assert.match(problems(specText().replace('A cursor shows where each collaborator is typing.', '')), /## Summary is empty/);
+  const looksLast = specText().replace(/\n## Requirements\n[\s\S]*$/, (req) => `${req}\n## Looks\n\n- page: /x — Late\n`);
+  assert.match(problems(looksLast), /## Looks comes after ## Requirements: the order is Summary, Looks, Requirements/);
+  const looksFirst = specText({ looks: ['page: /x — First'] }).replace(/## Summary\n\n([^\n]*)\n\n(## Looks\n\n[^\n]*\n)/, '$2\n## Summary\n\n$1\n');
+  assert.match(problems(looksFirst), /## Summary comes after ## Looks/);
+  const twoLooks = specText({ looks: ['page: /x — One'] }).replace('## Requirements', '## Looks\n\n- page: /y — Two\n\n## Requirements');
+  assert.match(problems(twoLooks), /at most one "## Looks", not 2/);
+  assert.match(problems(specText().replace('## Requirements', '## Looks\n\n## Requirements')), /## Looks lists nothing/);
+  assert.match(problems(specText({ looks: ['page: /x — One'] }).replace('- page: /x — One', '- page: /x — One\nSome prose.')), /Looks: a Looks line is a "- " bullet/);
+  assert.match(problems(specText({ looks: ['page: /x — One'] }).replace('- page: /x — One', '```\nx\n```')), /## Looks holds only its Looks lines/);
 });
 
 test('spec: structure breaks', () => {
-  assert.match(problems(specText().replace('# Peer arrows', '# Other title')), /differs from the front matter title/);
-  assert.match(problems(specText().replace('# Peer arrows\n', '')), /one "# <title>" heading, not 0/);
-  assert.match(problems(specText().replace('An arrow shows where each peer stands when they are out of view.', '')), /## Purpose is empty/);
-  assert.match(problems(specText().replace('## Purpose', '## Why')), /"## Why": a spec has two sections/);
-  assert.match(problems(specText().replace('## Purpose', '## Why')), /one "## Purpose", not 0/);
-  const swapped = specText().replace(/## Purpose\n\n([^\n]*)\n\n## Requirements\n/, '## Requirements\n\n### Requirement: Placeholder\nX.\n\n#### Scenario: P\n- **WHEN** a\n- **THEN** b\n- **PROOF** desk: open\n\n## Purpose\n\n$1\n\n');
-  assert.match(problems(swapped), /## Purpose comes before ## Requirements/);
+  assert.match(problems(specText().replace('# Shared cursors', '# Other title')), /differs from the front matter title/);
+  assert.match(problems(specText().replace('# Shared cursors\n', '')), /one "# <title>" heading, not 0/);
+  assert.match(problems(specText().replace('## Summary', '## Why')), /"## Why": a spec's sections are/);
   assert.match(problems(specText({ requirements: [] })), /holds no ### Requirement:/);
-  assert.match(problems(specText().replace('### Requirement: Arrows', '### Arrows')), /is not "### Requirement: <name>"/);
-  assert.match(problems(specText().replace('#### Scenario: A peer', '#### A peer')), /is not "#### Scenario: <name>"/);
+  assert.match(problems(specText().replace('### Requirement: Cursors', '### Cursors')), /is not "### Requirement: <name>"/);
+  assert.match(problems(specText().replace('#### Scenario: A collaborator', '#### A collaborator')), /is not "#### Scenario: <name>"/);
   assert.match(problems(specText().replace('## Requirements\n', '## Requirements\nSome loose text.\n')), /before its first ### Requirement:/);
-  assert.match(problems(specText().replace('# Peer arrows\n', '# Peer arrows\nIntro text.\n')), /text outside ## Purpose and ## Requirements/);
-  assert.match(problems(specText().replace('The app SHALL show', '##### Deep\nThe app SHALL show')), /headings stop at #### Scenario:/);
-  assert.match(
-    problems(specText().replace(/The app SHALL show[^\n]*\n/, '')),
-    /opens with its statement/,
-  );
+  assert.match(problems(specText().replace('# Shared cursors\n', '# Shared cursors\nIntro text.\n')), /text outside ## Summary, ## Looks and ## Requirements/);
+  assert.match(problems(specText().replace('When two users', '##### Deep\nWhen two users')), /headings stop at #### Scenario:/);
+  assert.match(problems(specText().replace(/When two users edit[^\n]*\n/, '')), /opens with its statement/);
+  const sc = [{ name: 'One', steps: ['WHEN a', 'THEN b'] }];
   const twoReqs = specText({
     requirements: [
-      { name: 'Same', text: 'It SHALL.', scenarios: [{ name: 'One', steps: ['WHEN a', 'THEN b'], proofs: ['desk: open'] }] },
-      { name: 'Same', text: 'It SHALL.', scenarios: [{ name: 'one!', steps: ['WHEN a', 'THEN b'], proofs: ['desk: open'] }] },
+      { name: 'Same', text: 'It SHALL work, because x.', scenarios: sc },
+      { name: 'Same', text: 'It SHALL work, because x.', scenarios: [{ ...sc[0], name: 'one!' }] },
     ],
   });
   assert.match(problems(twoReqs), /requirement "Same" appears twice/);
   assert.match(problems(twoReqs), /has the slug "one" of the scenario at line/);
-  assert.match(problems(specText({ requirements: [{ name: 'R', text: 'It SHALL.', scenarios: [] }] })), /at least one #### Scenario:/);
+  assert.match(problems(specText({ requirements: [{ name: 'R', text: 'It SHALL work, because x.', scenarios: [] }] })), /at least one #### Scenario:/);
 });
 
-test('spec: scenario and PROOF breaks', () => {
-  const one = (steps, proofs) => specText({ scenarios: [{ name: 'S', steps, proofs }] });
-  assert.match(problems(one(['GIVEN a', 'THEN b'], ['desk: open'])), /a scenario has a \*\*WHEN\*\* bullet/);
-  assert.match(problems(one(['WHEN a'], ['desk: open'])), /a scenario has a \*\*THEN\*\* bullet/);
-  assert.match(problems(one(['WHEN a', 'THEN b'], [])), /ends in at least one - \*\*PROOF\*\* line/);
-  assert.match(problems(one(['WHEN a', 'THEN b', 'BUT c'], ['desk: open'])), /"\*\*BUT\*\*" is not GIVEN/);
-  assert.match(problems(one(['WHEN a', 'THEN b'], ['desk: open', 'desk: pass 2026-10-30, build 1, by o'])), /a second "desk:" line/);
-  assert.match(problems(one(['WHEN a', 'THEN b'], ['desk: maybe'])), /takes "open"/);
-  assert.deepEqual(parseSpec(one(['WHEN a', 'THEN b'], ['test: a.sh', 'test: b.sh', 'desk: open'])).problems, [], 'test: may repeat');
-  const late = specText().replace('- **PROOF** two-headsets: open', '- **PROOF** two-headsets: open\n- **AND** a late step');
-  assert.match(problems(late), /PROOF lines are the scenario's last bullets/);
+test('spec: a statement holds SHALL and its reason, because', () => {
+  const statement = (text) => problems(specText({ requirements: [{ name: 'R', text, scenarios: [{ name: 'S', steps: ['WHEN a', 'THEN b'] }] }] }));
+  assert.equal(statement('When a user types, the app SHALL show it, because they look.'), '');
+  assert.equal(statement('The app SHALL keep a draft, because a crash otherwise loses it.'), '', 'a behaviour that holds always drops "When …,"');
+  assert.match(statement('The app SHALL keep a draft.'), /R: the statement reads "When …, the app SHALL …, because …": it holds SHALL and its reason/);
+  assert.match(statement('The app keeps a draft, because a crash loses it.'), /holds SHALL and its reason/);
+  assert.match(statement('The app shall keep a draft, because x.'), /holds SHALL/, 'SHALL in capitals');
+  assert.match(statement('The app SHALL keep a draft.\n\nThis is because a crash loses it.'), /R: the statement is one paragraph, its reason in the same sentence/);
+});
+
+test('spec: steps are optional; given any, one WHEN and one THEN, a GIVEN first, an AND after another step', () => {
+  const one = (steps, extra = {}) => problems(specText({ scenarios: [{ name: 'S', steps, ...extra }] }));
+  assert.equal(one([]), '', 'a scenario may be its name alone');
+  assert.equal(one(['WHEN a', 'THEN b']), '');
+  assert.equal(one(['GIVEN a', 'AND b', 'WHEN c', 'AND d', 'THEN e', 'AND f']), '');
+  assert.match(one(['GIVEN a', 'THEN b']), /S: steps hold one \*\*WHEN\*\* and one \*\*THEN\*\* \(they have 0 and 1\)/);
+  assert.match(one(['WHEN a']), /they have 1 and 0/);
+  assert.match(one(['WHEN a', 'WHEN b', 'THEN c']), /they have 2 and 1/);
+  assert.match(one(['WHEN a', 'THEN b', 'THEN c']), /they have 1 and 2/);
+  assert.match(one(['GIVEN a', 'GIVEN b', 'WHEN c', 'THEN d']), /at most one \*\*GIVEN\*\*/);
+  assert.match(one(['WHEN a', 'GIVEN b', 'THEN c']), /\*\*GIVEN\*\* comes first/);
+  assert.match(one(['AND a', 'WHEN b', 'THEN c']), /\*\*AND\*\* follows another step/);
+  assert.match(one(['THEN a', 'WHEN b']), /\*\*WHEN\*\* comes before \*\*THEN\*\*/);
+  assert.match(one(['WHEN a', 'THEN b', 'BUT c']), /"\*\*BUT\*\*" is not GIVEN, WHEN, THEN, AND or PROOF/);
+  const wrapped = parseSpec(specText().replace('- **WHEN** one user types in a paragraph', '- **WHEN** one user types\n  in a paragraph'));
+  assert.deepEqual(wrapped.problems, []);
+  assert.equal(wrapped.requirements[0].scenarios[0].steps[1].text, 'one user types in a paragraph', 'a bullet wraps onto lines indented by two spaces');
   const prose = specText().replace('- **WHEN** one user', 'Some prose.\n- **WHEN** one user');
-  assert.match(problems(prose), /a scenario holds only/);
-  const outside = specText().replace('The app SHALL show', '- **PROOF** desk: open\nThe app SHALL show');
+  assert.match(problems(prose), /a scenario holds its "- \*\*GIVEN\/WHEN\/THEN\/AND\*\* \.\.\." steps, a table, then its "- \*\*PROOF\*\* \.\.\." lines/);
+});
+
+test('spec: a table has a header, a |---| row and one row per case, all of the header\'s width, after the steps', () => {
+  const table = (rows, steps = []) => specText({ scenarios: [{ name: 'Cases', steps, table: rows }] });
+  const ok = parseSpec(table([['Input', 'Output'], ['a', 'A'], ['b', 'B']], ['WHEN a user types', 'THEN the letter is upper case']));
+  assert.deepEqual(ok.problems, []);
+  assert.deepEqual(ok.requirements[0].scenarios[0].table, { header: ['Input', 'Output'], rows: [['a', 'A'], ['b', 'B']] });
+  assert.deepEqual(parseSpec(table([['Input', 'Output'], ['a', 'A']])).problems, [], 'a table alone');
+  assert.match(problems(table([['Input', 'Output']])), /Cases: a table has a header row, a \|---\| row and one row per case/);
+  assert.match(problems(table([['Input', 'Output'], ['a', 'A', 'extra']])), /Cases: a table row has 3 cells, the header 2/);
+  const noSeparator = specText({ scenarios: [{ name: 'Cases', steps: [] }] }).replace('#### Scenario: Cases\n', '#### Scenario: Cases\n| a | b |\n| c | d |\n');
+  assert.match(problems(noSeparator), /a table has a header row, a \|---\| row/);
+  const stepsAfter = table([['Input', 'Output'], ['a', 'A']]).replace('| a | A |', '| a | A |\n- **WHEN** late');
+  assert.match(problems(stepsAfter), /Cases: steps come before the table/);
+});
+
+test('spec: PROOF lines are test: lines that end the scenario; a scenario without one is untested and valid', () => {
+  const one = (proofs) => specText({ scenarios: [{ name: 'S', steps: ['WHEN a', 'THEN b'], proofs }] });
+  assert.deepEqual(parseSpec(one([])).problems, [], 'untested is valid');
+  assert.deepEqual(parseSpec(one(['test: a.sh', 'test: b.sh::B.run'])).problems, [], 'test: may repeat');
+  // the format before this one: human checks on scenarios
+  assert.match(problems(one(['test: a.sh', 'desk: open'])), /S: "desk:": a scenario is proven by tests only/);
+  assert.match(problems(one(['headset: pass 2026-10-30, build 1.4.2, by owner'])), /"headset:": a scenario is proven by tests only/);
+  const late = one(['test: a.sh']).replace('- **PROOF** test: a.sh', '- **PROOF** test: a.sh\n- **AND** a late step');
+  assert.match(problems(late), /S: PROOF lines are the scenario's last lines/);
+  const outside = specText().replace('When two users', '- **PROOF** test: a.sh\nWhen two users');
   assert.match(problems(outside), /a PROOF line outside any #### Scenario/);
-  const fenced = specText().replace('- **WHEN** one user', '```\n- **PROOF** desk: open\n```\n- **WHEN** one user');
-  assert.match(problems(fenced), /a scenario holds only/);
+  const fenced = specText().replace('- **WHEN** one user', '```\n- **PROOF** test: a.sh\n```\n- **WHEN** one user');
+  assert.match(problems(fenced), /a scenario holds its/);
 });
 
-test('spec: requirement text ignores PROOF lines and code, and sees every other word', () => {
-  const base = requirementText(parseSpec(specText()));
-  assert.equal(requirementText(parseSpec(specText({ proofs: ['test: other.sh', 'headset: pass 2026-10-30, build 1, by o'] }))), base);
-  assert.equal(requirementText(parseSpec(specText({ code: ['elsewhere/'] }))), base);
-  assert.equal(requirementText(parseSpec(specText().replace('An arrow shows', 'An  arrow\nshows'))), base, 'whitespace is not text');
-  assert.notEqual(requirementText(parseSpec(specText({ then: 'something else' }))), base);
-  assert.notEqual(requirementText(parseSpec(specText({ purpose: 'Another purpose.' }))), base);
-  assert.notEqual(requirementText(parseSpec(specText({ title: 'Other' }))), base);
+test('Looks lines: a board with its id, or a page, each with a caption', () => {
+  assert.deepEqual(parseLook('- looks/offline-banner.html#banner — The banner'), { kind: 'board', board: 'looks/offline-banner.html', id: 'banner', caption: 'The banner' });
+  assert.deepEqual(parseLook('- page: /notes/<id> — Open a note'), { kind: 'page', target: '/notes/<id>', caption: 'Open a note' });
+  assert.deepEqual(parseLook('- page: https://example.invalid/notes — The site'), { kind: 'page', target: 'https://example.invalid/notes', caption: 'The site' });
+  assert.equal(parseLook('* looks/a.b-c_d.html#Main_1 — A — with a dash').caption, 'A — with a dash');
+  assert.match(parseLook('looks/a.html#x — no bullet').error, /a Looks line is a "- " bullet/);
+  assert.match(parseLook('- looks/a.html#x').error, /a Looks line reads "- looks\/<name>\.html#<id> — <caption>" or "- page: <path or URL> — <caption>"/);
+  assert.match(parseLook('- looks/a.html#x - a hyphen').error, /a Looks line reads/, 'the caption follows an em dash');
+  assert.match(parseLook('- looks/a.html — no id').error, /not "looks\/a\.html"/);
+  assert.match(parseLook('- a.html#x — no folder').error, /not "a\.html#x"/);
+  assert.match(parseLook('- looks/sub/a.html#x — nested').error, /looks\/sub\/a\.html is not looks\/<name>\.html/);
+  assert.match(parseLook('- looks/a.png#x — a picture').error, /looks\/a\.png is not looks\/<name>\.html/);
+  assert.match(parseLook('- looks/a.html#x y — a space').error, /a Looks line reads/);
+  assert.match(problems(specText({ looks: ['looks/a.png#x — a picture'] })), /Looks: looks\/a\.png is not looks\/<name>\.html/);
 });
 
-test('change: the contract example parses; every front matter break is a problem', () => {
-  const ok = parseChange(proposalText({ followUps: ['palm-menu-cone-angle'] }));
-  assert.deepEqual(ok, {
-    title: 'Arrows for peers',
-    capabilities: ['collaboration/peer-arrows'],
-    removes: [],
-    review: 'unreviewed',
-    followUps: ['palm-menu-cone-angle'],
-    problems: [],
-  });
-  assert.equal(parseChange(proposalText({ review: 'changes-requested' })).review, 'changes-requested');
+test('spec text: title, Summary, Looks, statements, scenario names, steps and tables; not code, review or PROOF lines', () => {
+  const base = requirementText(parseSpec(specText({ looks: ['looks/board.html#main — The cursor'] })));
+  const same = (o, why) => assert.equal(requirementText(parseSpec(specText({ looks: ['looks/board.html#main — The cursor'], ...o }))), base, why);
+  const differs = (o, why) => assert.notEqual(requirementText(parseSpec(specText({ looks: ['looks/board.html#main — The cursor'], ...o }))), base, why);
+  same({ proofs: ['test: other.sh', 'test: more.sh::M'] }, 'PROOF lines');
+  same({ code: ['elsewhere/'] }, 'code');
+  same({ review: 'approved' }, 'review');
+  same({ summary: 'A  cursor\nshows where each collaborator is typing.' }, 'whitespace');
+  differs({ then: 'something else' }, 'a step');
+  differs({ summary: 'Another summary.' }, 'the Summary');
+  differs({ title: 'Other' }, 'the title');
+  differs({ looks: ['looks/board.html#other — The cursor'] }, 'a board id');
+  differs({ looks: ['looks/board.html#main — Another caption'] }, 'a caption');
+  differs({ looks: ['looks/board.html#main — The cursor', 'page: /notes — Open a note'] }, 'a page line');
+  differs({ looks: null }, 'no Looks');
+  const table = (cell) => requirementText(parseSpec(specText({ scenarios: [{ name: 'Cases', table: [['In', 'Out'], ['a', cell]] }] })));
+  assert.notEqual(table('A'), table('B'), 'a table cell');
+  assert.equal(table('A'), table('A'));
+  const statement = specText().replace('the app SHALL show', 'the app SHALL draw');
+  assert.notEqual(requirementText(parseSpec(statement)), requirementText(parseSpec(specText())), 'a statement');
+});
+
+test('change: the contract example parses; review and follow-ups are no keys of a proposal', () => {
+  assert.deepEqual(parseChange(proposalText()), { title: 'Cursors for collaborators', capabilities: ['collaboration/shared-cursors'], removes: [], problems: [] });
   const msgs = (t) => parseChange(t).problems.map((p) => p.message).join('\n');
-  assert.match(msgs(proposalText({ review: 'approved' })), /review "approved" is not unreviewed or changes-requested/);
+  // the format before this one: a proposal carried its review state and follow-ups
+  assert.match(msgs(proposalText().replace('capabilities:', 'review: unreviewed\ncapabilities:')), /unknown front matter key "review" \(one of title, capabilities, removes\)/);
+  assert.match(msgs(proposalText().replace('capabilities:', 'follow-ups:\n  - later-change\ncapabilities:')), /unknown front matter key "follow-ups"/);
   assert.match(msgs(proposalText({ capabilities: [] })), /"capabilities" or "removes" needs at least one item/);
-  const removal = parseChange(proposalText({ capabilities: [], removes: ['collaboration/old-arrows'] }));
-  assert.deepEqual([removal.capabilities, removal.removes, removal.problems], [[], ['collaboration/old-arrows'], []], 'a removal names no living capability');
-  assert.match(msgs(proposalText({ removes: ['Old/Arrows'] })), /removed capability "Old\/Arrows" is not/);
+  const removal = parseChange(proposalText({ capabilities: [], removes: ['collaboration/old-cursors'] }));
+  assert.deepEqual([removal.capabilities, removal.removes, removal.problems], [[], ['collaboration/old-cursors'], []], 'a removal names no living capability');
+  assert.match(msgs(proposalText({ removes: ['Old/Cursors'] })), /removed capability "Old\/Cursors" is not/);
   assert.match(msgs(proposalText({ capabilities: [], removes: ['a/b'] }).replace('capabilities:\n', '')), /lacks "capabilities"/);
-  assert.match(msgs(proposalText({ capabilities: ['peer-arrows'] })), /is not "<domain>\/<capability>"/);
-  assert.match(msgs(proposalText({ capabilities: ['Working/Peer'] })), /kebab-case/);
-  assert.match(msgs(proposalText({ followUps: ['Not An Id'] })), /follow-up "Not An Id"/);
-  assert.match(msgs(proposalText().replace('title: Arrows for peers\n', '')), /lacks "title"/);
-  assert.match(msgs(proposalText().replace('review: unreviewed\n', '')), /lacks "review"/);
-  assert.match(msgs(proposalText().replace('review: unreviewed', 'review: unreviewed\ntier: small')), /unknown front matter key "tier"/);
+  assert.match(msgs(proposalText({ capabilities: ['shared-cursors'] })), /is not "<domain>\/<capability>"/);
+  assert.match(msgs(proposalText({ capabilities: ['Working/Collaborator'] })), /kebab-case/);
+  assert.match(msgs(proposalText().replace('title: Cursors for collaborators\n', '')), /lacks "title"/);
   assert.match(msgs('# no front matter\n'), /no front matter/);
 });
 
@@ -402,46 +485,118 @@ function filled(file, fills) {
 
 test('the skills\' templates, filled in, parse with no problems', (t) => {
   const proposal = filled('.agents/skills/spec/templates/proposal.md', [
-    [/<domain>\/<capability>\n/, 'collaboration/peer-arrows\n'],
-    [/<domain>\/<capability this change deletes[^>]*>/, 'collaboration/old-arrows'],
+    [/<domain>\/<capability>\n/, 'collaboration/shared-cursors\n'],
+    [/<domain>\/<capability this change deletes[^>]*>/, 'collaboration/old-cursors'],
   ]);
   const spec = filled('.agents/skills/spec/templates/spec.md', [
-    [/<repo-relative folder ending in \/>/, 'src/arrows/'],
-    [/<repo-relative file>/, 'src/arrows/arrows.js'],
-    [/test: <[^>]+>::<[^>]+>/, 'test: src/arrows/arrows.test.js::Arrows.Behind'],
-    [/<desk \| headset[^>]*>: open/, 'headset: open'],
+    [/<repo-relative folder ending in \/>/, 'src/cursors/'],
+    [/<repo-relative file>/, 'src/cursors/cursors.js'],
+    [/looks\/<board-name>\.html#<section-id>/, 'looks/board.html#main'],
+    [/test: <[^>]+>::<[^>]+>/, 'test: src/cursors/cursors.test.js::Cursors.Others'],
   ]);
   if (proposal === null || spec === null) return t.skip('the skills are not in this checkout');
   const c = parseChange(proposal);
   assert.deepEqual(c.problems, []);
-  assert.deepEqual([c.capabilities, c.removes, c.review], [['collaboration/peer-arrows'], ['collaboration/old-arrows'], 'unreviewed']);
-  assert.deepEqual(parseSpec(spec).problems, []);
+  assert.deepEqual([c.capabilities, c.removes], [['collaboration/shared-cursors'], ['collaboration/old-cursors']]);
+  const s = parseSpec(spec);
+  assert.deepEqual(s.problems, []);
+  assert.equal(s.review, 'unreviewed', 'a new spec starts unreviewed');
+  assert.deepEqual(s.looks.map((l) => l.kind), ['board', 'page']);
 });
 
-test('derived states: a scenario from its PROOF lines, a capability from its scenarios', () => {
-  const p = (v) => parseProof(P(v));
-  assert.equal(humanState([p('test: a.sh')]), 'automated');
-  assert.equal(humanState([]), 'automated');
-  assert.equal(humanState([p('test: a.sh'), p('headset: pass 2026-10-30, build 1, by o')]), 'approved');
-  assert.equal(humanState([p('headset: pass 2026-10-30, build 1, by o'), p('desk: open')]), 'open');
-  assert.equal(humanState([p('headset: fail 2026-10-30, build 1, by o; x'), p('desk: open')]), 'failing');
-  // a malformed human line counts as open: never approved, never automated
-  for (const bad of ['headset: maybe', 'Headset: open', 'headset: open.', 'headset: pass 2026-02-30, build 1, by o', 'desk: fail 2026-10-30, build 1, by o']) {
-    assert.ok(p(bad).error, bad);
-    assert.equal(humanState([p('test: a.sh'), p(bad)]), 'open', bad);
-    assert.equal(humanState([p('headset: pass 2026-10-30, build 1, by o'), p(bad)]), 'open', bad);
+test('derived states: a scenario is tested by a well-formed test: line; a feature\'s review across its repositories', () => {
+  const sc = (...lines) => ({ proofs: lines.map((v) => parseProof(P(v))) });
+  assert.equal(isTested(sc('test: a.sh')), true);
+  assert.equal(isTested(sc('test: a.sh::A.b', 'test: b.sh')), true);
+  assert.equal(isTested(sc()), false, 'no PROOF line: untested');
+  assert.equal(isTested(sc('test: `a.sh`')), false, 'a broken test: line proves nothing');
+  assert.equal(isTested(sc('desk: open')), false);
+  assert.equal(isTested(sc('desk: open', 'test: a.sh')), true);
+  assert.equal(reviewState(['approved']), 'approved');
+  assert.equal(reviewState(['approved', 'approved']), 'approved');
+  assert.equal(reviewState(['approved', 'unreviewed']), 'unreviewed');
+  assert.equal(reviewState(['approved', null]), 'unreviewed', 'a side that does not read is never approved');
+  assert.equal(reviewState(['unreviewed', 'changes-requested']), 'changes-requested');
+  assert.equal(reviewState(['approved', 'changes-requested']), 'changes-requested');
+  assert.equal(reviewState([]), 'unreviewed');
+});
+
+test('boards: an element id in either quote; a network load in src=, href=, url(…) or @import, with its line', () => {
+  assert.ok(holdsId('<section id="main">', 'main'));
+  assert.ok(holdsId("<div class='x' id = 'side-2'>", 'side-2'));
+  assert.ok(!holdsId('<section id="mainly">', 'main'));
+  assert.ok(!holdsId('<section data-id="main">', 'main'));
+  assert.ok(!holdsId('<a href="#main">', 'main'));
+  assert.ok(holdsId('<section id=idle>', 'idle') && holdsId('<p id=idle/>', 'idle'));
+  assert.ok(!holdsId('<section id=idler>', 'idle'));
+  const html = [
+    '<link rel="stylesheet" href="https://fonts.example.invalid/a.css">',
+    '<img src=http://example.invalid/a.png>',
+    '<style>body { background: url( "https://example.invalid/b.png" ) }',
+    '@import "https://example.invalid/c.css";',
+    '.ok { background: url(data:image/gif;base64,R0lGOD) } </style>',
+    '<a href="#main">in the page</a> <a href="mailto:x@example.invalid">mail</a> <a href="https://example.invalid/doc">a link</a>',
+    '<img src="local.png"> <script src="//cdn.example.invalid/x.js"></script>',
+    '<img srcset="https://example.invalid/2x.png 2x"> <video poster="https://example.invalid/p.png"></video>',
+    '<link rel=stylesheet href="../../../../tools/design/house-style/tokens.css"> <img data-src="lazy.png">',
+  ].join('\n');
+  assert.deepEqual(networkLoads(html), [
+    { line: 1, url: 'https://fonts.example.invalid/a.css' },
+    { line: 2, url: 'http://example.invalid/a.png' },
+    { line: 3, url: 'https://example.invalid/b.png' },
+    { line: 4, url: 'https://example.invalid/c.css' },
+    { line: 7, url: 'local.png' },
+    { line: 7, url: '//cdn.example.invalid/x.js' },
+    { line: 8, url: 'https://example.invalid/2x.png' },
+    { line: 8, url: 'https://example.invalid/p.png' },
+    { line: 9, url: '../../../../tools/design/house-style/tokens.css' },
+  ]);
+  // text, script, comments and other attributes' values load nothing
+  const quiet = [
+    '<script>const data = { a: 1 }; let src = "abc";</script>',
+    '<p>Set src=foo.png, or use @import rules</p> <p title="data=1 src=x.png">t</p>',
+    '<style>/* @import nothing; url(gone.png) */ .g { fill: url(#grad) } :root { --c: #5b5bd6 }</style>',
+    '<!-- <img src="old.png"> -->',
+    '<svg><use href="#icon"/><a xlink:href="https://example.invalid/doc">a link</a></svg>',
+    '<object data="data:image/svg+xml;base64,PHN2Zz4="></object>',
+  ].join('\n');
+  assert.deepEqual(networkLoads(quiet), []);
+  const svg = [
+    '<svg><image href="pic.png"/><feImage href="https://example.invalid/f.png"/><use href="icons.svg#a"/></svg>',
+    '<link rel=preload as=image imagesrcset="hero.png 1x, hero@2x.png 2x">',
+    '<div style="background: image-set(\'a.png\' 1x, \'b.png\' 2x)"></div>',
+  ].join('\n');
+  assert.deepEqual(networkLoads(svg), [
+    { line: 1, url: 'pic.png' },
+    { line: 1, url: 'https://example.invalid/f.png' },
+    { line: 1, url: 'icons.svg#a' },
+    { line: 2, url: 'hero.png' },
+    { line: 2, url: 'hero@2x.png' },
+    { line: 3, url: 'a.png' },
+    { line: 3, url: 'b.png' },
+  ]);
+  // image-set by its own depth, srcset as a browser splits it, style values by their own lines
+  assert.deepEqual(networkLoads('<p style="background: image-set(url(\'a.png\') 1x, \'https://x.invalid/b.png\' 2x)">'), [
+    { line: 1, url: 'a.png' },
+    { line: 1, url: 'https://x.invalid/b.png' },
+  ]);
+  assert.deepEqual(networkLoads('<p style=\'background: image-set("data:image/avif;base64,AA" type("image/avif"), "c.jpg" type("image/jpeg"))\'>'), [{ line: 1, url: 'c.jpg' }]);
+  assert.deepEqual(networkLoads('<img srcset="data:image/png;base64,AAAA 1x, data:image/png;base64,BB,BB 2x">'), []);
+  assert.deepEqual(networkLoads('<div style="\n\n\nx: url(c.png)">'), [{ line: 4, url: 'c.png' }]);
+  // a comment or a tag inside raw text is text; a custom element is not style; template and textarea hold no markup
+  for (const before of ['<script>var s = "<style>";</script>', '<script>var s = "<!--";</script>', '<style>.a::before { content: "<!--" }</style>', '<p title="<!--">', '<style-card>x</style-card>']) {
+    assert.deepEqual(networkLoads(`${before}\n<img src="https://x.invalid/a.png">`), [{ line: 2, url: 'https://x.invalid/a.png' }], before);
   }
-  assert.equal(humanState([p('test: `a.sh`')]), 'automated', 'a broken test: line is not a human check');
-  assert.equal(humanState([p('headset: fail 2026-10-30, build 1, by o; x'), p('desk: maybe')]), 'failing');
-  assert.equal(capabilityState(['approved'], false, true), 'unreviewed', 'a spec that breaks the format is never approved');
-  assert.equal(capabilityState(['automated'], false, true), 'unreviewed', 'nor automated');
-  assert.equal(capabilityState(['failing'], false, true), 'failing');
-  assert.equal(capabilityState(['approved', 'failing'], false), 'failing');
-  assert.equal(capabilityState(['approved', 'open'], false), 'unreviewed');
-  assert.equal(capabilityState(['approved', 'automated'], true), 'unreviewed');
-  assert.equal(capabilityState(['approved', 'automated'], false), 'approved');
-  assert.equal(capabilityState(['automated'], false), 'automated');
-  assert.equal(capabilityState([], false), 'automated');
+  assert.deepEqual(networkLoads('<template><img src=h.png></template><textarea><img src=o.png></textarea><title><img src=t.png></title>'), []);
+  // values decoded as a browser decodes them; srcdoc is a document of its own
+  assert.deepEqual(networkLoads('<div style="background: url(&quot;data:image/png;base64,AA&quot;); fill: url(&quot;#g&quot;)">'), []);
+  assert.deepEqual(networkLoads('<div style="background: image-set(&quot;https://x.invalid/g.png&quot; 1x)"> <img src="&#104;ttps://x.invalid/h.png">'), [
+    { line: 1, url: 'https://x.invalid/g.png' },
+    { line: 1, url: 'https://x.invalid/h.png' },
+  ]);
+  assert.deepEqual(networkLoads('<iframe srcdoc="<img src=\'https://x.invalid/a.png\'>"></iframe>'), [{ line: 1, url: 'https://x.invalid/a.png' }]);
+  for (const f of ['a.png', 'b.JPG', 'c.jpeg', 'd.gif', 'e.webp', 'f.svg', 'g.mp4', 'h.mov', 'i.webm', 'j.tiff', 'k.heic', 'l.ico']) assert.ok(MEDIA.test(`specs/x/y/${f}`), f);
+  for (const f of ['spec.md', 'looks/a.html', 'tokens.css', 'notes.txt', 'png.md']) assert.ok(!MEDIA.test(`specs/x/y/${f}`), f);
 });
 
 test('Doc-Impact: the trailer anywhere in a message; other forms are malformed', () => {
@@ -532,24 +687,66 @@ test('config: the starter config loads and is report-only; history rules match w
   assert.ok(!rx('later').test('a later change adds it') && !rx('later').test('it is added later by the build'));
   assert.ok(!cfg.history.some((r) => new RegExp(r.pattern, r.flags ?? '').test('a follow-up change')), 'the workflow\'s own wording is legitimate');
   assert.ok(rx('todo').test('TODO: x') && !rx('todo').test('todo list'));
-  for (const g of ['docs/**', '**/proof/**', '**/test/fixtures/**']) assert.ok(cfg.overview.excludeModules.includes(g), g);
+  for (const g of ['docs/**', '**/proof/**', '**/test/fixtures/**']) assert.ok(cfg.overview.excludeComponents.includes(g), g);
+  assert.deepEqual(cfg.budgets.find((b) => b.pattern === 'specs/**/looks/*.html'), { pattern: 'specs/**/looks/*.html', bytes: 30720 }, 'a board has the budget of a spec');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-config-'));
   try {
-    const write = (c) => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(c));
+    const file = path.join(dir, 'config.json');
+    const write = (c) => fs.writeFileSync(file, JSON.stringify(c));
     write({ ...cfg, budgets: 'x' });
-    assert.throws(() => loadConfig(path.join(dir, 'config.json')), /"budgets"/);
+    assert.throws(() => loadConfig(file), /"budgets"/);
     write({ ...cfg, budgets: [{ pattern: 'docs/**', bytes: null }, ...cfg.budgets] });
-    assert.equal(loadConfig(path.join(dir, 'config.json')).budgets[0].bytes, null, 'null is no budget');
+    assert.equal(loadConfig(file).budgets[0].bytes, null, 'null is no budget');
     for (const bytes of [undefined, 0, -5, 1.5, '40960']) {
       write({ ...cfg, budgets: [{ pattern: 'docs/**', bytes }] });
-      assert.throws(() => loadConfig(path.join(dir, 'config.json')), /positive integer or null/, String(bytes));
+      assert.throws(() => loadConfig(file), /positive integer or null/, String(bytes));
     }
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ ...cfg, overview: { excludeModules: 'dev/**' } }));
-    assert.throws(() => loadConfig(path.join(dir, 'config.json')), /"overview\.excludeModules"/);
-    assert.deepEqual(cfg.overview.moduleMarkers, ['README.md', 'package.json', 'pyproject.toml', 'build.gradle', 'build.gradle.kts', '*.asmdef']);
+    write({ ...cfg, overview: { excludeComponents: 'dev/**' } });
+    assert.throws(() => loadConfig(file), /"overview\.excludeComponents"/);
+    assert.deepEqual(cfg.overview.componentMarkers, ['README.md', 'package.json', 'pyproject.toml', 'build.gradle', 'build.gradle.kts', '*.asmdef']);
     for (const bad of ['go.mod', ['src/go.mod'], ['']]) {
-      write({ ...cfg, overview: { moduleMarkers: bad } });
-      assert.throws(() => loadConfig(path.join(dir, 'config.json')), /"overview\.moduleMarkers"/, JSON.stringify(bad));
+      write({ ...cfg, overview: { componentMarkers: bad } });
+      assert.throws(() => loadConfig(file), /"overview\.componentMarkers"/, JSON.stringify(bad));
+    }
+    // the keys before this format name their new names
+    write({ ...cfg, overview: { moduleMarkers: ['README.md'] } });
+    assert.throws(() => loadConfig(file), /"overview\.moduleMarkers" is named "overview\.componentMarkers"/);
+    write({ ...cfg, overview: { excludeModules: ['docs/**'] } });
+    assert.throws(() => loadConfig(file), /"overview\.excludeModules" is named "overview\.excludeComponents"/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('config: the design block names a tokens file and a brief, and optionally catalogues and a render command', () => {
+  const cfg = loadConfig(TEMPLATE);
+  assert.deepEqual(cfg.design, { tokens: 'tools/design/house-style/tokens.css', brief: 'tools/design/house-style/brief.md' }, 'the starter names the house style');
+  assert.equal(loadConfig().design, undefined, 'this repository names none');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-config-'));
+  try {
+    const file = path.join(dir, 'config.json');
+    const load = (design) => {
+      fs.writeFileSync(file, JSON.stringify({ ...cfg, design }));
+      return loadConfig(file);
+    };
+    const full = { tokens: 'design/tokens.css', brief: 'design/brief.md', catalogues: [{ name: 'icons', open: 'https://example.invalid/icons/{entry}' }], render: 'npm run render' };
+    assert.deepEqual(load(full).design, full);
+    for (const [design, want] of [
+      ['design/', /"design" is \{ "tokens", "brief", "catalogues"\?, "render"\? \}/],
+      [[], /"design" is \{/],
+      [{ brief: 'b.md' }, /"design\.tokens" is a repository path to a file/],
+      [{ tokens: 't.css', brief: '' }, /"design\.brief" is a repository path to a file: an empty path/],
+      [{ tokens: '../t.css', brief: 'b.md' }, /"design\.tokens" is a repository path to a file: .*"\.\."/],
+      [{ tokens: 'design/', brief: 'b.md' }, /"design\.tokens" is a repository path to a file/],
+      [{ tokens: 't.css', brief: 'b.md', theme: 'x' }, /unknown key "design\.theme"/],
+      [{ ...full, catalogues: {} }, /"design\.catalogues" is a list of \{ "name", "open" \}/],
+      [{ ...full, catalogues: [{ name: 'Icons', open: 'x/{entry}' }] }, /entry 0: "name" "Icons" is not kebab-case/],
+      [{ ...full, catalogues: [{ name: 'icons', open: 'https://example.invalid/icons' }] }, /entry 0: "open" is a URL template holding \{entry\}/],
+      [{ ...full, catalogues: [full.catalogues[0], full.catalogues[0]] }, /"icons" appears twice/],
+      [{ ...full, render: '' }, /"design\.render" is a command/],
+      [{ ...full, render: ['npm'] }, /"design\.render" is a command/],
+    ]) {
+      assert.throws(() => load(design), want, JSON.stringify(design));
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

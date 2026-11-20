@@ -2,7 +2,7 @@
 
 ## Pick
 
-**Auto-hinted Figtree** (`look/directions/autohinted-figtree/`): the owner picked it (Q2) from
+**Auto-hinted Figtree**: the owner picked it (Q2) from
 renders at 100% scaling. It keeps the Float v2 typeface and every line break, while ClearType
 snaps stems and the x-height to whole pixels, so text reads close to Segoe UI's sharpness.
 
@@ -10,30 +10,18 @@ snaps stems and the x-height to whole pixels, so text reads close to Segoe UI's 
 
 Each direction is drawn as the same sample line at 13.5 px and 12 px in Edge at 100% scaling.
 
-- **Segoe UI Variable** (`look/directions/segoe-ui-variable/`): the sharpest, but the app would
+- **Segoe UI Variable**: the sharpest, but the app would
   stop looking like the Float v2 mocks on Windows.
-- **Keep Figtree, adjust size and weight** (`look/directions/size-and-weight/`): today's font at
+- **Keep Figtree, adjust size and weight**: today's font at
   13.5/400, 14/400, 13.5/450 and 14/450; heavier text is darker, but its stems stay soft.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Review workspace | light | `look/review-light.png` |
-| Review workspace | dark | `look/review-dark.png` |
-| Settings | before (top) and after (bottom), zoomed 2× | `look/settings-before-after.png` |
-
-Review workspace, light:
-
-![Review workspace, light](look/review-light.png)
-
-Review workspace, dark:
-
-![Review workspace, dark](look/review-dark.png)
-
-Settings, before (top) and after (bottom), zoomed 2×:
-
-![Settings before and after](look/settings-before-after.png)
+| Screen | State |
+|---|---|
+| Review workspace | light |
+| Review workspace | dark |
+| Settings | before (top) and after (bottom), zoomed 2× |
 
 ## Components
 

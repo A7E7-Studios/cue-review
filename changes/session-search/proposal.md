@@ -5,7 +5,6 @@ capabilities:
   - workspace/sidebar
   - workspace/window-chrome
   - workspace/playback-controls
-review: unreviewed
 ---
 # Search recordings and transcripts from the sidebar, and slide in Find
 
@@ -35,6 +34,13 @@ recordings by name and by what was said, while keeping a find inside one transcr
 - The sidebar no longer filters by name, so its spec drops the scenario "The + is hidden while
   searching", the window chrome's purpose no longer names search, and the playback controls' spec
   drops the case of a search showing the sidebar during focus.
+
+## Review
+
+At the desk: Search in the sidebar and Ctrl+K open the search window with recent recordings, and
+Escape closes it; typing a word lists names and lines with the word marked and their times; Enter on
+a line opens its recording at that time; the title bar holds no search field; Ctrl+F slides the find
+bar open, and it finds as before.
 
 ## Settled questions
 

@@ -20,38 +20,14 @@ no other direction was rendered.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Recording menu | Move to section open, light | `look/move-submenu-light.png` |
-| Recording menu | Move to section open, dark | `look/move-submenu-dark.png` |
-| Recording menu | opened with → in a narrow window, flipped left | `look/move-submenu-flipped-narrow.png` |
-| Section heading | hovered, light | `look/section-heading-hover-light.png` |
-| Section heading | hovered, dark | `look/section-heading-hover-dark.png` |
-| Section menu | open, with New section… | `look/section-menu.png` |
-
-Recording menu, Move to section open, light:
-
-![Move to section open, light](look/move-submenu-light.png)
-
-Recording menu, Move to section open, dark:
-
-![Move to section open, dark](look/move-submenu-dark.png)
-
-Recording menu, opened with → in a narrow window, flipped left:
-
-![Submenu flipped left](look/move-submenu-flipped-narrow.png)
-
-Section heading, hovered, light:
-
-![Section heading hovered, light](look/section-heading-hover-light.png)
-
-Section heading, hovered, dark:
-
-![Section heading hovered, dark](look/section-heading-hover-dark.png)
-
-Section menu, open:
-
-![Section menu](look/section-menu.png)
+| Screen | State |
+|---|---|
+| Recording menu | Move to section open, light |
+| Recording menu | Move to section open, dark |
+| Recording menu | opened with → in a narrow window, flipped left |
+| Section heading | hovered, light |
+| Section heading | hovered, dark |
+| Section menu | open, with New section… |
 
 ## Components
 

@@ -1,5 +1,6 @@
 ---
 title: Speech runtime
+review: unreviewed
 code:
   - scripts/build-speech-runtime.mjs
   - scripts/package.mjs
@@ -15,11 +16,12 @@ code:
 ---
 # Speech runtime
 
-## Purpose
+## Summary
 
-The local speech engine that turns a recording's audio into words on the person's own computer:
-which build of it runs, whether on the processor or a graphics card, and how much of the processor
-it may use.
+The local speech engine that turns a recording's audio into words on your own computer: which build
+of it runs, whether on the processor or a graphics card, and how much of the processor it may use.
+You meet it in how soon a transcript is ready, and in Settings, which names where transcription runs
+and can keep it off the graphics card.
 
 ## Requirements
 
@@ -46,19 +48,18 @@ about eight times slower, and the build with them cannot run on a processor that
 - **WHEN** a recording with about five minutes of speech finishes and is transcribed
 - **THEN** its transcript is ready at least three times sooner than the plain build makes it
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::actual_vector_build_is_faster_than_the_plain_build
-- **PROOF** desk: open
 
 ### Requirement: Transcription uses a share of the processor that fits the job
-The app SHALL give a final transcription half the processor's logical threads, at most eight and
-at least four where the processor has them, and the transcription it does while recording a
-quarter, at most four and at least two where the processor has them, because more than eight
-threads barely speed it up, work done while recording runs beside the capture and its encoder, and
-a small processor must not get fewer threads than whisper's own defaults. The two tracks of a take
-recorded with a microphone and system audio are transcribed at the same time, each with a final
-transcription's threads where the processor has eight or more and with half the processor's threads
-below that, because one after the other they keep the person waiting after Stop, when nothing is
-captured any more, and together they must not ask for more threads than a processor with two or
-more has, each keeping at least one.
+The app SHALL give a final transcription half the processor's logical threads, at most eight and at
+least four where the processor has them, and the transcription it does while recording a quarter, at
+most four and at least two where the processor has them, and SHALL transcribe the two tracks of a
+take recorded with a microphone and system audio at the same time, each with a final transcription's
+threads where the processor has eight or more and with half the processor's threads below that, each
+keeping at least one, because more than eight threads barely speed it up, work done while recording
+runs beside the capture and its encoder, a small processor must not get fewer threads than whisper's
+own defaults, two tracks one after the other keep the person waiting after Stop, when nothing is
+captured any more, and together they must not ask for more threads than a processor with two or more
+has.
 
 #### Scenario: Thread counts follow the processor
 - **WHEN** a final or a live transcription starts on a processor with 2, 4, 8 or 32 logical threads
@@ -80,7 +81,6 @@ against 57 s) while a weak integrated one is slower than it (148 s).
 - **THEN** the transcription runs on that graphics card
 - **PROOF** test: src-tauri/src/deps.rs::tests::the_fastest_measured_device_transcribes
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::actual_graphics_card_transcribes_and_keeps_word_timing
-- **PROOF** desk: open
 
 #### Scenario: A slow graphics card is left alone
 - **GIVEN** a computer whose only graphics card measured slower than its processor
@@ -96,7 +96,6 @@ against 57 s) while a weak integrated one is slower than it (148 s).
   on the processor
 - **AND** later starts use the saved result without measuring again
 - **PROOF** test: src-tauri/src/deps.rs::tests::devices_are_measured_again_only_when_the_computer_changed
-- **PROOF** desk: open
 
 #### Scenario: A computer without a usable graphics card works as before
 - **GIVEN** a computer without a graphics card the speech runtime can use, or without the graphics
@@ -132,7 +131,6 @@ disturb a game or headset app under review, and the person needs to see and undo
 - **AND** after a run on the graphics card failed, it says that the card stopped and the processor
   transcribes
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::names the device transcription runs on
-- **PROOF** desk: open
 
 #### Scenario: The switch keeps transcription on the processor
 - **GIVEN** a computer that transcribes on its graphics card
@@ -141,7 +139,6 @@ disturb a game or headset app under review, and the person needs to see and undo
   choice is kept across restarts
 - **PROOF** test: src-tauri/src/deps.rs::tests::the_switch_keeps_transcription_on_the_processor
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::turns the graphics card off for transcription
-- **PROOF** desk: open
 
 #### Scenario: The person has the graphics card tested again
 - **GIVEN** a computer that keeps to the processor because a run on its graphics card failed
@@ -150,7 +147,6 @@ disturb a game or headset app under review, and the person needs to see and undo
   graphics card when it measures fastest
 - **PROOF** test: src-tauri/src/deps.rs::tests::a_failed_graphics_card_is_used_again_after_a_new_measurement
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::asks for the graphics card to be tested again
-- **PROOF** desk: open
 
 #### Scenario: An agent reads the device
 - **WHEN** an agent runs `cue setup`

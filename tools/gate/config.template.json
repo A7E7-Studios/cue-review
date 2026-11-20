@@ -23,6 +23,7 @@
   "budgets": [
     { "pattern": "changes/**/*.md", "bytes": 30720 },
     { "pattern": "specs/**/spec.md", "bytes": 30720 },
+    { "pattern": "specs/**/looks/*.html", "bytes": 30720 },
     { "pattern": "**/AGENTS.md", "bytes": 32768 },
     { "pattern": "**/README.md", "bytes": 40960 }
   ],
@@ -60,8 +61,15 @@
     },
     { "id": "todo", "message": "roadmap: TODO", "pattern": "\\bTODO\\b" }
   ],
+  "design": {
+    "tokens": "tools/design/house-style/tokens.css",
+    "brief": "tools/design/house-style/brief.md"
+  },
   "overview": {
-    "excludeModules": ["dev/**", "docs/**", "**/proof/**", "fixtures/**", "**/test/fixtures/**"],
-    "moduleMarkers": ["README.md", "package.json", "pyproject.toml", "build.gradle", "build.gradle.kts", "*.asmdef"]
+    "excludeComponents": ["dev/**", "docs/**", "**/proof/**", "fixtures/**", "**/test/fixtures/**"],
+    "componentMarkers": ["README.md", "package.json", "pyproject.toml", "build.gradle", "build.gradle.kts", "*.asmdef"]
+  },
+  "solutionMap": {
+    "repos": [{ "id": "app", "path": "." }]
   }
 }

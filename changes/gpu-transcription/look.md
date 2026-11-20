@@ -13,60 +13,28 @@ of the three and keeps the order of importance: Language, Model, the models.
 
 Each direction is shown in the default state and in the state that tells the directions apart.
 
-- **Model choice** (`look/directions/model-choice/`): the pick, drawn first as a direction.
-- **Two switches** (`look/directions/two-switches/`): a switch that starts a 1.6 GB download, and
+- **Model choice**: the pick, drawn first as a direction.
+- **Two switches**: a switch that starts a 1.6 GB download, and
   two more rows in Transcription on every fast computer.
-- **Graphics card section** (`look/directions/graphics-card-section/`): the longest dialog, a
+- **Graphics card section**: the longest dialog, a
   mostly empty section on a computer without a usable card, and the model offer split from the
   model rows.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Settings | a fast graphics card, Standard chosen | `look/settings-default.png` |
-| Settings | the same, light theme | `look/settings-default-light.png` |
-| Settings | no usable graphics card | `look/settings-cpu-only.png` |
-| Settings | the devices still being measured | `look/settings-measuring.png` |
-| Settings | Large chosen, downloading | `look/settings-downloading.png` |
-| Settings | Large in use, the fold open | `look/settings-ready.png` |
-| Settings | the switch turned off, Large chosen | `look/settings-switch-off.png` |
-| Settings | the graphics card stopped during a transcription | `look/settings-gpu-failed.png` |
+| Screen | State |
+|---|---|
+| Settings | a fast graphics card, Standard chosen |
+| Settings | the same, light theme |
+| Settings | no usable graphics card |
+| Settings | the devices still being measured |
+| Settings | Large chosen, downloading |
+| Settings | Large in use, the fold open |
+| Settings | the switch turned off, Large chosen |
+| Settings | the graphics card stopped during a transcription |
 
 Not drawn: the open Model list, which is the Language select's list with two entries, and a failed
 download of the large model, whose row fails as the other model rows do, with Try again.
-
-Settings, a fast graphics card, Standard chosen:
-
-![Settings, fast graphics card](look/settings-default.png)
-
-Settings, the same, light theme:
-
-![Settings, fast graphics card, light](look/settings-default-light.png)
-
-Settings, no usable graphics card:
-
-![Settings, processor only](look/settings-cpu-only.png)
-
-Settings, the devices still being measured:
-
-![Settings, measuring](look/settings-measuring.png)
-
-Settings, Large chosen, downloading:
-
-![Settings, Large downloading](look/settings-downloading.png)
-
-Settings, Large in use, the fold open:
-
-![Settings, Large in use](look/settings-ready.png)
-
-Settings, the switch turned off, Large chosen:
-
-![Settings, switch off](look/settings-switch-off.png)
-
-Settings, the graphics card stopped during a transcription:
-
-![Settings, graphics card stopped](look/settings-gpu-failed.png)
 
 ## Components
 

@@ -1,5 +1,6 @@
 ---
 title: macOS capture permissions
+review: unreviewed
 code:
   - scripts/package.mjs
   - scripts/macos-signing.mjs
@@ -11,10 +12,11 @@ code:
 ---
 # macOS capture permissions
 
-## Purpose
+## Summary
 
-Capture permission remains associated with the same macOS app across updates signed by its
-approved developer, without weakening the operating system's consent controls.
+On a Mac, the capture permission you gave CueReview stays with the app when it updates, because
+every release is signed by the same approved developer. You meet it after an update: you record
+without granting Screen Recording again, and macOS's own consent controls stay as they are.
 
 ## Requirements
 
@@ -27,7 +29,6 @@ because macOS identifies authorized apps by their designated code requirement ac
 - **WHEN** the person installs a different build signed with the same approved identity
 - **THEN** screen preview and recording work without removing or re-enabling the existing grant
 - **AND** the app still requires normal macOS consent if permission has been revoked
-- **PROOF** desk: open
 
 #### Scenario: The required identity is unavailable
 - **GIVEN** the packager cannot resolve one available Developer ID for the approved team

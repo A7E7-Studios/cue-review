@@ -1,0 +1,855 @@
+{
+  "version": 3,
+  "generatedAt": "2026-10-29T12:00:00.000Z",
+  "assetsDir": null,
+  "repos": [
+    {
+      "id": "app",
+      "name": "example/notes-app",
+      "ref": "origin/main",
+      "commit": "3f2a9c1d0e4b5a6978c1d2e3f4a5b6c7d8e9f0a1"
+    },
+    {
+      "id": "api",
+      "name": "example/notes-api",
+      "ref": "origin/main",
+      "commit": "8b41d07a1b2c3d4e5f60718293a4b5c6d7e8f901"
+    }
+  ],
+  "domains": [
+    {
+      "id": "editing",
+      "title": "Editing",
+      "purpose": "Writing and changing notes."
+    },
+    {
+      "id": "sharing",
+      "title": "Sharing",
+      "purpose": "Giving others a note to read or edit."
+    },
+    {
+      "id": "importing",
+      "title": "Importing",
+      "purpose": "Bringing notes in from other tools."
+    },
+    {
+      "id": "accounts",
+      "title": "Accounts",
+      "purpose": "Who may sign in and what they may do."
+    },
+    {
+      "id": "operations",
+      "title": "Operations",
+      "purpose": "Builds, releases and what keeps it running."
+    }
+  ],
+  "systems": [
+    {
+      "id": "editor",
+      "title": "Editor",
+      "purpose": "The app people write notes in.",
+      "sides": [
+        {
+          "repo": "app",
+          "paths": [
+            "src/"
+          ]
+        }
+      ],
+      "capabilities": [
+        "editing/offline-edits",
+        "editing/tables",
+        "accounts/sign-in"
+      ],
+      "components": []
+    },
+    {
+      "id": "importer",
+      "title": "Importer",
+      "purpose": "Turns files from other tools into notes.",
+      "sides": [
+        {
+          "repo": "app",
+          "paths": [
+            "tools/importer/"
+          ]
+        }
+      ],
+      "capabilities": [
+        "importing/markdown-import",
+        "importing/import-report"
+      ],
+      "components": []
+    },
+    {
+      "id": "api",
+      "title": "API",
+      "purpose": "Stores notes and accounts.",
+      "sides": [
+        {
+          "repo": "api",
+          "paths": [
+            "src/"
+          ]
+        }
+      ],
+      "capabilities": [
+        "editing/offline-edits",
+        "sharing/share-links",
+        "accounts/sign-in",
+        "accounts/audit-log"
+      ],
+      "components": []
+    },
+    {
+      "id": "web",
+      "title": "Web app",
+      "purpose": "Notes and the admin pages in the browser.",
+      "sides": [
+        {
+          "repo": "api",
+          "paths": [
+            "web/"
+          ]
+        }
+      ],
+      "capabilities": [
+        "sharing/share-links",
+        "accounts/sign-in",
+        "accounts/audit-log"
+      ],
+      "components": []
+    },
+    {
+      "id": "release",
+      "title": "Release pipeline",
+      "purpose": "Turns a tag into a signed app and a deployed API.",
+      "sides": [
+        {
+          "repo": "app",
+          "paths": [
+            ".github/"
+          ]
+        },
+        {
+          "repo": "api",
+          "paths": [
+            ".github/"
+          ]
+        }
+      ],
+      "capabilities": [
+        "operations/release-builds"
+      ],
+      "components": []
+    },
+    {
+      "id": "telemetry",
+      "title": "Telemetry",
+      "purpose": "Crash and usage reports.",
+      "sides": [
+        {
+          "repo": "api",
+          "paths": [
+            "src/telemetry/"
+          ]
+        }
+      ],
+      "capabilities": [],
+      "components": []
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "editing/offline-edits",
+      "domain": "editing",
+      "title": "Offline edits",
+      "summary": "You can keep writing when the connection drops: the app keeps every edit and sends it when the connection returns, and a banner says you are offline.",
+      "review": "unreviewed",
+      "reviewed": {
+        "commit": "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1",
+        "date": "2026-10-10T10:00:00Z",
+        "pr": 20
+      },
+      "systems": [
+        "editor",
+        "api"
+      ],
+      "sides": [
+        {
+          "repo": "app",
+          "spec": "specs/editing/offline-edits/spec.md",
+          "review": "unreviewed",
+          "reviewed": {
+            "commit": "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1",
+            "date": "2026-10-10T10:00:00Z",
+            "pr": 20
+          },
+          "code": [
+            "src/sync/",
+            "src/editor/OfflineBanner.ts"
+          ],
+          "systems": [
+            "editor"
+          ],
+          "components": [],
+          "problems": []
+        },
+        {
+          "repo": "api",
+          "spec": "specs/editing/offline-edits/spec.md",
+          "review": "unreviewed",
+          "reviewed": {
+            "commit": "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1",
+            "date": "2026-10-10T10:00:00Z",
+            "pr": 20
+          },
+          "code": [
+            "src/sync/"
+          ],
+          "systems": [
+            "api"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [
+        {
+          "repo": "app",
+          "kind": "board",
+          "path": "specs/editing/offline-edits/looks/offline-banner.html",
+          "id": "banner",
+          "caption": "The banner after five seconds offline",
+          "exists": true,
+          "asset": null
+        },
+        {
+          "repo": "app",
+          "kind": "page",
+          "target": "/notes/demo",
+          "caption": "Open a note, then turn off the network"
+        }
+      ],
+      "requirements": [
+        {
+          "repo": "app",
+          "name": "Edits made offline are kept",
+          "text": "When the connection drops, the app SHALL keep every edit and send it when the connection returns, because a user otherwise loses work.",
+          "scenarios": [
+            {
+              "name": "An edit made offline reaches the others",
+              "slug": "an-edit-made-offline-reaches-the-others",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "src/sync/offline.test.ts",
+                  "selector": "keeps edits made offline",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            },
+            {
+              "name": "The banner shows after five seconds",
+              "slug": "the-banner-shows-after-five-seconds",
+              "text": "",
+              "table": null,
+              "proofs": [],
+              "tested": false
+            }
+          ]
+        }
+      ],
+      "pendingChanges": [
+        "offline-banner-delay"
+      ]
+    },
+    {
+      "id": "editing/tables",
+      "domain": "editing",
+      "title": "Tables",
+      "summary": "Put a table in a note and edit its cells like text.",
+      "review": "changes-requested",
+      "reviewed": {
+        "commit": "bbbb222bbbb222bbbb222bbbb222bbbb222bbbb2",
+        "date": "2026-10-26T09:00:00Z",
+        "pr": 38
+      },
+      "systems": [
+        "editor"
+      ],
+      "sides": [
+        {
+          "repo": "app",
+          "spec": "specs/editing/tables/spec.md",
+          "review": "changes-requested",
+          "reviewed": {
+            "commit": "bbbb222bbbb222bbbb222bbbb222bbbb222bbbb2",
+            "date": "2026-10-26T09:00:00Z",
+            "pr": 38
+          },
+          "code": [
+            "src/editor/tables/"
+          ],
+          "systems": [
+            "editor"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [
+        {
+          "repo": "app",
+          "kind": "board",
+          "path": "specs/editing/tables/looks/tables.html",
+          "id": "grid",
+          "caption": "A three-column table",
+          "exists": true,
+          "asset": null
+        }
+      ],
+      "requirements": [
+        {
+          "repo": "app",
+          "name": "Cells are edited in place",
+          "text": "When a user types in a cell, the app SHALL change only that cell, because a table is edited like text.",
+          "scenarios": [
+            {
+              "name": "Typing in a cell changes only that cell",
+              "slug": "typing-in-a-cell-changes-only-that-cell",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "src/editor/tables/cells.test.ts",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            }
+          ]
+        }
+      ],
+      "pendingChanges": []
+    },
+    {
+      "id": "sharing/share-links",
+      "domain": "sharing",
+      "title": "Share links",
+      "summary": "Send anyone a link to a note. The link stops working after the time you chose.",
+      "review": "unreviewed",
+      "reviewed": null,
+      "systems": [
+        "api",
+        "web"
+      ],
+      "sides": [
+        {
+          "repo": "api",
+          "spec": "specs/sharing/share-links/spec.md",
+          "review": "unreviewed",
+          "reviewed": null,
+          "code": [
+            "src/share/",
+            "web/share/"
+          ],
+          "systems": [
+            "api",
+            "web"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [
+        {
+          "repo": "api",
+          "kind": "page",
+          "target": "/share/demo",
+          "caption": "A shared note, opened from its link"
+        }
+      ],
+      "requirements": [
+        {
+          "repo": "api",
+          "name": "A link expires",
+          "text": "When the time a link was made for runs out, the service SHALL refuse it, because a shared note is shared for a while.",
+          "scenarios": [
+            {
+              "name": "An expired link shows that it expired",
+              "slug": "an-expired-link-shows-that-it-expired",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "src/share/expiry.test.ts",
+                  "selector": "refuses an expired link",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            }
+          ]
+        }
+      ],
+      "pendingChanges": [
+        "share-links-expiry"
+      ]
+    },
+    {
+      "id": "accounts/sign-in",
+      "domain": "accounts",
+      "title": "Sign-in",
+      "summary": "Sign in once on a trusted device and stay signed in for 30 days.",
+      "review": "unreviewed",
+      "reviewed": null,
+      "systems": [
+        "editor",
+        "api",
+        "web"
+      ],
+      "sides": [
+        {
+          "repo": "app",
+          "spec": "specs/accounts/sign-in/spec.md",
+          "review": "unreviewed",
+          "reviewed": null,
+          "code": [
+            "src/auth/"
+          ],
+          "systems": [
+            "editor"
+          ],
+          "components": [],
+          "problems": []
+        },
+        {
+          "repo": "api",
+          "spec": "specs/accounts/sign-in/spec.md",
+          "review": "unreviewed",
+          "reviewed": null,
+          "code": [
+            "src/auth/",
+            "web/sign-in/"
+          ],
+          "systems": [
+            "api",
+            "web"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [],
+      "requirements": [
+        {
+          "repo": "api",
+          "name": "A trusted device stays signed in",
+          "text": "When a user signs in on a trusted device, the service SHALL keep them signed in for 30 days, because signing in each day is a chore.",
+          "scenarios": [
+            {
+              "name": "A trusted device is still signed in the next day",
+              "slug": "a-trusted-device-is-still-signed-in-the-next-day",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "src/auth/session.test.ts",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            }
+          ]
+        }
+      ],
+      "pendingChanges": []
+    },
+    {
+      "id": "importing/markdown-import",
+      "domain": "importing",
+      "title": "Markdown import",
+      "summary": "Turns a folder of Markdown files into notes, keeping their headings, links and pictures.",
+      "review": "approved",
+      "reviewed": {
+        "commit": "cccc333cccc333cccc333cccc333cccc333cccc3",
+        "date": "2026-10-12T15:00:00Z",
+        "pr": 30
+      },
+      "systems": [
+        "importer"
+      ],
+      "sides": [
+        {
+          "repo": "app",
+          "spec": "specs/importing/markdown-import/spec.md",
+          "review": "approved",
+          "reviewed": {
+            "commit": "cccc333cccc333cccc333cccc333cccc333cccc3",
+            "date": "2026-10-12T15:00:00Z",
+            "pr": 30
+          },
+          "code": [
+            "tools/importer/markdown/"
+          ],
+          "systems": [
+            "importer"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [],
+      "requirements": [
+        {
+          "repo": "app",
+          "name": "Headings and links are kept",
+          "text": "The importer SHALL keep every heading and link of a Markdown file, because a note should read as the file did.",
+          "scenarios": [
+            {
+              "name": "A heading becomes a heading",
+              "slug": "a-heading-becomes-a-heading",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "tools/importer/markdown/headings.test.ts",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            },
+            {
+              "name": "A link between files points at the other note",
+              "slug": "a-link-between-files-points-at-the-other-note",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "tools/importer/markdown/links.test.ts",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            },
+            {
+              "name": "A picture travels with its note",
+              "slug": "a-picture-travels-with-its-note",
+              "text": "",
+              "table": null,
+              "proofs": [],
+              "tested": false
+            }
+          ]
+        }
+      ],
+      "pendingChanges": []
+    },
+    {
+      "id": "importing/import-report",
+      "domain": "importing",
+      "title": "Import report",
+      "summary": "Each import writes a report of what came in and what was skipped.",
+      "review": "approved",
+      "reviewed": {
+        "commit": "dddd444dddd444dddd444dddd444dddd444dddd4",
+        "date": "2026-10-14T15:00:00Z",
+        "pr": 31
+      },
+      "systems": [
+        "importer"
+      ],
+      "sides": [
+        {
+          "repo": "app",
+          "spec": "specs/importing/import-report/spec.md",
+          "review": "approved",
+          "reviewed": {
+            "commit": "dddd444dddd444dddd444dddd444dddd444dddd4",
+            "date": "2026-10-14T15:00:00Z",
+            "pr": 31
+          },
+          "code": [
+            "tools/importer/report/"
+          ],
+          "systems": [
+            "importer"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [],
+      "requirements": [
+        {
+          "repo": "app",
+          "name": "Skipped files are named",
+          "text": "The importer SHALL name every file it skipped and why, because a silent skip loses notes.",
+          "scenarios": [
+            {
+              "name": "A file it cannot read is named in the report",
+              "slug": "a-file-it-cannot-read-is-named-in-the-report",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "tools/importer/report/report.test.ts",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            }
+          ]
+        }
+      ],
+      "pendingChanges": []
+    },
+    {
+      "id": "accounts/audit-log",
+      "domain": "accounts",
+      "title": "Audit log",
+      "summary": "Every change an admin makes is written to a log they can read.",
+      "review": "approved",
+      "reviewed": {
+        "commit": "eeee555eeee555eeee555eeee555eeee555eeee5",
+        "date": "2026-10-09T15:00:00Z",
+        "pr": 18
+      },
+      "systems": [
+        "api",
+        "web"
+      ],
+      "sides": [
+        {
+          "repo": "api",
+          "spec": "specs/accounts/audit-log/spec.md",
+          "review": "approved",
+          "reviewed": {
+            "commit": "eeee555eeee555eeee555eeee555eeee555eeee5",
+            "date": "2026-10-09T15:00:00Z",
+            "pr": 18
+          },
+          "code": [
+            "src/audit/",
+            "web/admin/audit/"
+          ],
+          "systems": [
+            "api",
+            "web"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [
+        {
+          "repo": "api",
+          "kind": "page",
+          "target": "/admin/audit",
+          "caption": "The log, newest first"
+        }
+      ],
+      "requirements": [
+        {
+          "repo": "api",
+          "name": "Admin changes are logged",
+          "text": "When an admin changes a setting, the service SHALL log who, what and when, because an admin answers for the change.",
+          "scenarios": [
+            {
+              "name": "A changed setting is in the log",
+              "slug": "a-changed-setting-is-in-the-log",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": "src/audit/log.test.ts",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            }
+          ]
+        }
+      ],
+      "pendingChanges": []
+    },
+    {
+      "id": "operations/release-builds",
+      "domain": "operations",
+      "title": "Release builds",
+      "summary": "A tagged commit becomes a signed app and a deployed API.",
+      "review": "approved",
+      "reviewed": {
+        "commit": "ffff666ffff666ffff666ffff666ffff666ffff6",
+        "date": "2026-10-05T15:00:00Z",
+        "pr": 12
+      },
+      "systems": [
+        "release"
+      ],
+      "sides": [
+        {
+          "repo": "app",
+          "spec": "specs/operations/release-builds/spec.md",
+          "review": "approved",
+          "reviewed": {
+            "commit": "ffff666ffff666ffff666ffff666ffff666ffff6",
+            "date": "2026-10-05T15:00:00Z",
+            "pr": 12
+          },
+          "code": [
+            ".github/workflows/release.yml"
+          ],
+          "systems": [
+            "release"
+          ],
+          "components": [],
+          "problems": []
+        },
+        {
+          "repo": "api",
+          "spec": "specs/operations/release-builds/spec.md",
+          "review": "approved",
+          "reviewed": {
+            "commit": "ffff666ffff666ffff666ffff666ffff666ffff6",
+            "date": "2026-10-05T15:00:00Z",
+            "pr": 12
+          },
+          "code": [
+            ".github/workflows/deploy.yml"
+          ],
+          "systems": [
+            "release"
+          ],
+          "components": [],
+          "problems": []
+        }
+      ],
+      "looks": [],
+      "requirements": [
+        {
+          "repo": "app",
+          "name": "A tag ships",
+          "text": "When a version tag is pushed, the pipeline SHALL build, sign and publish the app, because a release is one step.",
+          "scenarios": [
+            {
+              "name": "A tag publishes a signed build",
+              "slug": "a-tag-publishes-a-signed-build",
+              "text": "",
+              "table": null,
+              "proofs": [
+                {
+                  "check": "test",
+                  "state": "test",
+                  "path": ".github/workflows/release.yml",
+                  "exists": true
+                }
+              ],
+              "tested": true
+            }
+          ]
+        }
+      ],
+      "pendingChanges": []
+    }
+  ],
+  "changes": [
+    {
+      "id": "offline-banner-delay",
+      "title": "Show the offline banner sooner",
+      "sides": [
+        {
+          "repo": "app",
+          "path": "changes/offline-banner-delay",
+          "capabilities": [
+            "editing/offline-edits"
+          ],
+          "removes": [],
+          "review": "At the desk: open a note, turn off the network and count to five; the banner shows.",
+          "files": [
+            "proposal.md"
+          ],
+          "landed": {
+            "commit": "a91c3e0f00000000000000000000000000000000",
+            "date": "2026-10-28T10:00:00Z",
+            "pr": 41
+          }
+        }
+      ]
+    },
+    {
+      "id": "share-links-expiry",
+      "title": "Share links expire",
+      "sides": [
+        {
+          "repo": "api",
+          "path": "changes/share-links-expiry",
+          "capabilities": [
+            "sharing/share-links"
+          ],
+          "removes": [],
+          "review": null,
+          "files": [
+            "proposal.md"
+          ],
+          "landed": {
+            "commit": "0c7f913f00000000000000000000000000000000",
+            "date": "2026-10-22T10:00:00Z",
+            "pr": 35
+          }
+        }
+      ]
+    }
+  ],
+  "components": [],
+  "outside": {
+    "components": [],
+    "code": []
+  },
+  "uncovered": [
+    {
+      "repo": "app",
+      "system": "editor",
+      "path": "src/spellcheck/"
+    }
+  ],
+  "totals": {
+    "repos": 2,
+    "domains": 5,
+    "systems": 6,
+    "components": 0,
+    "capabilities": {
+      "total": 8,
+      "unreviewed": 3,
+      "approved": 4,
+      "changesRequested": 1
+    },
+    "scenarios": {
+      "total": 11,
+      "tested": 9,
+      "untested": 2
+    },
+    "changes": {
+      "total": 2
+    }
+  }
+}

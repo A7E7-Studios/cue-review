@@ -7,11 +7,12 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { runGate, Repo, formatSummary } from '../lib/index.mjs';
 import { BOM } from '../lib/git.mjs';
-import { GATE_DIR, makeRepo, testConfig, check, fails, failText, infos, specText, proposalText, baseFiles, git, lockText } from './helpers.mjs';
+import { readSystems } from '../lib/checks.mjs';
+import { GATE_DIR, makeRepo, testConfig, templateConfig, check, fails, failText, infos, specText, proposalText, boardText, baseFiles, git, lockText } from './helpers.mjs';
 
 const GATE = path.join(GATE_DIR, 'gate.mjs');
-const SPEC = 'specs/collaboration/peer-arrows/spec.md';
-const PROPOSAL = 'changes/peer-arrows/proposal.md';
+const SPEC = 'specs/collaboration/shared-cursors/spec.md';
+const PROPOSAL = 'changes/shared-cursors/proposal.md';
 
 function gate(r, opts = {}) {
   return runGate({ repo: new Repo(r.dir), base: 'main', head: 'HEAD', main: 'origin/main', config: testConfig(opts.config), ...opts });
@@ -42,51 +43,106 @@ test('an empty PR and a docs-only PR pass every check', (t) => {
 test('specs: a new valid capability with its change folder passes', (t) => {
   const r = setup(t, { ...baseFiles(), [SPEC]: null });
   r.branch('add').write({ [SPEC]: specText(), [PROPOSAL]: proposalText() });
-  r.commit('feat: peer arrows');
+  r.commit('feat: shared cursors');
   const rep = gate(r);
   assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
   assert.equal(check(rep, 'changes').status, 'pass', failText(rep, 'changes'));
-  assert.match(check(rep, 'specs').summary, /1 capabilities, 1 scenarios, 1 new or changed/);
+  assert.match(check(rep, 'specs').summary, /^1 capabilities, 1 scenarios \(0 untested\), 1 feature\(s\) new or changed in this PR$/);
 });
 
 test('specs: format, path, domain and missing paths fail on the spec that has them', (t) => {
   const r = setup(t);
   r.branch('bad').write({
     [SPEC]: specText({
-      code: ['src/arrows/', 'src/gone.js', 'src/arrows/arrows.js/', 'src'],
-      proofs: ['test: src/missing.test.js', 'test: src/arrows/arrows.test.js/', 'test: src/arrows', 'test: src/arrows/', 'headset: maybe'],
+      code: ['src/cursors/', 'src/gone.js', 'src/cursors/cursors.js/', 'src'],
+      proofs: ['test: src/missing.test.js', 'test: src/cursors/cursors.test.js/', 'test: src/cursors', 'test: src/cursors/', 'desk: open'],
     }),
     'specs/no-such-domain/thing/spec.md': specText({ title: 'Thing' }),
     'specs/collaboration/Bad_Id/spec.md': specText({ title: 'Bad' }),
-    'specs/collaboration/no-spec/look/x.png': 'png',
-    'specs/collaboration/peer-arrows/look/a-peer-walks-behind-the-user.png': 'png',
-    'specs/collaboration/peer-arrows/look/nobody.png': 'png',
-    'specs/collaboration/peer-arrows/notes.txt': 'x',
+    'specs/collaboration/no-spec/looks/board.html': boardText(),
+    'specs/collaboration/shared-cursors/notes.txt': 'x',
+    'specs/collaboration/shared-cursors/looks/sub/board.html': boardText(),
     'specs/loose.md': '# loose\n',
     [PROPOSAL]: proposalText(),
   });
   r.commit('feat: broken specs');
   const msgs = failText(gate(r), 'specs');
   assert.match(msgs, /code: no file src\/gone\.js/);
-  assert.match(msgs, /code: src\/arrows\/arrows\.js\/ is a file; drop the trailing \//);
+  assert.match(msgs, /code: src\/cursors\/cursors\.js\/ is a file; drop the trailing \//);
   assert.match(msgs, /code: src is a folder; end it with \//);
   assert.match(msgs, /test path no file src\/missing\.test\.js/);
-  assert.match(msgs, /test path src\/arrows\/arrows\.test\.js\/ is a file; drop the trailing \//);
-  assert.match(msgs, /test path src\/arrows is a folder; end it with \//);
-  assert.doesNotMatch(msgs, /test path src\/arrows\/ /, 'a folder written with / is fine');
-  assert.match(msgs, /takes "open"/);
+  assert.match(msgs, /test path src\/cursors\/cursors\.test\.js\/ is a file; drop the trailing \//);
+  assert.match(msgs, /test path src\/cursors is a folder; end it with \//);
+  assert.doesNotMatch(msgs, /test path src\/cursors\/ /, 'a folder written with / is fine');
+  assert.match(msgs, /"desk:": a scenario is proven by tests only/);
   assert.match(msgs, /domain "no-such-domain" is not in specs\/domains\.json/);
   assert.match(msgs, /capability "Bad_Id" is not kebab-case/);
   assert.match(msgs, /specs\/collaboration\/no-spec\/ has no spec\.md/);
-  assert.match(msgs, /look nobody\.png names no scenario/);
-  assert.doesNotMatch(msgs, /look a-peer-walks-behind-the-user\.png/);
-  assert.match(msgs, /notes\.txt.*stray file: a capability folder holds/);
-  assert.match(msgs, /specs\/loose\.md.*stray file: specs\/ holds/);
+  assert.match(msgs, /notes\.txt: stray file: a capability folder holds spec\.md and the boards its Looks name/);
+  assert.match(msgs, /looks\/sub\/board\.html: stray file/);
+  assert.match(msgs, /specs\/loose\.md: stray file: specs\/ holds README\.md, domains\.json, systems\.json/);
+});
+
+test('specs and changes: no image or video file is committed anywhere under specs/ or changes/', (t) => {
+  const r = setup(t, baseFiles({ [PROPOSAL]: proposalText() }));
+  const media = [
+    'specs/collaboration/shared-cursors/look/a-collaborator-edits-the-same-note.png',
+    'specs/collaboration/shared-cursors/looks/cursor.svg',
+    'specs/collaboration/no-spec/frame.jpg',
+    'specs/cover.webp',
+    'changes/shared-cursors/frame-0012.png',
+    'changes/shared-cursors/evidence/clip.mp4',
+    'changes/still.gif',
+  ];
+  r.branch('x').write(Object.fromEntries(media.map((p) => [p, 'binary'])));
+  r.commit('docs: pictures');
+  const rep = gate(r);
+  const all = [...fails(rep, 'specs'), ...fails(rep, 'changes')];
+  for (const p of media) {
+    assert.ok(all.some((f) => f.file === p && /an image or video file: none is committed under specs\/ or changes\/ \(a look is an HTML board beside its spec, feedback is text\)/.test(f.message)), p);
+  }
+  assert.doesNotMatch(failText(rep, 'specs'), /stray file/, 'a picture gets the picture message');
+});
+
+const BOARD = 'specs/collaboration/shared-cursors/looks/cursor.html';
+const SYSTEMS = JSON.stringify([
+  { id: 'editor', title: 'Editor', purpose: 'The app people write notes in.', paths: ['src/'] },
+  { id: 'docs', title: 'Docs', purpose: 'The guide.', paths: ['README.md'] },
+]);
+
+
+test('specs: a board a Looks line names exists, holds the id and loads nothing from the network; page lines are not checked', (t) => {
+  const r = setup(t, { ...baseFiles(), [SPEC]: null });
+  const looks = ['looks/cursor.html#idle — The cursor at rest', 'looks/cursor.html#typing — The cursor while typing', 'page: /notes/<id> — Open a note with a second window'];
+  r.branch('ok').write({ [SPEC]: specText({ looks }), [BOARD]: boardText(['idle', 'typing']), [PROPOSAL]: proposalText(), 'specs/systems.json': SYSTEMS });
+  r.commit('feat: cursors with looks');
+  let rep = gate(r);
+  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
+  assert.equal(check(rep, 'budgets').status, 'pass', failText(rep, 'budgets'));
+  r.branch('bad', 'main').write({
+    [SPEC]: specText({ looks: [...looks, 'looks/missing.html#main — Gone'] }),
+    [BOARD]: boardText(['idle'], { extra: '<link rel="stylesheet" href="https://fonts.example.invalid/x.css">\n<div style="background: url(http://example.invalid/a.png)"></div>' }),
+    'specs/collaboration/shared-cursors/looks/unused.html': boardText(),
+    [PROPOSAL]: proposalText(),
+  });
+  r.commit('feat: broken looks');
+  rep = gate(r);
+  const msgs = failText(rep, 'specs');
+  assert.match(msgs, /spec\.md:\d+ Looks: looks\/cursor\.html holds no element with id "typing"/);
+  assert.match(msgs, /spec\.md:\d+ Looks: no board specs\/collaboration\/shared-cursors\/looks\/missing\.html/);
+  assert.match(msgs, /looks\/cursor\.html:\d+ loads https:\/\/fonts\.example\.invalid\/x\.css from outside the board: a board is self-contained/);
+  assert.match(msgs, /looks\/cursor\.html:\d+ loads http:\/\/example\.invalid\/a\.png from outside the board/);
+  assert.match(msgs, /looks\/unused\.html: board looks\/unused\.html is named by no Looks line of specs\/collaboration\/shared-cursors\/spec\.md/);
+  assert.equal(fails(rep, 'specs').length, 5, msgs);
+  // a board over its budget, like a spec
+  r.branch('big', 'main').write({ [SPEC]: specText({ looks }), [BOARD]: boardText(['idle', 'typing'], { extra: `<p>${'x'.repeat(31000)}</p>` }), [PROPOSAL]: proposalText() });
+  r.commit('feat: a big board');
+  assert.match(failText(gate(r), 'budgets'), /looks\/cursor\.html: new file of \d+ bytes, over its budget of 30720/);
 });
 
 test('specs: domains.json must read; a PR writing under specs/ answers for it', (t) => {
   const r = setup(t, { ...baseFiles(), 'specs/domains.json': null });
-  r.branch('x').write({ [SPEC]: specText({ purpose: 'A better purpose.' }), [PROPOSAL]: proposalText() });
+  r.branch('x').write({ [SPEC]: specText({ summary: 'A better summary.' }), [PROPOSAL]: proposalText() });
   r.commit('feat: edit a spec');
   assert.match(failText(gate(r), 'specs'), /specs\/domains\.json is missing/);
   r.write({ 'specs/domains.json': '[{"id":"collaboration","title":"","purpose":"x"},{"id":"collaboration","title":"t","purpose":"p"}]' });
@@ -99,136 +155,234 @@ test('specs: domains.json must read; a PR writing under specs/ answers for it', 
   assert.match(failText(gate(r), 'specs'), /not JSON/);
 });
 
+test('specs: systems.json is optional; when present, each system has an id, a title, a purpose and paths present at the commit, no path twice', (t) => {
+  const r = setup(t);
+  r.branch('ok').write({ 'specs/systems.json': SYSTEMS });
+  r.commit('docs: systems');
+  let rep = gate(r);
+  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
+  const repo = new Repo(r.dir);
+  assert.deepEqual(readSystems(repo, 'HEAD'), { present: true, systems: JSON.parse(SYSTEMS), problems: [] });
+  assert.deepEqual(readSystems(repo, 'main'), { present: false, systems: [], problems: [] }, 'absent is fine');
+  r.branch('bad', 'main').write({
+    'specs/systems.json': JSON.stringify([
+      { id: 'editor', title: 'Editor', purpose: 'The app.', paths: ['src/', 'src/cursors', 'src/gone/', '../x'] },
+      { id: 'editor', title: '', purpose: 'Again.', paths: [] },
+      { id: 'Sync_Service', title: 'Sync', purpose: ' ', paths: ['src/', 7] },
+      'not an object',
+    ]),
+  });
+  r.commit('docs: bad systems');
+  rep = gate(r);
+  const msgs = failText(rep, 'specs');
+  for (const m of [
+    /system "editor": paths: src\/cursors is a folder; end it with \//,
+    /system "editor": paths: no folder src\/gone\//,
+    /system "editor": paths: "\.\.\/x" has an empty, "\." or "\.\." segment/,
+    /system "editor" appears twice/,
+    /system "editor": "title" is a non-empty string/,
+    /system "editor": "paths" is a non-empty list of repository paths/,
+    /entry 2: id "Sync_Service" is not kebab-case/,
+    /entry 2: "purpose" is a non-empty string/,
+    /entry 2: paths: src\/ is declared by system "editor" too; a path belongs to one system/,
+    /entry 2: paths: 7 is not a string/,
+    /entry 3 is not an object/,
+  ]) {
+    assert.match(msgs, m);
+  }
+  assert.ok(fails(rep, 'specs').every((f) => f.file === 'specs/systems.json'), msgs);
+  r.write({ 'specs/systems.json': '{"id": "editor"}' });
+  r.commit('docs: systems as an object');
+  assert.match(failText(gate(r), 'specs'), /specs\/systems\.json: a list of \{ "id", "title", "purpose", "paths" \}/);
+  r.write({ 'specs/systems.json': '[' });
+  r.commit('docs: systems cut short');
+  assert.match(failText(gate(r), 'specs'), /specs\/systems\.json: not JSON/);
+  assert.equal(readSystems(new Repo(r.dir), 'HEAD').systems, null, 'unreadable');
+});
+
+test('specs: systems.json is judged as one unit: a path this PR deletes fails it, an older problem is information', (t) => {
+  const r = setup(t, baseFiles({ 'specs/systems.json': JSON.stringify([{ id: 'editor', title: 'Editor', purpose: 'The app.', paths: ['src/cursors/cursors.js', 'src/long-gone.js'] }]) }));
+  r.branch('x').write({ 'README.md': '# Root\n\nOther words.\n' });
+  r.commit('docs: unrelated');
+  let rep = gate(r);
+  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
+  assert.match(infos(rep, 'specs').map((f) => f.message).join('\n'), /already at the merge base: system "editor": paths: no file src\/long-gone\.js/);
+  r.write({ 'src/cursors/cursors.js': null, 'src/README.md': '# Source\n\nNo cursors.\n' });
+  r.commit('refactor: drop the cursors code');
+  rep = gate(r);
+  assert.match(failText(rep, 'specs'), /specs\/systems\.json: system "editor": paths: no file src\/cursors\/cursors\.js/);
+  assert.doesNotMatch(failText(rep, 'specs'), /long-gone/);
+});
+
 test('specs: a problem already on main in an untouched spec is information; one this PR causes fails', (t) => {
-  const r = setup(t, baseFiles({ [SPEC]: specText({ code: ['src/arrows/', 'src/long-gone.js'] }) }));
+  const r = setup(t, baseFiles({ [SPEC]: specText({ code: ['src/cursors/', 'src/long-gone.js'] }) }));
   r.branch('x').write({ 'README.md': '# Root\n\nOther words.\n' });
   r.commit('docs: unrelated');
   let rep = gate(r);
   assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
   assert.match(infos(rep, 'specs').map((f) => f.message).join('\n'), /already at the merge base: code: no file src\/long-gone\.js/);
   // deleting a test the untouched spec names fails this PR
-  r.write({ 'src/arrows/arrows.test.js': null });
+  r.write({ 'src/cursors/cursors.test.js': null });
   r.commit('chore: delete a test');
   rep = gate(r);
-  assert.match(failText(rep, 'specs'), /test path no file src\/arrows\/arrows\.test\.js/);
+  assert.match(failText(rep, 'specs'), /test path no file src\/cursors\/cursors\.test\.js/);
 });
 
 test('specs: a domains.json or spec saved with a byte-order mark reads like any other', (t) => {
   const bom = (s) => `${BOM}${s}`;
   const r = setup(t, { ...baseFiles(), 'specs/domains.json': bom(baseFiles()['specs/domains.json']) });
-  r.branch('x').write({ [SPEC]: bom(specText({ purpose: 'A better purpose.' }).replace(/\n/g, '\r\n')), [PROPOSAL]: proposalText() });
-  r.commit('feat: purpose');
+  r.branch('x').write({ [SPEC]: bom(specText({ summary: 'A better summary.' }).replace(/\n/g, '\r\n')), [PROPOSAL]: proposalText() });
+  r.commit('feat: summary');
   const rep = gate(r);
   assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
   assert.equal(check(rep, 'changes').status, 'pass', failText(rep, 'changes'));
 });
 
-test('specs: a changed or new scenario carries no pass or fail; an unchanged one keeps its owner\'s word', (t) => {
-  const PASS = 'two-headsets: pass 2026-10-30, build 1.4.2, by owner';
-  const r = setup(t, baseFiles({ [SPEC]: specText({ proofs: ['test: src/arrows/arrows.test.js', PASS] }) }));
-  // triage: PROOF lines only, on an unchanged scenario
-  r.branch('triage').write({ [SPEC]: specText({ proofs: ['test: src/arrows/arrows.test.js', 'two-headsets: fail 2026-10-31, build 1.4.3, by owner; arrow lags'] }) });
+// --- the review on the feature -----------------------------------------------------------------
+
+const APPROVED = baseFiles({ [SPEC]: specText({ review: 'approved' }) });
+
+test('review: a new spec is unreviewed', (t) => {
+  const r = setup(t, { ...baseFiles(), [SPEC]: null });
+  for (const review of ['approved', 'changes-requested']) {
+    r.branch(review, 'main').write({ [SPEC]: specText({ review }), [PROPOSAL]: proposalText() });
+    r.commit('feat: shared cursors');
+    const msgs = failText(gate(r), 'specs');
+    assert.match(msgs, new RegExp(`spec\\.md:1 collaboration/shared-cursors: review is "${review}", but it is new; this PR carries change folder shared-cursors, which names it: a new or changed feature goes back to review: unreviewed`), review);
+  }
+});
+
+test('review: a PR that changes a spec\'s text or its boards sets it back to unreviewed', (t) => {
+  const r = setup(t, APPROVED);
+  r.branch('text').write({ [SPEC]: specText({ review: 'approved', then: 'it glows' }), 'changes/glow/proposal.md': proposalText({ title: 'Glow' }) });
+  r.commit('feat: glow');
+  assert.match(failText(gate(r), 'specs'), /collaboration\/shared-cursors: review is "approved", but its spec text changed; this PR carries change folder glow, which names it: a new or changed feature goes back to review: unreviewed/);
+  r.write({ [SPEC]: specText({ then: 'it glows' }) });
+  r.commit('feat: glow, unreviewed');
+  let rep = gate(r);
+  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
+  assert.equal(infos(rep, 'specs').filter((f) => f.notice).length, 0, 'a reset that the PR must make is no notice');
+  // a board only: spec.md untouched, the feature still changed
+  const withBoard = baseFiles({ [SPEC]: specText({ review: 'approved', looks: ['looks/cursor.html#idle — At rest'] }), [BOARD]: boardText(['idle']) });
+  const b = setup(t, withBoard);
+  b.branch('board').write({ [BOARD]: boardText(['idle'], { extra: '<p>Brighter.</p>' }), 'changes/brighter/proposal.md': proposalText({ title: 'Brighter' }) });
+  b.commit('feat: a brighter cursor');
+  assert.match(failText(gate(b), 'specs'), /collaboration\/shared-cursors: review is "approved", but its boards changed; this PR carries change folder brighter/);
+  // a change folder alone names it: the feature goes back to unreviewed (ship's code-only fix)
+  r.branch('fix', 'main').write({ 'src/cursors/cursors.js': 'export const cursors = 2;\n', 'src/README.md': '# Source\n\nFixed.\n', 'changes/fix-cursor/proposal.md': proposalText({ title: 'Fix the cursor' }) });
+  r.commit('fix: the cursor');
+  assert.match(failText(gate(r), 'specs'), /^specs\/collaboration\/shared-cursors\/spec\.md:1 collaboration\/shared-cursors: review is "approved", but this PR carries change folder fix-cursor, which names it: a new or changed feature goes back to review: unreviewed$/);
+  r.write({ [SPEC]: specText() });
+  r.commit('fix: the cursor, unreviewed');
+  rep = gate(r);
+  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
+  assert.equal(infos(rep, 'specs').filter((f) => f.notice).length, 0);
+});
+
+test('review: a triage PR sets review alone, shown as a notice; PROOF, code and re-wrapping change no review', (t) => {
+  const r = setup(t, baseFiles({ [SPEC]: specText(), [PROPOSAL]: proposalText() }));
+  // triage: the verdict, and the change folder deleted
+  r.branch('triage').write({ [SPEC]: specText({ review: 'approved' }), [PROPOSAL]: null });
   r.commit('docs: triage');
   let rep = gate(r);
   assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
   assert.equal(check(rep, 'changes').status, 'pass', failText(rep, 'changes'));
-  // the verdict written is a notice: scenario, check and value, first in the information
   const notice = infos(rep, 'specs').find((f) => f.notice);
-  assert.equal(notice.message, 'Arrows point at peers out of view / A peer walks behind the user: writes "two-headsets: fail 2026-10-31, build 1.4.3, by owner; arrow lags"');
-  assert.match(formatSummary(rep), /### Information\n- specs: `specs\/collaboration\/peer-arrows\/spec\.md:\d+` Arrows point at peers out of view \/ A peer walks behind the user: writes "two-headsets: fail/);
-  // a changed scenario keeps no fail either
-  r.branch('keeps-fail', 'triage').write({ [SPEC]: specText({ then: 'it glows', proofs: ['test: src/arrows/arrows.test.js', 'two-headsets: fail 2026-10-31, build 1.4.3, by owner; arrow lags'] }), [PROPOSAL]: proposalText() });
-  r.commit('feat: glow');
-  assert.match(failText(gate(r, { base: 'triage' }), 'specs'), /"two-headsets: fail" on a scenario whose text changed/);
-  // a changed scenario keeps every human check it had, as open; dropping one fails
-  r.branch('drops', 'main').write({ [SPEC]: specText({ then: 'it glows', proofs: ['test: src/arrows/arrows.test.js'] }), [PROPOSAL]: proposalText() });
-  r.commit('feat: glow, no check');
-  assert.match(failText(gate(r), 'specs'), /drops its "two-headsets" check; a changed scenario keeps every human check it had at the merge base, as "two-headsets: open"/);
-  // the scenario's text changes and keeps its pass
-  r.branch('edit', 'main').write({ [SPEC]: specText({ then: 'the other sees a pulsing arrow', proofs: ['test: src/arrows/arrows.test.js', PASS] }), [PROPOSAL]: proposalText() });
-  r.commit('feat: pulse');
-  rep = gate(r);
-  assert.match(failText(rep, 'specs'), /"two-headsets: pass" on a scenario whose text changed since the merge base/);
-  // reset to open: fine
-  r.write({ [SPEC]: specText({ then: 'the other sees a pulsing arrow', proofs: ['test: src/arrows/arrows.test.js', 'two-headsets: open'] }) });
-  r.commit('feat: pulse, reset');
-  rep = gate(r);
-  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
-  // re-wrapping a step is not a text change
-  r.branch('wrap', 'main').write({
-    [SPEC]: specText({ proofs: ['test: src/arrows/arrows.test.js', PASS] }).replace('- **WHEN** one user walks behind the other', '- **WHEN** one user walks\n  behind the other'),
-  });
-  r.commit('docs: wrap');
-  rep = gate(r);
-  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
-  // a new scenario cannot arrive approved
-  const scenarios = [
-    { name: 'A peer walks behind the user', steps: ['WHEN one user walks behind the other', 'THEN the other sees an arrow'], proofs: ['test: src/arrows/arrows.test.js', PASS] },
-    { name: 'A peer leaves', steps: ['WHEN a peer leaves', 'THEN the arrow goes'], proofs: ['desk: pass 2026-10-30, build 1.4.2, by owner'] },
-  ];
-  r.branch('new', 'main').write({ [SPEC]: specText({ scenarios }), [PROPOSAL]: proposalText() });
-  r.commit('feat: leave');
-  assert.match(failText(gate(r), 'specs'), /A peer leaves: "desk: pass" on a scenario new in this PR/);
+  assert.deepEqual([notice.message, notice.file], ['collaboration/shared-cursors: sets review: approved', SPEC]);
+  assert.match(formatSummary(rep), /### Information\n- specs: `specs\/collaboration\/shared-cursors\/spec\.md:1` collaboration\/shared-cursors: sets review: approved\n/);
+  r.branch('requested', 'main').write({ [SPEC]: specText({ review: 'changes-requested' }) });
+  r.commit('docs: triage');
+  assert.equal(infos(gate(r), 'specs').find((f) => f.notice).message, 'collaboration/shared-cursors: sets review: changes-requested');
+  // on an approved feature, PROOF lines, code paths and a re-wrapped step change no review
+  const a = setup(t, APPROVED);
+  for (const [name, text] of [
+    ['proof', specText({ review: 'approved', proofs: ['test: src/cursors/cursors.test.js::Cursors.others', 'test: src/cursors/'] })],
+    ['code', specText({ review: 'approved', code: ['src/cursors/', 'src/README.md'] })],
+    ['wrap', specText({ review: 'approved' }).replace('- **WHEN** one user types in a paragraph', '- **WHEN** one user types\n  in a paragraph')],
+  ]) {
+    a.branch(name, 'main').write({ [SPEC]: text });
+    a.commit(`docs: ${name}`);
+    rep = gate(a);
+    assert.equal(check(rep, 'specs').status, 'pass', `${name}: ${failText(rep, 'specs')}`);
+    assert.equal(check(rep, 'changes').status, 'pass', `${name}: ${failText(rep, 'changes')}`);
+    assert.equal(infos(rep, 'specs').filter((f) => f.notice).length, 0, name);
+  }
 });
 
 // --- changes ---------------------------------------------------------------------------------
 
-test('changes: a folder without proposal.md, a bad id, bad front matter, a missing capability, a stray file', (t) => {
+test('changes: a folder without proposal.md, a bad id, bad front matter, a missing capability, a stray file, a directions page that loads from outside', (t) => {
   const r = setup(t);
   r.branch('x').write({
     'changes/no-proposal/look.md': '# Look\n',
     'changes/Bad_Id/proposal.md': proposalText(),
-    'changes/bad-front/proposal.md': proposalText({ review: 'approved' }).replace('title: Arrows for peers\n', ''),
-    'changes/gone-cap/proposal.md': proposalText({ capabilities: ['collaboration/peer-arrows', 'layout/halls'] }),
+    'changes/bad-front/proposal.md': proposalText().replace('title: Cursors for collaborators\n', 'review: unreviewed\n'),
+    'changes/gone-cap/proposal.md': proposalText({ capabilities: ['collaboration/shared-cursors', 'layout/pages'] }),
+    'changes/full/proposal.md': proposalText(),
+    'changes/full/look.md': '# Look\n',
+    'changes/full/looks.html': '<!doctype html><style>:root { --ink: #222; }</style><section id="now"><svg viewBox="0 0 8 8"><rect width="8" height="8" fill="var(--ink)"/></svg></section>\n',
+    'changes/full/design.md': '# Design\n',
+    'changes/full/tasks.md': '- [ ] 1.1 x; test: y\n',
+    'changes/full/notes.txt': 'x\n',
+    'changes/full/evidence/notes.md': 'x\n',
     'changes/loose.md': 'x\n',
+    'changes/net/proposal.md': proposalText(),
+    'changes/net/looks.html': '<!doctype html>\n<link rel="stylesheet" href="https://cdn.example/x.css">\n',
   });
   r.commit('docs: changes');
-  const msgs = failText(gate(r), 'changes');
+  const rep = gate(r);
+  const msgs = failText(rep, 'changes');
   assert.match(msgs, /changes\/no-proposal\/ has no proposal\.md/);
   assert.match(msgs, /change id "Bad_Id" is not kebab-case/);
   assert.match(msgs, /front matter lacks "title"/);
-  assert.match(msgs, /review "approved"/);
-  assert.match(msgs, /capability layout\/halls has no specs\/layout\/halls\/spec\.md/);
-  assert.match(msgs, /changes\/loose\.md.*a change is a folder/);
+  assert.match(msgs, /unknown front matter key "review"/);
+  assert.match(msgs, /capability layout\/pages has no specs\/layout\/pages\/spec\.md/);
+  assert.match(msgs, /changes\/loose\.md: stray file: a change is a folder/);
+  assert.match(msgs, /changes\/full\/notes\.txt: stray file: a change folder holds only proposal\.md, looks\.html, look\.md, design\.md, tasks\.md/);
+  assert.match(msgs, /changes\/full\/evidence\/notes\.md: stray file: a change folder holds only/);
+  assert.equal(fails(rep, 'changes').filter((f) => f.file?.startsWith('changes/full/')).length, 2, `a self-contained looks.html is no stray file:\n${msgs}`);
+  assert.match(msgs, /changes\/net\/looks\.html:2 loads https:\/\/cdn\.example\/x\.css from outside the page: the directions page is self-contained/);
 });
 
 test('changes: deleting a capability a pending change names fails; the change\'s own older problems are information', (t) => {
-  const r = setup(t, baseFiles({ [PROPOSAL]: proposalText(), 'changes/old/proposal.md': proposalText({ review: 'stale' }) }));
+  const r = setup(t, baseFiles({ [PROPOSAL]: proposalText(), 'changes/old/proposal.md': proposalText().replace('capabilities:', 'follow-ups:\n  - later\ncapabilities:') }));
   r.branch('x').write({ [SPEC]: null, [PROPOSAL]: null, 'changes/other/proposal.md': proposalText({ title: 'Other' }) });
-  r.commit('feat: remove peer arrows');
+  r.commit('feat: remove shared cursors');
   const rep = gate(r);
-  assert.match(failText(rep, 'changes'), /changes\/other\/proposal\.md.*capability collaboration\/peer-arrows has no/);
-  assert.doesNotMatch(failText(rep, 'changes'), /review "stale"/);
-  assert.match(infos(rep, 'changes').map((f) => f.message).join('\n'), /already at the merge base: review "stale"/);
+  assert.match(failText(rep, 'changes'), /changes\/other\/proposal\.md.*capability collaboration\/shared-cursors has no/);
+  assert.doesNotMatch(failText(rep, 'changes'), /follow-ups/);
+  assert.match(infos(rep, 'changes').map((f) => f.message).join('\n'), /already at the merge base: unknown front matter key "follow-ups"/);
   // the old change also names the deleted capability: that is new, so it fails
-  assert.match(failText(rep, 'changes'), /changes\/old\/proposal\.md.*capability collaboration\/peer-arrows has no/);
+  assert.match(failText(rep, 'changes'), /changes\/old\/proposal\.md.*capability collaboration\/shared-cursors has no/);
 });
 
-test('changes: requirement text changed without a change folder that names it fails; PROOF-only, code-only and deletion-only PRs need none', (t) => {
-  const r = setup(t, baseFiles({ [PROPOSAL]: proposalText(), 'specs/layout/halls/spec.md': specText({ title: 'Halls' }) }));
+test('changes: spec text changed without a change folder that names it fails; PROOF-only, code-only, review-only and deletion-only PRs need none', (t) => {
+  const r = setup(t, baseFiles({ [PROPOSAL]: proposalText(), 'specs/layout/pages/spec.md': specText({ title: 'Pages' }) }));
   r.branch('text').write({ [SPEC]: specText({ then: 'it glows' }) });
   r.commit('feat: glow');
-  assert.match(failText(gate(r), 'changes'), /changes the requirement text of collaboration\/peer-arrows, which needs a change folder whose "capabilities" names collaboration\/peer-arrows; this PR adds or modifies no change folder/);
-  r.write({ [PROPOSAL]: proposalText({ title: 'Arrows that glow' }) });
+  assert.match(failText(gate(r), 'changes'), /changes the spec text of collaboration\/shared-cursors, which needs a change folder whose "capabilities" names collaboration\/shared-cursors; this PR adds or modifies no change folder/);
+  r.write({ [PROPOSAL]: proposalText({ title: 'Cursors that glow' }) });
   r.commit('docs: the change');
   assert.equal(check(gate(r), 'changes').status, 'pass', failText(gate(r), 'changes'));
   // a written change folder that does not name the capability does not count
   r.branch('other', 'main').write({
     [SPEC]: specText({ then: 'it glows' }),
-    'changes/glow/proposal.md': proposalText({ capabilities: ['collaboration/peer-arrows'] }),
-    'specs/layout/halls/spec.md': specText({ title: 'Halls', then: 'x' }),
+    'changes/glow/proposal.md': proposalText({ capabilities: ['collaboration/shared-cursors'] }),
+    'specs/layout/pages/spec.md': specText({ title: 'Pages', then: 'x' }),
   });
-  r.commit('feat: glow and halls');
+  r.commit('feat: glow and pages');
   let rep = gate(r);
   assert.equal(fails(rep, 'changes').length, 1, failText(rep, 'changes'));
-  assert.match(failText(rep, 'changes'), /requirement text of layout\/halls, .*; the change folder\(s\) written \(glow\) do not name it/);
+  assert.match(failText(rep, 'changes'), /spec text of layout\/pages, .*; the change folder\(s\) written \(glow\) do not name it/);
   // deleting the only change folder is not writing one
   r.branch('deleted-folder', 'main').write({ [SPEC]: specText({ then: 'it glows' }), [PROPOSAL]: null });
   r.commit('feat: glow, folder gone');
-  assert.match(failText(gate(r), 'changes'), /requirement text of collaboration\/peer-arrows, .*this PR adds or modifies no change folder/);
+  assert.match(failText(gate(r), 'changes'), /spec text of collaboration\/shared-cursors, .*this PR adds or modifies no change folder/);
   for (const [name, files] of [
-    ['proof-only', { [SPEC]: specText({ proofs: ['test: src/arrows/arrows.test.js', 'two-headsets: pass 2026-10-30, build 1, by owner'] }) }],
-    ['code-only', { [SPEC]: specText({ code: ['src/arrows/', 'src/README.md'] }) }],
+    ['proof-only', { [SPEC]: specText({ proofs: ['test: src/cursors/cursors.test.js', 'test: src/cursors/'] }) }],
+    ['code-only', { [SPEC]: specText({ code: ['src/cursors/', 'src/README.md'] }) }],
+    ['review-only', { [SPEC]: specText({ review: 'approved' }), [PROPOSAL]: null }],
+    ['systems-only', { 'specs/systems.json': JSON.stringify([{ id: 'editor', title: 'Editor', purpose: 'The app.', paths: ['src/'] }]) }],
     ['deletion-only', { [PROPOSAL]: null }],
   ]) {
     r.branch(name, 'main').write(files);
@@ -239,37 +393,46 @@ test('changes: requirement text changed without a change folder that names it fa
   }
 });
 
-test('changes: a deleted spec needs a change folder whose removes names it; a removed id had a spec at the merge base', (t) => {
+test('changes: a board added, edited or deleted is a change to its spec\'s text, which needs a change folder naming it', (t) => {
+  const looks = ['looks/cursor.html#idle — At rest'];
+  const r = setup(t, baseFiles({ [SPEC]: specText({ looks }), [BOARD]: boardText(['idle']) }));
+  for (const [name, files, what] of [
+    ['edit', { [BOARD]: boardText(['idle'], { extra: '<p>Brighter.</p>' }) }, 'boards'],
+    ['add', { [SPEC]: specText({ looks: [...looks, 'looks/typing.html#typing — Typing'] }), 'specs/collaboration/shared-cursors/looks/typing.html': boardText(['typing']) }, 'spec text and the boards'],
+    ['delete', { [SPEC]: specText(), [BOARD]: null }, 'spec text and the boards'],
+  ]) {
+    r.branch(name, 'main').write(files);
+    r.commit(`feat: ${name} a board`);
+    let rep = gate(r);
+    assert.equal(fails(rep, 'changes').length, 1, failText(rep, 'changes'));
+    assert.equal(failText(rep, 'changes'), `${SPEC}: changes the ${what} of collaboration/shared-cursors, which needs a change folder whose "capabilities" names collaboration/shared-cursors; this PR adds or modifies no change folder`, name);
+    r.write({ [PROPOSAL]: proposalText() });
+    r.commit('docs: the change');
+    rep = gate(r);
+    assert.equal(check(rep, 'changes').status, 'pass', `${name}: ${failText(rep, 'changes')}`);
+    assert.equal(check(rep, 'specs').status, 'pass', `${name}: ${failText(rep, 'specs')}`);
+  }
+});
+
+// --- design ----------------------------------------------------------------------------------
+
+test('design: skipped without a design block; with the starter\'s, its tokens file and brief are present at head', (t) => {
+  const { design } = templateConfig();
   const r = setup(t);
-  r.branch('no-removes').write({ [SPEC]: null, 'changes/drop-arrows/proposal.md': proposalText({ capabilities: ['collaboration/peer-arrows'] }) });
-  r.commit('feat: drop arrows');
-  let msgs = failText(gate(r), 'changes');
-  assert.match(msgs, /deletes collaboration\/peer-arrows, which needs a change folder whose "removes" names collaboration\/peer-arrows; the change folder\(s\) written \(drop-arrows\) do not name it/);
-  r.branch('removes', 'main').write({ [SPEC]: null, 'changes/drop-arrows/proposal.md': proposalText({ capabilities: [], removes: ['collaboration/peer-arrows'] }) });
-  const removal = r.commit('feat: drop arrows (#9)');
+  r.branch('x').write({ 'README.md': '# Root\n\nFine.\n' });
+  r.commit('docs: fine');
   let rep = gate(r);
-  assert.equal(check(rep, 'changes').status, 'pass', failText(rep, 'changes'));
-  assert.equal(check(rep, 'specs').status, 'pass', failText(rep, 'specs'));
-  // removes answers only for a spec the PR deletes: one still here is a problem, and its text edit
-  // still needs a folder whose capabilities names it
-  r.branch('still-here', 'main').write({
-    [SPEC]: specText({ then: 'it glows' }),
-    'changes/glow/proposal.md': proposalText({ capabilities: [], removes: ['collaboration/peer-arrows'] }),
-  });
-  r.commit('feat: glow');
-  msgs = failText(gate(r), 'changes');
-  assert.match(msgs, /removes collaboration\/peer-arrows, but specs\/collaboration\/peer-arrows\/spec\.md is still here/);
-  assert.match(msgs, /changes the requirement text of collaboration\/peer-arrows, which needs a change folder whose "capabilities" names collaboration\/peer-arrows; the change folder\(s\) written \(glow\) do not name it/);
-  // a removed id that never had a spec
-  r.branch('phantom', 'main').write({ 'changes/phantom/proposal.md': proposalText({ removes: ['layout/never-was'] }) });
-  r.commit('docs: phantom');
-  assert.match(failText(gate(r), 'changes'), /removes layout\/never-was, which had no specs\/layout\/never-was\/spec\.md at the merge base/);
-  // once the removal is on main, its folder stays valid, and a later folder may name the id again
-  git(r.dir, ['branch', '-f', 'main', removal]);
-  r.branch('later', 'main').write({ 'changes/after/proposal.md': proposalText({ capabilities: [], removes: ['collaboration/peer-arrows'] }), 'changes/drop-arrows/tasks.md': '- [ ] 1.1 x; test: y\n' });
-  r.commit('docs: after');
-  rep = gate(r);
-  assert.equal(check(rep, 'changes').status, 'pass', failText(rep, 'changes'));
+  assert.deepEqual([check(rep, 'design').status, check(rep, 'design').summary], ['skip', 'no design block in config.json']);
+  rep = gate(r, { config: testConfig({ design }) });
+  assert.equal(failText(rep, 'design'), [`${design.tokens}: design.tokens: no file ${design.tokens} at head`, `${design.brief}: design.brief: no file ${design.brief} at head`].join('\n'));
+  r.write({ [design.tokens]: ':root { --accent: #2a6; }\n', [design.brief]: '# Brief\n\nCalm and plain.\n', 'tools/design/README.md': '# Design\n\nThe house style.\n' });
+  r.commit('feat: the house style');
+  rep = gate(r, { config: testConfig({ design: { ...design, catalogues: [{ name: 'icons', open: 'https://example.invalid/icons/{entry}' }] } }) });
+  assert.equal(check(rep, 'design').status, 'pass', failText(rep, 'design'));
+  assert.equal(check(rep, 'design').summary, `tokens ${design.tokens}, brief ${design.brief}, 1 catalogue(s)`);
+  r.write({ [design.brief]: null });
+  r.commit('chore: drop the brief');
+  assert.match(failText(gate(r, { config: testConfig({ design }) }), 'design'), /design\.brief: no file tools\/design\/house-style\/brief\.md at head/);
 });
 
 // --- history ---------------------------------------------------------------------------------
@@ -298,7 +461,7 @@ test('history: each rule fails on an added living-doc line; code, PROOF dates, c
       '',
     ].join('\n'),
     'docs/a b/README.md': '# Spaced\n\nFixed in #77.\n',
-    [SPEC]: specText({ proofs: ['test: src/arrows/arrows.test.js', 'two-headsets: pass 2026-10-30, build 1.4.2, by owner'] }),
+    [SPEC]: specText({ proofs: ['test: src/cursors/cursors.test.js::keeps the 2026-10-30 draft'] }),
     [PROPOSAL]: `${proposalText()}\nDecided 2026-10-29 in #245; a follow-up, TODO.\n`,
     'Packages/com.unity.x/README.md': '# Vendor\n\nChanged in #12 on 2026-10-01, TODO.\n',
   });
@@ -335,7 +498,7 @@ test('budgets: a new or grown over-budget file fails; an over-budget file that d
     'docs/README.md': big(40990),
     'AGENTS.md': big(40010),
     'tools/new/README.md': big(41000),
-    'specs/collaboration/peer-arrows/spec.md': specText({ purpose: 'y'.repeat(31000) }),
+    'specs/collaboration/shared-cursors/spec.md': specText({ summary: 'y'.repeat(31000) }),
     'changes/huge/proposal.md': `${proposalText()}${'z'.repeat(31000)}\n`,
     'Packages/com.vendor.big/README.md': big(50000),
   });
@@ -456,18 +619,18 @@ test('links: deleting or renaming a doc, or changing its headings, fails the lin
 });
 
 test('links: deleting code or a whole folder fails the untouched docs that link to it', (t) => {
-  const r = setup(t, baseFiles({ 'docs/README.md': '# Docs\n\nSee [arrows](../src/arrows/arrows.js) and [the folder](../src/arrows/) and [src](../src/).\n' }));
+  const r = setup(t, baseFiles({ 'docs/README.md': '# Docs\n\nSee [cursors](../src/cursors/cursors.js) and [the folder](../src/cursors/) and [src](../src/).\n' }));
   r.branch('x').write({
-    'src/arrows/arrows.js': null,
-    'src/arrows/arrows.test.js': null,
-    'src/README.md': '# Source\n\nNo arrows.\n',
-    [SPEC]: specText({ code: ['src/README.md'], proofs: ['two-headsets: open'] }),
+    'src/cursors/cursors.js': null,
+    'src/cursors/cursors.test.js': null,
+    'src/README.md': '# Source\n\nNo cursors.\n',
+    [SPEC]: specText({ code: ['src/README.md'], proofs: [] }),
   });
-  r.commit('refactor: drop the arrows code');
+  r.commit('refactor: drop the cursors code');
   const rep = gate(r);
   const msgs = failText(rep, 'links');
-  assert.match(msgs, /docs\/README\.md:3 no such file or folder src\/arrows\/arrows\.js: \.\.\/src\/arrows\/arrows\.js \(it resolved at the merge base; this PR deleted or renamed src\/arrows\/arrows\.js\)/);
-  assert.match(msgs, /docs\/README\.md:3 no such file or folder src\/arrows: \.\.\/src\/arrows\/ \(it resolved at the merge base; this PR deleted or renamed src\/arrows\)/);
+  assert.match(msgs, /docs\/README\.md:3 no such file or folder src\/cursors\/cursors\.js: \.\.\/src\/cursors\/cursors\.js \(it resolved at the merge base; this PR deleted or renamed src\/cursors\/cursors\.js\)/);
+  assert.match(msgs, /docs\/README\.md:3 no such file or folder src\/cursors: \.\.\/src\/cursors\/ \(it resolved at the merge base; this PR deleted or renamed src\/cursors\)/);
   assert.equal(fails(rep, 'links').length, 2, msgs);
 });
 
@@ -475,27 +638,27 @@ test('links: deleting code or a whole folder fails the untouched docs that link 
 
 test('readme: code without its nearest README fails; the README, a Doc-Impact trailer or the root README settle it', (t) => {
   const r = setup(t, baseFiles({ 'Packages/com.unity.x/README.md': '# Vendor\n', 'Packages/com.unity.x/a.cs': 'a\n', 'top.js': '1\n' }));
-  r.branch('x').write({ 'src/arrows/arrows.js': 'export const arrows = 2;\n', 'Packages/com.unity.x/a.cs': 'b\n', 'top.js': '2\n', 'src/notes.md': 'notes\n' });
-  r.commit('feat: arrows two');
+  r.branch('x').write({ 'src/cursors/cursors.js': 'export const cursors = 2;\n', 'Packages/com.unity.x/a.cs': 'b\n', 'top.js': '2\n', 'src/notes.md': 'notes\n' });
+  r.commit('feat: cursors two');
   let rep = gate(r);
   const msgs = failText(rep, 'readme');
-  assert.match(msgs, /1 code path\(s\) under src\/ \(e\.g\. src\/arrows\/arrows\.js\) changed and src\/README\.md did not/);
+  assert.match(msgs, /1 code path\(s\) under src\/ \(e\.g\. src\/cursors\/cursors\.js\) changed and src\/README\.md did not/);
   assert.equal(fails(rep, 'readme').length, 1, msgs);
   assert.match(infos(rep, 'readme').map((f) => f.message).join('\n'), /nearest README of 1 code path\(s\), e\.g\. top\.js is the root README\.md/);
-  r.write({ 'src/README.md': '# Source\n\nThe code, with arrows two.\n' });
+  r.write({ 'src/README.md': '# Source\n\nThe code, with cursors two.\n' });
   r.commit('docs: src');
   rep = gate(r);
   assert.equal(check(rep, 'readme').status, 'pass', failText(rep, 'readme'));
-  r.branch('trailer', 'main').write({ 'src/arrows/arrows.js': 'export const arrows = 3;\n' });
+  r.branch('trailer', 'main').write({ 'src/cursors/cursors.js': 'export const cursors = 3;\n' });
   r.commit('refactor: rename\n\nDoc-Impact: none; a rename inside one function');
   rep = gate(r);
   assert.equal(check(rep, 'readme').status, 'pass', failText(rep, 'readme'));
   assert.equal(rep.docImpact[0].reason, 'a rename inside one function');
-  r.branch('malformed', 'main').write({ 'src/README.md': '# Source\n\nMore.\n', 'src/arrows/arrows.js': 'export const arrows = 4;\n' });
+  r.branch('malformed', 'main').write({ 'src/README.md': '# Source\n\nMore.\n', 'src/cursors/cursors.js': 'export const cursors = 4;\n' });
   r.commit('refactor: x\n\nDoc-Impact: maybe');
   assert.match(failText(gate(r), 'readme'), /Doc-Impact reads "Doc-Impact: none; <reason>"/);
   // a deleted folder's README counts from the merge base
-  r.branch('delete', 'main').write({ 'src/arrows/arrows.js': null });
+  r.branch('delete', 'main').write({ 'src/cursors/cursors.js': null });
   r.commit('chore: delete');
   assert.match(failText(gate(r), 'readme'), /src\/README\.md did not/);
 });
@@ -504,7 +667,7 @@ test('readme: code without its nearest README fails; the README, a Doc-Impact tr
 
 test('pr: with --pr, code needs non-empty ## Tests and ## Review; docs need neither', (t) => {
   const r = setup(t);
-  r.branch('x').write({ 'src/arrows/arrows.js': 'export const arrows = 2;\n', 'src/README.md': '# Source\n\nTwo.\n' });
+  r.branch('x').write({ 'src/cursors/cursors.js': 'export const cursors = 2;\n', 'src/README.md': '# Source\n\nTwo.\n' });
   r.commit('feat: two');
   let rep = gate(r, { pr: 7, prBody: '## What and why\nTwo.\n## Change\nnone: a constant\n## Tests\n<!-- each command -->\n' });
   const msgs = failText(rep, 'pr');
@@ -659,7 +822,7 @@ test('kit: a repository with no lock is skipped', (t) => {
 
 test('kit: a copy as its lock says passes; an edited, missing or extra kit file fails; the project\'s own files are free', (t) => {
   const r = setup(t, baseFiles({ ...KIT, 'tools/gate/config.json': '{}\n', [LOCK]: lockText(KIT) }));
-  r.branch('ok').write({ 'src/arrows/arrows.js': 'export const arrows = 2;\n', 'tools/gate/config.json': '{ "mine": true }\n' });
+  r.branch('ok').write({ 'src/cursors/cursors.js': 'export const cursors = 2;\n', 'tools/gate/config.json': '{ "mine": true }\n' });
   r.commit('feat: two\n\nDoc-Impact: none; a test');
   let rep = gate(r);
   assert.equal(check(rep, 'kit').status, 'pass', failText(rep, 'kit'));
@@ -688,7 +851,7 @@ test('kit: a copy as its lock says passes; an edited, missing or extra kit file 
 
 test('kit: a drift already on main is information for a PR that does not touch the kit', (t) => {
   const r = setup(t, baseFiles({ ...KIT, 'tools/gate/x.mjs': 'drifted\n', [LOCK]: lockText(KIT) }));
-  r.branch('x').write({ 'src/arrows/arrows.js': 'export const arrows = 2;\n' });
+  r.branch('x').write({ 'src/cursors/cursors.js': 'export const cursors = 2;\n' });
   r.commit('feat: two\n\nDoc-Impact: none; a test');
   let rep = gate(r);
   assert.equal(check(rep, 'kit').status, 'pass', failText(rep, 'kit'));
@@ -784,7 +947,7 @@ test('CLI: --local is strict; CI honours reportOnly; --report-only; exit 2 on us
 
 test('CLI: --pr reads the description from --pr-body, else from the Actions event of the same PR', (t) => {
   const r = setup(t);
-  r.branch('x').write({ 'src/arrows/arrows.js': 'export const arrows = 2;\n', 'src/README.md': '# Source\n\nTwo.\n' });
+  r.branch('x').write({ 'src/cursors/cursors.js': 'export const cursors = 2;\n', 'src/README.md': '# Source\n\nTwo.\n' });
   r.commit('feat: two');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-pr-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));

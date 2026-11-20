@@ -1,5 +1,6 @@
 ---
 title: Record more
+review: unreviewed
 code:
   - src-tauri/src/takes.rs
   - src-tauri/src/lib.rs
@@ -10,11 +11,11 @@ code:
 ---
 # Record more
 
-## Purpose
+## Summary
 
-Record more continues a finished session as a new take, from any display, window or device. Each
-take keeps its own video, and the session plays, transcribes and hands its takes to an agent as one
-continuous timeline.
+Record more continues a finished session as a new take, from any display, window or device. You meet
+it when a review needs more after you pressed Stop: each take keeps its own video, and the session
+plays, transcribes and hands its takes to an agent as one continuous timeline.
 
 ## Requirements
 
@@ -32,7 +33,6 @@ device, and the window first recorded may have closed.
 - **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::record_more_records_the_source_it_is_given
 - **PROOF** test: src-tauri/src/takes.rs::tests::record_more_starts_a_take_and_restores_the_session_on_failure
 - **PROOF** test: scripts/verify-takes.cjs
-- **PROOF** desk: open
 
 ### Requirement: Each take keeps its own video
 The app SHALL keep each take's video as its take recorded it, in the take's own folder, and place
@@ -50,7 +50,6 @@ of the recording and cannot replace a file a player holds open.
 - **PROOF** test: src-tauri/src/takes.rs::tests::stopping_a_take_keeps_its_own_video_on_the_timeline
 - **PROOF** test: src-tauri/src/takes.rs::tests::videos_place_each_take_on_the_timeline
 - **PROOF** test: scripts/verify-takes.cjs
-- **PROOF** desk: open
 
 #### Scenario: The app closes while a take finishes
 - **GIVEN** take 2 finishing its video when the app closes

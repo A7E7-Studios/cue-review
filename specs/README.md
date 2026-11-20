@@ -1,61 +1,75 @@
 # Specs
 
-A spec states what one capability of the product does, in words a non-developer can follow, and
-how each behaviour is proven: by an automated test, by a person, or both. A spec is a living
-document: it states what the product does at the commit it sits in, and a change to it lands in
-the same pull request as the code that makes it true. The formality gate
+A spec states what one feature (a capability) of the product does, in two layers: a Summary and
+its Looks for people, and requirements with their scenarios for agents. Each scenario is proven by
+an automated test; the owner reviews the feature as a whole, and its spec records only the verdict.
+A spec is a living document: it states what the feature does at the commit it sits in, and a change
+to it lands in the same pull request as the code that makes it true. The formality gate
 ([tools/gate](../tools/gate/README.md)) checks the format below; the overview index
 ([tools/overview](../tools/overview/README.md)) reads every spec of every repository into one map
-of capabilities and their review state.
+of features, their systems and their review state.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | [`specs/domains.json`](domains.json) | the domains, `[{ "id", "title", "purpose" }]`, identical in every repository of a solution |
-| `specs/<domain>/<capability>/spec.md` | one capability's spec |
-| `specs/<domain>/<capability>/look/<scenario-slug>.png` | optional: how one scenario looks, rendered from the running app |
+| `specs/systems.json` | optional: this repository's systems, `[{ "id", "title", "purpose", "paths" }]` ([below](#systems)) |
+| `specs/<domain>/<capability>/spec.md` | one feature's spec |
+| `specs/<domain>/<capability>/looks/<name>.html` | optional: a board holding the feature's picked visual design ([Looks](#looks)) |
 
-- **Nothing else.** `specs/` holds `README.md`, `domains.json` and capability folders; a capability
-  folder holds `spec.md` and `look/<scenario-slug>.png` files. Any other file is stray, and a look
-  whose slug names no scenario of its spec is an error.
+- **Nothing else.** `specs/` holds `README.md`, `domains.json`, `systems.json` and capability
+  folders; a capability folder holds `spec.md` and the boards its Looks name. Any other file is
+  stray, a board no Looks line names among them, and no image or video file is ever committed under
+  `specs/` (or `changes/`).
 - **Ids.** A capability id is kebab-case, `^[a-z0-9]+(-[a-z0-9]+)*$`; `<domain>` is an id from
   `domains.json`.
 - **One path in every repository.** A capability present in more than one repository has the same
   `<domain>/<capability>` path in each, and each repository's spec states only its own side.
 - **Scenario slug.** The scenario name lower-cased, every run of characters outside `[a-z0-9]`
-  replaced by one `-`, trimmed of `-`: `A user edits a note offline` becomes
-  `a-user-edits-a-note-offline`. Slugs are unique within a spec, so a slug names one look: two
-  scenario names that differ only in case or punctuation collide, even under different
-  requirements.
+  replaced by one `-`, trimmed of `-`: `An edit made offline reaches the others` becomes
+  `an-edit-made-offline-reaches-the-others`. Slugs are unique within a spec: two scenario names
+  that differ only in case or punctuation collide, even under different requirements.
 
 ## The spec file
 
 ```markdown
 ---
 title: Offline edits
+review: unreviewed
 code:
   - src/sync/
   - src/editor/OfflineBanner.ts
 ---
 # Offline edits
 
-## Purpose
+## Summary
 
-Plain language a non-developer understands, 1–3 sentences. It doubles as the overview's description.
+You can keep writing when the connection drops: the app keeps every edit and sends it when the
+connection returns, and a banner says you are offline. You meet it on a train or in a lift.
+
+## Looks
+
+- looks/offline-banner.html#banner — The banner after five seconds offline
+- page: /notes/<id> — Open a note, then turn off the network
 
 ## Requirements
 
 ### Requirement: Edits made offline are kept
-The app SHALL keep every edit made without a connection and send it when the connection returns,
+When the connection drops, the app SHALL keep every edit and send it when the connection returns,
 because a user otherwise loses work they believe is saved.
 
-#### Scenario: A user edits a note offline
-- **GIVEN** a user with no connection
-- **WHEN** they edit a note and the connection returns
+#### Scenario: An edit made offline reaches the others
+- **WHEN** a user edits a note offline and the connection returns
 - **THEN** the edit reaches the other users of the note
 - **PROOF** test: src/sync/offline.test.ts::keeps edits made offline
-- **PROOF** desk: open
+
+#### Scenario: Edits wait as long as the connection is gone
+| Offline for | The edits are sent |
+|---|---|
+| 5 seconds | when it returns |
+| 3 days | when it returns |
+- **PROOF** test: src/sync/offline.test.ts::keeps edits for days
 ```
 
 A new spec starts from [the spec template](../.agents/skills/spec/templates/spec.md).
@@ -63,102 +77,124 @@ A new spec starts from [the spec template](../.agents/skills/spec/templates/spec
 ### Front matter
 
 A YAML subset only: the file's first line is `---`, then `key: value` lines and `key:` lines each
-followed by `  - item` lines, then `---`. Two keys, no others:
+followed by `  - item` lines, then `---`. Three keys, no others:
 
 | Key | Required | Value |
 |---|---|---|
-| `title` | yes | the capability's name, one value |
+| `title` | yes | the feature's name, one value |
+| `review` | yes | the owner's verdict on the feature: `unreviewed`, `approved` or `changes-requested` ([Review](#review)) |
 | `code` | yes | one or more repository-relative paths with `/` separators, each present at the commit: a folder ends in `/`, a file does not |
 
 ### Body
 
 1. One `# <title>`, exactly the front matter's `title`.
-2. One `## Purpose`, not empty: 1–3 sentences a non-developer understands. It is the overview's
-   description of the capability.
-3. One `## Requirements` after it, holding one or more `### Requirement: <name>`. Requirement names
-   are unique within the spec.
-4. Each requirement: a statement paragraph, then one or more `#### Scenario: <name>`.
-5. Each scenario: bullets only. `- **GIVEN** …` is optional, `- **WHEN** …` and `- **THEN** …` are
-   required, `- **AND** …` may follow any of them; a bullet may wrap onto lines indented by two
-   spaces. The scenario ends in its PROOF lines. No other bold keyword, plain bullet or paragraph.
+2. One `## Summary`, not empty: what the feature does, when you meet it and why, in a few sentences
+   a non-developer understands. It is the overview's description of the feature.
+3. Optionally one `## Looks`, after the Summary: its [Looks lines](#looks) and nothing else.
+4. One `## Requirements` after them, holding one or more `### Requirement: <name>`. Requirement
+   names are unique within the spec.
+5. Each requirement: a statement paragraph, then one or more `#### Scenario: <name>`.
+6. Each scenario, in this order, each part optional: its steps, a table, its PROOF lines.
+   - **Steps** are bullets: at most one `- **GIVEN** …` (only for a setup that is not the
+     default), then exactly one `- **WHEN** …` and one `- **THEN** …`; `- **AND** …` may follow
+     any of them. A bullet may wrap onto lines indented by two spaces.
+   - **A table** (Markdown, a header row, a `|---|` row and one row per case) stands in for many
+     cases of one outcome.
+   - **PROOF lines** end the scenario ([below](#proof-lines)).
+   No other bold keyword, plain bullet or paragraph.
 
-These are the only headings and the only text: no `##` section besides Purpose and Requirements, no
-text between the `# ` heading and `## Purpose` or between `## Requirements` and its first
-requirement, and no heading deeper than `####`.
+These are the only headings and the only text: no `##` section besides Summary, Looks and
+Requirements, no text between the `# ` heading and `## Summary` or between `## Requirements` and
+its first requirement, and no heading deeper than `####`.
 
 ### Writing rules
 
-- **Present tense, what IS.** A spec states what the capability does at this commit. A decision is
-  a requirement whose statement gives its reason in the same sentence (`SHALL …, because …`).
-- **No history.** No narration of a change, status, dates (outside PROOF lines), pull request or
-  issue numbers. Git and the merged pull requests hold the history; the change folder holds the
-  open questions.
-- **A scenario is an acceptance test.** One observable outcome, stated so a test or a person can
-  tell pass from fail.
-- **Specified as changes reach it.** A new capability over code that already exists states its
-  Purpose and only the requirements its first change adds, changes or fixes, and `code` lists the
-  paths that change touches. Behaviour no change has reached is not specified yet.
-- **Budget.** At most 30720 bytes per `spec.md` (git blob size). A spec that outgrows it splits
-  into capabilities.
+- **The requirement in one sentence**: "When …, the app SHALL …, because …" (the event-driven form
+  of EARS); a behaviour that holds always drops the "When …,". Every statement holds `SHALL` and
+  `because`: the reason sits in the same sentence.
+- **A scenario is a named example**, and its name states the outcome (`An edit made offline
+  reaches the others`, not `Offline case 2`). Steps say only what the name leaves open.
+- **Present tense, what IS.** A spec states what the feature does at this commit. No narration of
+  a change, no status, no dates, no pull request or issue numbers: git and the merged pull
+  requests hold the history; a change folder holds the work in flight.
+- **Specified as changes reach it.** A new spec over code that already exists states its Summary
+  and only the requirements its first change adds, changes or fixes, and `code` lists the paths
+  that change touches. Behaviour no change has reached is not specified yet.
+- **Budget.** At most 30720 bytes per `spec.md` and per board (git blob size). A spec that outgrows
+  it splits into features.
 
 ## PROOF lines
 
-Every scenario ends in one or more PROOF lines, and nothing follows them. A PROOF line is one line;
-it never wraps.
+A scenario is proven by automation only. A PROOF line names a test that proves it:
 
 ```
 - **PROOF** test: <repo path>[::<selector>]
-- **PROOF** <check>: open
-- **PROOF** <check>: pass <YYYY-MM-DD>, build <version>, by <who>[; <note>]
-- **PROOF** <check>: fail <YYYY-MM-DD>, build <version>, by <who>; <note>
 ```
 
-`test:` names an automated test that proves the scenario; a scenario may have none or several. The
-path is written bare (no backticks) and exists at the commit, a file or a folder; `::` is followed
-by a selector naming the test inside it (for example `Class.Method`), or left out. Every other line
-is a human check, named for how a **person** checks it:
+The path is written bare (no backticks) and exists at the commit, a file or a folder; `::` is
+followed by a selector naming the test inside it (for example `Class.Method`), or left out. A test
+may be a scripted run anywhere the project can automate one: a unit test, an editor harness, a run
+on a device. A scenario may have several PROOF lines, or none: a scenario without one is
+**untested**, a coverage gap the overview shows, never a review item. A PROOF line is one line; it
+never wraps, and nothing follows a scenario's PROOF lines.
 
-| Check | The person checks it |
+## Review
+
+The owner reviews a feature as a whole, and `review` in its front matter holds the verdict:
+
+| `review` | Means |
 |---|---|
-| `desk` | at a computer: a web page, an editor, a tool's output |
-| `headset` | wearing one headset |
-| `two-headsets` | with two people in two headsets, in one session |
-| `printed-card` | with a printed code or card in the room |
-| `live-tenant` | against a live tenant and its account |
+| `unreviewed` | waiting for the owner: new, or changed since the owner last looked |
+| `approved` | the owner approved the feature as its spec and Looks state it |
+| `changes-requested` | the owner asked for changes; a change that answers them is to come |
 
-- Each check appears at most once per scenario. The date is a calendar date; `<version>` and
-  `<who>` are not empty and contain no `,` or `;`; a `fail` always carries its note.
-- **`build <version>`** is the build's identifier as AGENTS.md names it: the one its rule for
-  reading a build's commit takes.
-- **Agents write `test:` and `open` only.** Only the owner's word sets `pass` or `fail`, and the
-  [triage skill](../.agents/skills/triage/SKILL.md) writes it, with the date of the check, the
-  build checked and who checked.
-- **A changed scenario starts over.** A scenario's text is its name and its step bullets,
-  whitespace collapsed (re-wrapping a bullet changes nothing), and it is known by its requirement's
-  name and its own. A scenario whose text differs from the merge base, or that is new there
-  (renaming its requirement makes it new), carries no `pass` or `fail`, and keeps each human check
-  it had, as `open`; the gate fails a dropped one. An unchanged scenario keeps its PROOF lines as
-  they are.
-- **A check that no longer applies** is removed by triage on the owner's word, as a change to the
-  PROOF lines of an unchanged scenario.
-- **A fix reopens a failed check.** The change that fixes a `fail` sets that check back to `open`,
-  for the owner to check again.
-
-The human state of a scenario and of a capability (`failing`, `open` or `unreviewed`, `approved`,
-`automated`) is derived from these lines: [tools/overview](../tools/overview/README.md#derived-state).
+- **A new spec starts `unreviewed`**, one written over code that already exists included.
+- **A changed feature goes back to `unreviewed`.** A pull request that changes a spec's text (its
+  title, Summary, Looks lines and boards, requirements or scenarios; not its `code` paths or PROOF
+  lines) sets that spec's `review` to `unreviewed`, and so does one that adds or modifies a change
+  folder naming the feature. The gate enforces both.
+- **Only the owner's word sets `approved` or `changes-requested`**, and the
+  [triage skill](../.agents/skills/triage/SKILL.md) writes it, in a pull request that changes
+  nothing else in the spec. The verdict is the whole record: no notes, build or reviewer in the
+  spec. The triage pull request says when the owner reviewed and on which build.
 
 ## Looks
 
-A look is `look/<scenario-slug>.png` beside the spec: the scenario as the running app shows it,
-rendered by the route AGENTS.md names, never drawn or edited by hand.
+`## Looks` lists the feature's visual design for people, one line each, never a picture file:
 
-- Optional. A scenario only a person can see (on a device, with real hands, with a second person)
-  has no look; its human check carries it.
-- The pull request that changes how a scenario looks refreshes its PNG. A renamed scenario's look
-  moves with its slug; a removed scenario's look is deleted.
-- At most 1280 px wide. PNGs are stored through Git LFS (`.gitattributes`).
-- The change folder's `look/` holds the design that was picked; the spec's `look/` holds what was
-  built.
+```
+- looks/<name>.html#<id> — <caption>
+- page: <path in the app, or a URL> — <caption>
+```
+
+- **A board** is `looks/<name>.html` in the capability folder: the design the owner picked, as one
+  self-contained HTML file (its CSS inline, nothing loaded from the network or another file), each
+  design a `<section id="…">`. A board line names a board of this folder and an `id` it holds. The
+  Solution map pulls each section in by its id. The directions the owner did not pick stay on the
+  change's directions page until its folder is deleted
+  ([changes/README.md](../changes/README.md#files)).
+- **A page** names where the built feature can be seen: a path in the app, or a URL.
+- The pull request that changes how the feature looks updates its board or its lines; a feature
+  with no visual side has no `## Looks`.
+
+## Systems
+
+`specs/systems.json` declares this repository's systems: the parts that run on their own and that
+you would name to a colleague, such as an app, a conversion tool, the API or a release pipeline.
+
+```json
+[{ "id": "editor", "title": "Editor", "purpose": "The app people write notes in.", "paths": ["src/"] }]
+```
+
+- `id` is kebab-case and unique; `title` and `purpose` (one or two sentences) are not empty;
+  `paths` lists one or more repository-relative paths, written as a spec's `code` is, each present
+  at the commit.
+- **Domains group features for people; systems say what each feature ships in.** A feature's
+  systems follow from its `code` paths: a path belongs to the nearest system that declares it or
+  a folder above it. A feature can ship in several systems, and a spec names none itself.
+- **A system across repositories** has the same id in each; each repository declares only its own
+  paths. Two systems never declare the same path.
+- Code outside every system is information, not a failure: the overview lists it.
 
 ## Changing a spec
 
@@ -169,11 +205,11 @@ Edit it in place; the diff is the change. Which pull requests carry a change fol
 
 ```
 node tools/gate/gate.mjs --local                                     # this branch, strict
-node tools/overview/overview.mjs --repo <id>=<checkout> --summary    # capabilities and their state
+node tools/overview/overview.mjs --repo <id>=<checkout> --summary    # features and their review state
 ```
 
 What the gate checks: [tools/gate](../tools/gate/README.md). The overview's options and output:
-[tools/overview](../tools/overview/README.md). The overview groups capabilities by module: a
-module is a folder holding a module marker (a `README.md`, a `package.json`, a `pyproject.toml`, a
-`build.gradle(.kts)`, a Unity `*.asmdef`, or the markers the project names), and each `code` path
-belongs to the nearest one up its tree.
+[tools/overview](../tools/overview/README.md). Beside features and systems, the overview lists
+components for agents: folders holding a marker file (a `README.md`, a `package.json`, a
+`pyproject.toml`, a `build.gradle(.kts)`, a Unity `*.asmdef`, or the markers the project names),
+each `code` path belonging to the nearest one up its tree.

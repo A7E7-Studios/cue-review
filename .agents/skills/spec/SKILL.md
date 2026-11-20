@@ -1,26 +1,28 @@
 ---
 name: spec
-description: Turn a request for a new feature, a change in behaviour or a bug to fix into settled requirements - look up the facts, ask the owner rounds of numbered questions with options and a recommended answer until nothing is assumed, then write changes/<id>/proposal.md and the living-spec edits (requirements, scenarios, PROOF lines) on a branch in its own worktree. Use when the owner asks for a feature, a new capability, a fix, or a change to how something behaves, looks or sounds. Not for a refactor, a tooling-only or a docs-only change, which goes straight to ship.
+description: Turn a request for a new feature, a change in behaviour or a bug to fix into settled requirements - look up the facts, ask the owner rounds of numbered questions with options and a recommended answer until nothing is assumed, then write changes/<id>/proposal.md and the living-spec edits (Summary, requirements, scenarios and the tests that prove them) on a branch in its own worktree. Use when the owner asks for a feature, a new capability, a fix, or a change to how something behaves, looks or sounds, and when triage hands over the owner's feedback. Not for a refactor, a tooling-only or a docs-only change, which goes straight to ship.
 ---
 
 # Spec a change
 
 Turn a request into settled requirements. Facts are yours to find; decisions are the owner's.
-Formats: `specs/README.md` (specs, PROOF lines, looks) and `changes/README.md` (change folders, and
-which pull requests need one).
+Formats: `specs/README.md` (specs, PROOF lines, Looks, review) and `changes/README.md` (change
+folders, and which pull requests need one).
 
 ## 1. Facts first
 
 `git fetch origin`, then look up, before asking anything:
 
-- **Capabilities.** `specs/domains.json` and the specs near the request; the whole map:
-  `node tools/overview/overview.mjs --repo <id>=. --summary`. Reuse a capability before creating
-  one; a new one gets a kebab-case id under the domain that fits.
+- **Capabilities.** `specs/domains.json`, `specs/systems.json` and the specs near the request; the
+  whole map: `node tools/overview/overview.mjs --repo <id>=. --summary`. Reuse a capability before
+  creating one; a new one gets a kebab-case id under the domain that fits.
 - **Parallel work** on the same capabilities: change folders on main
   (`git ls-tree -d --name-only origin/main changes/`), branches (`git ls-remote --heads origin`) and
   open pull requests (`gh pr list`). The change id is free on main and as a branch; a change that
   triage opened keeps the id triage gave it.
-- **The code** the request touches, and the rules AGENTS.md sets for it.
+- **The code** the request touches, and the rules AGENTS.md sets for it. List every code path each
+  outcome of the request reaches: each caller of what it changes, each entry point that reaches the
+  behaviour. The proposal's `## What changes` names, for each change, the paths it covers.
 - **The other repository** AGENTS.md names: does the request need its side too?
 - **The kind of change**, by `changes/README.md`'s table:
   - no folder needed (a refactor, tooling only, docs only): hand it to **ship** and stop.
@@ -62,8 +64,10 @@ a line into the last bullet.
 - Cover, as the tree reaches them:
   - each observable outcome (each becomes a scenario) and its edges: empty, first use, repeated,
     offline, two people at once;
-  - which outcomes only a person can check, and how: `desk`, `headset`, `two-headsets`,
-    `printed-card`, `live-tenant`;
+  - how each outcome is proven by a test, and which ones no automation reaches (they stay
+    untested: say so);
+  - where the owner reviews the feature: at a desk, on a device, with a second person, against
+    which account (the proposal's `## Review`; AGENTS.md may say where the owner reviews);
   - whether anything seen or heard changes (design then draws it);
   - the other repository's side, the contracts between the two, stored data and its migration;
   - what is out of scope.
@@ -76,20 +80,28 @@ a line into the last bullet.
 1. **Worktree.** `git fetch origin`, then a worktree as AGENTS.md says, named for the change id, on
    a new branch `<id>` from `origin/main`.
 2. **`changes/<id>/proposal.md`** from `templates/proposal.md`: every question of the rounds under
-   Settled questions, every decision you took without asking under Calls for the owner.
+   Settled questions, every decision you took without asking under Calls for the owner, and
+   `## Review` saying what the owner looks at and where. A change triage handed over keeps each
+   remark of the owner's in Why as text, as triage wrote it.
 3. **Spec edits** in `specs/<domain>/<capability>/spec.md`; a new capability starts from
-   `templates/spec.md`. Keep to `specs/README.md` exactly: the gate refuses a `#` heading other
-   than the title, any other `##` section or stray text, a step keyword other than
-   GIVEN/WHEN/THEN/AND, and two scenarios with one slug.
-   - A requirement per behaviour: `The … SHALL …, because …`. Present tense; no history, dates or
-     numbers of pull requests or issues.
-   - A scenario per observable outcome, GIVEN/WHEN/THEN, ending in its PROOF lines:
-     `test: <path>::<selector>` for the test that proves it (an existing one, or the one ship will
-     write: name its path), and `<check>: open` for each check a person makes.
-   - A scenario whose text you change keeps each human check it had, as `open`: every `pass` and
-     `fail` goes, no check is dropped. A scenario you leave alone keeps its PROOF lines exactly.
-   - Renaming a scenario renames its look (`look/<scenario-slug>.png`); removing one removes it.
-   - A new capability over existing code: its Purpose and only the requirements this change adds,
+   `templates/spec.md`. Keep to `specs/README.md` exactly: the gate refuses a front matter key
+   other than `title`, `review` and `code`, a `##` section other than Summary, Looks and
+   Requirements, stray text, a step keyword other than GIVEN/WHEN/THEN/AND, and two scenarios with
+   one slug.
+   - **Summary**: what the feature does, when you meet it and why, in a few sentences a
+     non-developer understands. Rewrite it when the change alters what it says.
+   - **A requirement per behaviour**: "When …, the app SHALL …, because …"; a behaviour that holds
+     always drops the "When …,". Present tense; no history, dates or numbers of pull requests or
+     issues.
+   - **A scenario per observable outcome**, named by its outcome. Steps only where the name leaves
+     something open: one WHEN, one THEN, a GIVEN only for a setup that is not the default; a table
+     for many cases of one outcome. It ends in its PROOF lines, `test: <path>::<selector>` for the
+     test that proves it (an existing one, or the one ship will write: name its path). A scenario
+     no automation reaches has none and is untested; never a human check, never `pass` or `fail`.
+   - **Looks** lines are design's, once the owner picks a direction; a renamed or removed screen
+     updates its lines and its board.
+   - **`review: unreviewed`** in every spec the change names, whether or not its text changes.
+   - A new capability over existing code: its Summary and only the requirements this change adds,
      changes or fixes; `code:` lists the paths this change touches, a folder ending in `/`.
    - Deleting a capability: `git rm -r` its folder, and list it under the proposal's `removes:`.
 4. **The other repository's side**, when there is one: the same change id, its own folder and spec
@@ -105,6 +117,6 @@ a line into the last bullet.
   format or contract, storage, the other repository): **design**.
 - Otherwise: **ship**.
 
-Tell the owner the change id, the branch and the calls for the owner.
+Tell the owner the change id, the branch, the calls for the owner and the scenarios left untested.
 
 The round structure adapts the `grilling` skill from mattpocock/skills (MIT).

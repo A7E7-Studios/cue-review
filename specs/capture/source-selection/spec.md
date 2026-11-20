@@ -1,14 +1,16 @@
 ---
 title: Capture source selection
+review: unreviewed
 code:
   - src/app/useCaptureDevices.ts
 ---
 # Capture source selection
 
-## Purpose
+## Summary
 
-The source picker puts the sources most useful for a visual review first and starts with an
-available source. Refreshing the list respects the source the person has chosen.
+The source picker lists first the sources most useful for a visual review, and starts with the first
+available one. You meet it whenever you choose what to record; refreshing the list keeps the source
+you chose.
 
 ## Requirements
 
@@ -22,7 +24,6 @@ a reviewer usually shows work on a screen or device and selects a camera deliber
 - **THEN** the display is first, followed by the window, the device and the camera
 - **AND** sources within the same category keep their discovery order
 - **PROOF** test: src/App.test.tsx::lists displays windows and devices before cameras
-- **PROOF** desk: open
 
 ### Requirement: Initial selection uses the first available source in picker order
 The app SHALL initially select the first available source in picker order, because an unavailable
@@ -34,7 +35,6 @@ entry must not displace a usable display, window, device or camera.
 - **THEN** the display is selected
 - **AND** the camera remains available for explicit selection
 - **PROOF** test: src/App.test.tsx::initially selects a display before a camera
-- **PROOF** desk: open
 
 #### Scenario: An unavailable display is skipped
 - **GIVEN** the display and window entries are unavailable and a device and camera are available

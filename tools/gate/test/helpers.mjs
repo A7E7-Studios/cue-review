@@ -63,16 +63,24 @@ export function makeRepo(files = { 'README.md': '# Root\n\nThe root.\n' }, { pre
   return r;
 }
 
+/** The starter config, config.template.json, as a project copies it. */
+export function templateConfig() {
+  return JSON.parse(fs.readFileSync(path.join(GATE_DIR, 'config.template.json'), 'utf8'));
+}
+
 /**
  * The starter config (config.template.json) with report-only off, and the vendored trees, living
- * docs and budgets the tests write: the same in every repository that carries the gate.
+ * docs and budgets the tests write: the same in every repository that carries the gate. Its
+ * `design` block is left out, since a test repository holds no house style; a test of the design
+ * check passes `design` back in.
  */
 export function testConfig(overrides = {}) {
-  const base = JSON.parse(fs.readFileSync(path.join(GATE_DIR, 'config.template.json'), 'utf8'));
+  const { design, ...base } = templateConfig();
   const livingDocs = { include: ['specs/**/*.md', '**/README.md', '**/AGENTS.md', '**/ARCHITECTURE.md'], exclude: ['changes/**'] };
   const budgets = [
     { pattern: 'changes/**/*.md', bytes: 30720 },
     { pattern: 'specs/**/spec.md', bytes: 30720 },
+    { pattern: 'specs/**/looks/*.html', bytes: 30720 },
     { pattern: '**/AGENTS.md', bytes: 32768 },
     { pattern: '**/README.md', bytes: 40960 },
   ];
@@ -106,8 +114,8 @@ export const DOMAINS = JSON.stringify(
     ['collaboration', 'Collaboration'],
     ['library', 'Library'],
     ['layout', 'Layout'],
-    ['assistant', 'Assistant'],
-    ['learning', 'Learning'],
+    ['reading', 'Reading'],
+    ['search', 'Search'],
     ['account', 'Account'],
     ['tooling', 'Tooling'],
   ].map(([id, title]) => ({ id, title, purpose: `Everything about ${title.toLowerCase()}.` })),
@@ -118,16 +126,22 @@ export const DOMAINS = JSON.stringify(
 export const P = (v) => `- **PROOF** ${v}`;
 
 const SCENARIO = {
-  name: 'A peer walks behind the user',
-  steps: ['GIVEN two devices in one session', 'WHEN one user walks behind the other', 'THEN the other sees an arrow at the edge of view'],
-  proofs: ['test: src/arrows/arrows.test.js', 'two-headsets: open'],
+  name: 'A collaborator edits the same note',
+  steps: ['GIVEN two users in one note', 'WHEN one user types in a paragraph', 'THEN the other sees a cursor where they type'],
+  proofs: ['test: src/cursors/cursors.test.js'],
 };
 
-/** A spec in the contract's format; every part can be replaced. */
+/**
+ * A spec in the contract's format; every part can be replaced. A scenario is { name, steps,
+ * table?: [[header cells], [row cells], …], proofs }; `looks` is a list of Looks lines without
+ * their "- ".
+ */
 export function specText({
-  title = 'Peer arrows',
-  code = ['src/arrows/'],
-  purpose = 'An arrow shows where each peer stands when they are out of view.',
+  title = 'Shared cursors',
+  review = 'unreviewed',
+  code = ['src/cursors/'],
+  summary = 'A cursor shows where each collaborator is typing.',
+  looks = null,
   requirements,
   scenarios,
   proofs,
@@ -141,52 +155,73 @@ export function specText({
     },
   ];
   const reqs = requirements ?? [
-    { name: 'Arrows point at peers out of view', text: 'The app SHALL show an arrow toward each peer outside the view, because a user otherwise loses track of who is where.', scenarios: sc },
+    {
+      name: 'Cursors show where others type',
+      text: 'When two users edit one note, the app SHALL show a cursor for each collaborator, because a user otherwise types over someone else\'s edit.',
+      scenarios: sc,
+    },
   ];
-  const lines = ['---', `title: ${title}`, 'code:', ...code.map((c) => `  - ${c}`), '---', `# ${title}`, '', '## Purpose', '', purpose, '', '## Requirements', ''];
+  const lines = ['---', `title: ${title}`, `review: ${review}`, 'code:', ...code.map((c) => `  - ${c}`), '---', `# ${title}`, '', '## Summary', '', summary, ''];
+  if (looks) lines.push('## Looks', '', ...looks.map((l) => `- ${l}`), '');
+  lines.push('## Requirements', '');
   for (const r of reqs) {
     lines.push(`### Requirement: ${r.name}`, r.text, '');
     for (const s of r.scenarios) {
       lines.push(`#### Scenario: ${s.name}`);
-      for (const st of s.steps) {
+      for (const st of s.steps ?? []) {
         const [k, ...rest] = st.split(' ');
         lines.push(`- **${k}** ${rest.join(' ')}`);
       }
-      lines.push(...s.proofs.map(P), '');
+      if (s.table) lines.push(`| ${s.table[0].join(' | ')} |`, `|${s.table[0].map(() => '---').join('|')}|`, ...s.table.slice(1).map((r) => `| ${r.join(' | ')} |`));
+      lines.push(...(s.proofs ?? []).map(P), '');
     }
   }
   return lines.join('\n');
 }
 
 /** A change proposal in the contract's format. */
-export function proposalText({ title = 'Arrows for peers', capabilities = ['collaboration/peer-arrows'], removes = null, review = 'unreviewed', followUps = null } = {}) {
+export function proposalText({ title = 'Cursors for collaborators', capabilities = ['collaboration/shared-cursors'], removes = null } = {}) {
   return [
     '---',
     `title: ${title}`,
     'capabilities:',
     ...capabilities.map((c) => `  - ${c}`),
     ...(removes ? ['removes:', ...removes.map((c) => `  - ${c}`)] : []),
-    `review: ${review}`,
-    ...(followUps ? ['follow-ups:', ...followUps.map((f) => `  - ${f}`)] : []),
     '---',
     `# ${title}`,
     '',
     '## Why',
     '',
-    'Wearers lose each other.',
+    'Writers type over each other.',
+    '',
+    '## Review',
+    '',
+    'At a desk, with a second browser window.',
     '',
   ].join('\n');
 }
 
-/** The files of a repo with one valid capability, collaboration/peer-arrows. */
+/** A board: one self-contained HTML file, a <section> per id. */
+export function boardText(ids = ['main'], { extra = '' } = {}) {
+  return [
+    '<!doctype html>',
+    '<html><head><meta charset="utf-8"><style>section { padding: 1rem; }</style></head><body>',
+    ...ids.map((id) => `<section id="${id}"><p>The design of ${id}.</p></section>`),
+    extra,
+    '</body></html>',
+    '',
+  ].join('\n');
+}
+
+/** The files of a repo with one valid capability, collaboration/shared-cursors. */
 export function baseFiles(extra = {}) {
   return {
     'README.md': '# Root\n\nThe root.\n',
     'specs/domains.json': DOMAINS,
     'src/README.md': '# Source\n\nThe code.\n',
-    'src/arrows/arrows.js': 'export const arrows = 1;\n',
-    'src/arrows/arrows.test.js': 'test\n',
-    'specs/collaboration/peer-arrows/spec.md': specText(),
+    'src/cursors/cursors.js': 'export const cursors = 1;\n',
+    'src/cursors/cursors.test.js': 'test\n',
+    'specs/collaboration/shared-cursors/spec.md': specText(),
     ...extra,
   };
 }

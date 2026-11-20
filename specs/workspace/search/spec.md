@@ -1,5 +1,6 @@
 ---
 title: Search
+review: unreviewed
 code:
   - src/search/
   - src/app/useShortcuts.ts
@@ -15,11 +16,11 @@ code:
 ---
 # Search
 
-## Purpose
+## Summary
 
-Finding a recording, or the moment in it where something was said: one search over every
-recording's name and transcript, opened from the sidebar or with Ctrl+K, and a find bar for the
-transcript of the recording that is open.
+Finding a recording, or the moment in it where something was said: one search over every recording's
+name and transcript, opened from the sidebar or with Ctrl+K, and a find bar for the transcript of
+the recording that is open. You meet it when you look for something said in an earlier review.
 
 ## Requirements
 
@@ -36,14 +37,12 @@ Claude app places it, reads cleaner than a field across the window's top.
 - **AND** Escape closes it and returns focus to where it was
 - **PROOF** test: src/search/SearchDialog.test.tsx::opens with recent recordings and closes on Escape
 - **PROOF** test: src/App.test.tsx::opens search from the sidebar and with Ctrl+K
-- **PROOF** desk: open
 
 #### Scenario: The title bar has no search field
 - **WHEN** the review workspace shows
 - **THEN** the title bar holds the app's name, the sidebar toggle, Settings and the window controls,
   and no search field
 - **PROOF** test: src/chrome/TitleBar.test.tsx::has no search field
-- **PROOF** desk: open
 
 #### Scenario: Search waits while recording
 - **GIVEN** a recording is in progress
@@ -67,7 +66,6 @@ than what the recording was called, and rarely in the order it was said.
 - **PROOF** test: src/search/searchIndex.test.ts::finds names and transcript lines ignoring case
 - **PROOF** test: src/search/SearchDialog.test.tsx::lists recordings and transcript lines
 - **PROOF** test: src/App.test.tsx::searches each transcript as it is when search opens
-- **PROOF** desk: open
 
 #### Scenario: Words match in any order
 - **GIVEN** a line "Now if I open the filters, the panel covers the first row"
@@ -94,7 +92,6 @@ than what the recording was called, and rarely in the order it was said.
 - **PROOF** test: src/search/SearchDialog.test.tsx::pins the first result again when the pinned one leaves
 - **PROOF** test: src/App.test.tsx::opens a line of the recording that is already open at its time
 - **PROOF** test: src/search/SearchDialog.test.tsx::keeps the active result while transcripts arrive
-- **PROOF** desk: open
 
 #### Scenario: Nothing matches
 - **WHEN** the person types text that no name or transcript contains
@@ -117,4 +114,3 @@ bar that appears in one frame pushes the transcript down with a jolt.
 - **PROOF** test: src/App.test.tsx::finds in the transcript with Ctrl+F
 - **PROOF** test: src/App.test.tsx::brings the transcript back for Ctrl+F in focus
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::finds, steps through matches and closes back to its button
-- **PROOF** desk: open

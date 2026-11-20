@@ -2,7 +2,6 @@
 title: Start a session from a plain New session row and create sections from the sidebar menu
 capabilities:
   - workspace/sidebar
-review: unreviewed
 ---
 # Start a session from a plain New session row and create sections from the sidebar menu
 
@@ -13,7 +12,7 @@ recording", and the folder-plus icon beside it read as a new folder on disk, tho
 sidebar section. The owner wants it as in the Claude desktop app: "+ New session", and the create
 actions in a right-click menu.
 
-- Evidence: `evidence/new-section-button.png`, the owner hovering the folder icon: "Now here when I
+- Evidence: the owner hovering the folder icon: "Now here when I
   click this for a new folder, okay, a new section" at 2:04.
 
 ## What changes
@@ -27,6 +26,12 @@ actions in a right-click menu.
   stays.
 - While recording the sidebar menu opens with both items disabled (scenario: The sidebar menu while
   recording).
+
+## Review
+
+At the desk: the "+ New session" row and Ctrl+N start a session; right-clicking empty space in the
+sidebar or the row opens New session and New section, and the keyboard reaches the same menu; while
+recording both items are disabled.
 
 ## Settled questions
 
@@ -42,8 +47,8 @@ actions in a right-click menu.
   Rejected: the list only.
 - **While recording** (the owner's answer to the webview polish batch's Q6): the menu opens with both
   items disabled. Rejected: no menu.
-- **Q13 The look**: a plain row with a plus, like the Claude app (`look/directions/row/`).
-  Rejected: the white raised button with a plus (`look/directions/button/`).
+- **Q13 The look**: a plain row with a plus, like the Claude app.
+  Rejected: the white raised button with a plus.
 
 ## Calls for the owner
 

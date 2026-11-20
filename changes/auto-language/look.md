@@ -13,66 +13,30 @@ model the choice needs. Nothing new enters the component library.
 
 Each direction is shown in the default state and in the state that tells the directions apart.
 
-- **A Take line** (`look/directions/take-line/`): the pick, drawn first as a direction.
-- **B Language chip** (`look/directions/language-chip/`): a chip beside the transcript title names
+- **A Take line**: the pick, drawn first as a direction.
+- **B Language chip**: a chip beside the transcript title names
   only the take at the playhead, and it needs a new searchable picker in Settings for a choice most
   people make once.
-- **C Take strip** (`look/directions/take-strip/`): a row of chips under the title is a second
+- **C Take strip**: a row of chips under the title is a second
   navigation for takes, a new component, and takes room from the transcript in every session.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Transcript | two takes, each with a detected language | `look/transcript-two-takes.png` |
-| Transcript | two takes, light theme | `look/transcript-two-takes-light.png` |
-| Transcript | one take in a language chosen in Settings | `look/transcript-single-chosen.png` |
-| Transcript | recording a take whose language is not decided | `look/transcript-recording.png` |
-| Settings | Auto, both models ready | `look/settings-auto-ready.png` |
-| Settings | Auto, both models ready, light theme | `look/settings-auto-ready-light.png` |
-| Settings | Auto, the multilingual model downloading | `look/settings-auto-downloading.png` |
-| Settings | the language list open | `look/settings-list-open.png` |
-| Settings | a fixed language chosen | `look/settings-fixed-language.png` |
+| Screen | State |
+|---|---|
+| Transcript | two takes, each with a detected language |
+| Transcript | two takes, light theme |
+| Transcript | one take in a language chosen in Settings |
+| Transcript | recording a take whose language is not decided |
+| Settings | Auto, both models ready |
+| Settings | Auto, both models ready, light theme |
+| Settings | Auto, the multilingual model downloading |
+| Settings | the language list open |
+| Settings | a fixed language chosen |
 
 A session of one take gains the divider it does not have today, because that is where its language
 is named. A failed download under Auto is not drawn: each model's row fails as the single row does
 today.
-
-Transcript, two takes, each with a detected language:
-
-![Transcript, two takes](look/transcript-two-takes.png)
-
-Transcript, two takes, light theme:
-
-![Transcript, two takes, light](look/transcript-two-takes-light.png)
-
-Transcript, one take in a language chosen in Settings:
-
-![Transcript, one take, chosen language](look/transcript-single-chosen.png)
-
-Transcript, recording a take whose language is not decided:
-
-![Transcript, recording](look/transcript-recording.png)
-
-Settings, Auto, both models ready:
-
-![Settings, Auto, ready](look/settings-auto-ready.png)
-
-Settings, Auto, both models ready, light theme:
-
-![Settings, Auto, ready, light](look/settings-auto-ready-light.png)
-
-Settings, Auto, the multilingual model downloading:
-
-![Settings, Auto, downloading](look/settings-auto-downloading.png)
-
-Settings, the language list open:
-
-![Settings, language list](look/settings-list-open.png)
-
-Settings, a fixed language chosen:
-
-![Settings, fixed language](look/settings-fixed-language.png)
 
 ## Components
 

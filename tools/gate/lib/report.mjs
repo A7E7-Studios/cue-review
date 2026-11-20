@@ -39,7 +39,7 @@ export function formatSummary(r) {
       for (const f of fs) out.push(`- ${where(f)}${esc(f.message)}`);
     }
   }
-  // Notices (a pass or fail this PR writes) lead, so a reviewer sees them first.
+  // Notices (a review value this PR sets) lead, so a reviewer sees them first.
   const infos = r.checks.flatMap((c) => c.findings.filter((f) => f.level === 'info').map((f) => ({ ...f, check: c.id })));
   infos.sort((a, b) => Number(Boolean(b.notice)) - Number(Boolean(a.notice)));
   if (infos.length) {

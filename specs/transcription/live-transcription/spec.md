@@ -1,5 +1,6 @@
 ---
 title: Live transcription
+review: unreviewed
 code:
   - src-tauri/src/lib.rs
   - src-tauri/src/transcribe.rs
@@ -12,30 +13,29 @@ code:
 ---
 # Live transcription
 
-## Purpose
+## Summary
 
-Turning speech into words while a take is being recorded, so the person sees what they said within
-a few seconds, the take's transcript is there as soon as they stop, and its final words are as
-accurate as transcribing the whole take.
+While you record a take, what you say turns into words on screen within a few seconds. The take's
+transcript is there as soon as you stop, and its final words are as accurate as transcribing the
+whole take.
 
 ## Requirements
 
 ### Requirement: Speech is transcribed while recording, so Stop leaves little to do
-The app SHALL cut a take's speech into stretches while the recording goes on, transcribe each
-finished stretch once with the language's model, and make the take's transcript from them at Stop,
-because the person should not wait after Stop for the whole take to be transcribed. A stretch is cut
-once 28 s of audio wait: at the last pause of at least 0.6 s between 10 and 30 s in; without one,
-past 30 s, in the middle of the longest gap of at least 0.2 s, the silence before the first word
-included; else at 30 s. Stretches without speech are skipped untranscribed: a cut in the silence
-before the first word, one at 30 s before any speech, and 28 s without speech, of which the last
-second is kept.
+The app SHALL cut a take's speech into stretches while the recording goes on (a stretch is cut once
+28 s of audio wait: at the last pause of at least 0.6 s between 10 and 30 s in; without one, past 30
+s, in the middle of the longest gap of at least 0.2 s, the silence before the first word included;
+else at 30 s), skip the stretches without speech untranscribed (a cut in the silence before the
+first word, one at 30 s before any speech, and 28 s without speech, of which the last second is
+kept), transcribe each remaining finished stretch once with the language's model, and make the
+take's transcript from them at Stop, because the person should not wait after Stop for the whole
+take to be transcribed.
 
 #### Scenario: The transcript is ready seconds after Stop
 - **GIVEN** a take recorded with a PC microphone or system audio, of any length
 - **WHEN** the person stops recording
 - **THEN** the take's transcript is ready within 5 seconds on the reference PC (Ryzen 9 9950X)
 - **PROOF** test: src-tauri/src/stretches.rs::tests::actual_replay_finishes_within_seconds_of_stop
-- **PROOF** desk: open
 
 #### Scenario: Every spoken word appears once
 - **GIVEN** a take whose speech was cut into several stretches
@@ -77,7 +77,6 @@ errors than a whole-take pass on a five-minute review.
 - **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::retry_forgets_stretches_and_refinements_stop_only_for_their_recording
 - **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::record_more_records_the_source_it_is_given
 - **PROOF** test: src-tauri/src/lib.rs::orchestration_tests::a_new_recording_stops_refining_even_when_its_capture_fails
-- **PROOF** desk: open
 
 ### Requirement: The words being spoken appear within a few seconds
 The app SHALL guess the words after the last finished stretch about every second and show them,
@@ -91,7 +90,6 @@ the words they already said shifting around.
 - **THEN** their words appear in the live box about three seconds after they are said, or sooner,
   on the reference PC
 - **PROOF** test: src-tauri/src/stretches.rs::tests::actual_replay_shows_words_within_seconds
-- **PROOF** desk: open
 
 #### Scenario: Words still being heard are greyed in the live box
 - **GIVEN** a take with finished stretches and words still being heard
@@ -100,4 +98,3 @@ the words they already said shifting around.
   heard sit in the live box, greyed, with the caret and the note "Grey words are still being heard
   and may change."
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::shows finished stretches as rows and greys only the words still being heard
-- **PROOF** desk: open

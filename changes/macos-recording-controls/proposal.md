@@ -4,7 +4,6 @@ capabilities:
   - capture/recording-startup
   - capture/camera-capture
   - workspace/recording-dock
-review: unreviewed
 ---
 # Release macOS previews before recording and fix picker toggles
 
@@ -15,7 +14,7 @@ encode healthy video while its Matroska output remains buffered beyond the start
 The owner also reports that clicking an open screen or microphone picker closes and immediately
 reopens it on macOS, making the trigger behave inconsistently.
 
-- Evidence: `evidence/recording-startup-failure.png`, "Recording is btw still not working."
+- Evidence: "Recording is btw still not working."
 - The owner says: "If you click the button again it doesn't close - it always reopens the dropdown."
 
 ## What changes
@@ -30,6 +29,12 @@ reopens it on macOS, making the trigger behave inconsistently.
   in review. Keep keyboard, outside-click and trigger-switching behavior intact.
 - Test production recording output arguments with real synthetic FFmpeg inputs, and picker
   clicks with actual WebKit pointer events rather than relying only on simulated DOM clicks.
+
+## Review
+
+At a Mac, in the signed installed app: recording a display and a camera starts, records and stops;
+the preview pauses while recording and returns if the start fails; macOS asks for the camera; a
+second click on the source or microphone picker closes it, in a new recording and in review.
 
 ## Settled questions
 

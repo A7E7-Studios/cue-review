@@ -12,13 +12,9 @@ None drawn: the owner settled the removal in the review, and no other direction 
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| workspace | recording take 2 | `look/workspace-recording-take-2.png` |
-
-Workspace, recording take 2:
-
-![Workspace while take 2 records](look/workspace-recording-take-2.png)
+| Screen | State |
+|---|---|
+| workspace | recording take 2 |
 
 ## Components
 

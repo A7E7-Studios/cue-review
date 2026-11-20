@@ -1,0 +1,98 @@
+/* House style: design tokens by role. Light by default; dark under [data-theme="dark"], or by the
+   system setting unless [data-theme="light"]. Spacing, control heights and line heights sit on a
+   4-px grid. Figtree is used when installed; nothing is loaded from the network. */
+
+:root {
+  --font-sans: "Figtree", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-sm: 12px;   --leading-sm: 16px;
+  --text-md: 16px;   --leading-md: 24px;
+  --text-lg: 20px;   --leading-lg: 28px;
+  --text-xl: 24px;   --leading-xl: 32px;
+  --text-2xl: 32px;  --leading-2xl: 40px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 650;
+
+  --space-1: 4px;  --space-2: 8px;   --space-3: 12px;  --space-4: 16px;
+  --space-6: 24px; --space-8: 32px;  --space-12: 48px; --space-16: 64px;
+  --control-sm: 24px; --control-md: 32px; --control-lg: 40px;
+
+  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 10px;
+
+  --duration-fast: 120ms; --duration-base: 180ms; --duration-slow: 220ms;
+  --easing: cubic-bezier(0.2, 0, 0, 1);
+
+  --color-ground: #ECEEF2;
+  --color-sheet: #FFFFFF;
+  --color-text: #18181B;
+  --color-text-secondary: #52525B;
+  --color-text-tertiary: #66666F;
+  --color-divider: #EEEFF2;
+  --color-border: #D9DBE1;
+  --color-border-strong: #7E7E87;
+  --color-hover: #F4F5F7;
+  --color-accent: #5B5BD6;
+  --color-accent-hover: #4C4CC4;
+  --color-on-accent: #FFFFFF;
+  --color-accent-text: #5151CD;
+  --color-accent-subtle: #EEEEFC;
+  --color-focus: #5B5BD6;
+  --color-danger: #C62A2F;
+  --color-warning: #A35200;
+  --color-success: #1E7A44;
+  --shadow-raised: 0 1px 2px rgb(24 24 27 / 0.06), 0 2px 8px rgb(24 24 27 / 0.06);
+  --shadow-overlay: 0 4px 16px rgb(24 24 27 / 0.12), 0 12px 32px rgb(24 24 27 / 0.10);
+  --focus-ring: 0 0 0 2px var(--color-sheet), 0 0 0 4px var(--color-focus);
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --color-ground: #111113;
+  --color-sheet: #1A1A1E;
+  --color-text: #EDEDF0;
+  --color-text-secondary: #A1A1AA;
+  --color-text-tertiary: #8B8B94;
+  --color-divider: #26262B;
+  --color-border: #34343A;
+  --color-border-strong: #6B6B74;
+  --color-hover: #232328;
+  --color-accent-text: #9E9CF2;
+  --color-accent-subtle: #25254A;
+  --color-focus: #9E9CF2;
+  --color-danger: #F2777A;
+  --color-warning: #F0A44B;
+  --color-success: #5CC98A;
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.4), 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-overlay: 0 4px 16px rgb(0 0 0 / 0.5), 0 12px 32px rgb(0 0 0 / 0.4);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-ground: #111113;
+    --color-sheet: #1A1A1E;
+    --color-text: #EDEDF0;
+    --color-text-secondary: #A1A1AA;
+    --color-text-tertiary: #8B8B94;
+    --color-divider: #26262B;
+    --color-border: #34343A;
+    --color-border-strong: #6B6B74;
+    --color-hover: #232328;
+    --color-accent-text: #9E9CF2;
+    --color-accent-subtle: #25254A;
+    --color-focus: #9E9CF2;
+    --color-danger: #F2777A;
+    --color-warning: #F0A44B;
+    --color-success: #5CC98A;
+    --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.4), 0 2px 8px rgb(0 0 0 / 0.3);
+    --shadow-overlay: 0 4px 16px rgb(0 0 0 / 0.5), 0 12px 32px rgb(0 0 0 / 0.4);
+    color-scheme: dark;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --duration-fast: 0ms; --duration-base: 0ms; --duration-slow: 0ms; }
+}

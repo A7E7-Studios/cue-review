@@ -2,7 +2,6 @@
 title: Permit microphone capture in the hardened macOS app
 capabilities:
   - capture/audio-tracks
-review: unreviewed
 ---
 # Permit microphone capture in the hardened macOS app
 
@@ -19,6 +18,11 @@ macOS logs explicitly report that missing entitlement when microphone access is 
   system can request and honor microphone permission.
 - Verify microphone and camera entitlements in the signed app during the installer smoke check.
 - Verify actual microphone samples and finalized playback using isolated local test data.
+
+## Review
+
+At a Mac, in the signed installed app: macOS asks for the microphone, a take records the chosen
+microphone, and its playback has the voice.
 
 ## Settled questions
 

@@ -36,8 +36,8 @@ settings. A separate injected recording failure preserved the real backend cause
 guidance. Evidence is retained in `test-results/macos-camera-capture/`.
 
 These synthetic runs activate no real screen, camera, microphone or Android capture. Real macOS
-camera preview-to-recording access, permission recovery and the owner's source-selection checks
-remain open in their specs.
+camera preview-to-recording access, permission recovery and source selection are left to the
+owner's review of those features.
 
 ### Unattended tests
 

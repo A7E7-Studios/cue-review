@@ -2,7 +2,6 @@
 title: Preserve macOS capture permission across signed updates
 capabilities:
   - capture/macos-permissions
-review: unreviewed
 ---
 # Preserve macOS capture permission across signed updates
 
@@ -20,6 +19,11 @@ identity for team 2RZUB2TKD6 is already available on the owner's Mac.
 - Restrict CI signing to trusted main/release jobs with isolated, temporary signing material.
 - Verify an update between different signed artifacts retains Screen Recording access without
   resetting the grant after the first Developer ID build has been authorized.
+
+## Review
+
+At a Mac: update a Developer ID build that already has the Screen Recording permission to the next
+build, then record without granting Screen Recording again.
 
 ## Settled questions
 

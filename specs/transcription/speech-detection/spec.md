@@ -1,14 +1,15 @@
 ---
 title: Speech detection
+review: unreviewed
 code:
   - src-tauri/src/transcribe.rs
 ---
 # Speech detection
 
-## Purpose
+## Summary
 
-A local detector finds where a take's audio holds speech, so that the transcript keeps what was
-said and leaves out the text the speech model makes up over silence and noise.
+A local detector finds where a take's audio holds speech. You meet it in every transcript: it keeps
+what was said and leaves out the text the speech model makes up over silence and noise.
 
 ## Requirements
 
@@ -29,7 +30,6 @@ larger model most of all, and such rows read as things someone said.
   kept
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::a_row_is_kept_by_its_share_of_detected_speech
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::rows_over_silence_are_left_out_of_a_take
-- **PROOF** desk: open
 
 #### Scenario: Stop's transcript leaves out what was made up while recording
 - **GIVEN** a take transcribed while it was recorded, in which a stretch holds speech only at its
@@ -39,7 +39,6 @@ larger model most of all, and such rows read as things someone said.
   refines it has run
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::a_stretch_transcribed_again_leaves_out_rows_over_silence
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::a_stretch_with_no_speech_left_is_not_transcribed_again
-- **PROOF** desk: open
 
 #### Scenario: Both tracks are cleaned alike
 - **GIVEN** a take recorded with a microphone and system audio, and the speech model writes text

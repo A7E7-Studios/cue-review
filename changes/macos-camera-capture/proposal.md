@@ -3,9 +3,6 @@ title: Prefer displays and make macOS camera capture usable
 capabilities:
   - capture/source-selection
   - capture/camera-capture
-review: changes-requested
-follow-ups:
-  - macos-recording-controls
 ---
 # Prefer displays and make macOS camera capture usable
 
@@ -34,6 +31,13 @@ system-audio track. Diagnostic evidence is local in the main checkout's ignored
   including starting a recording while that camera's preview is active.
 - Explain a blocked camera capture and allow the person to retry after resolving it.
 - Keep the picker design, accessible control names and existing stored recordings unchanged.
+
+## Review
+
+At a Mac, in the installed app: a fresh app selects a display, and the unchanged picker lists
+displays, windows, devices and cameras in that order. The FaceTime HD Camera, chosen, shows a live
+preview and records, stops and replays without a camera-access conflict. A denied or missing camera
+gives guidance and Retry, which works once access returns, without a restart.
 
 ## Settled questions
 

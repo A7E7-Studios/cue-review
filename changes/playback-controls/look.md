@@ -21,38 +21,14 @@ rendered.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Playback controls | speed list open, light | `look/speed-list-light.png` |
-| Playback controls | speed list open, dark | `look/speed-list-dark.png` |
-| Playback controls | at 1× | `look/speed-1.png` |
-| Playback controls | at 1.75×, same width | `look/speed-175.png` |
-| Review | Focus video pressed, light | `look/focus-video-light.png` |
-| Review | Focus video pressed, dark | `look/focus-video-dark.png` |
-
-Playback controls, speed list open, light:
-
-![Speed list, light](look/speed-list-light.png)
-
-Playback controls, speed list open, dark:
-
-![Speed list, dark](look/speed-list-dark.png)
-
-Playback controls at 1×:
-
-![At 1×](look/speed-1.png)
-
-Playback controls at 1.75×:
-
-![At 1.75×](look/speed-175.png)
-
-Review, Focus video pressed, light:
-
-![Focus video, light](look/focus-video-light.png)
-
-Review, Focus video pressed, dark:
-
-![Focus video, dark](look/focus-video-dark.png)
+| Screen | State |
+|---|---|
+| Playback controls | speed list open, light |
+| Playback controls | speed list open, dark |
+| Playback controls | at 1× |
+| Playback controls | at 1.75×, same width |
+| Review | Focus video pressed, light |
+| Review | Focus video pressed, dark |
 
 ## Components
 

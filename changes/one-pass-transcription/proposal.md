@@ -2,7 +2,6 @@
 title: Transcribe a take while it is recorded and refine it after Stop
 capabilities:
   - transcription/live-transcription
-review: unreviewed
 ---
 # Transcribe a take while it is recorded and refine it after Stop
 
@@ -18,10 +17,10 @@ Replaying the live worker on take 4's audio with the old runtime showed why. Upd
 apart, so the first words appeared after 30 s, and the speech between two 30-second windows
 (38–51 s) was never shown live.
 
-- Evidence: `evidence/live-transcript-repeats.png`: take 4 at 0:37, the live box repeating its first
+- Evidence: take 4 at 0:37, the live box repeating its first
   sentence.
-- Evidence: `evidence/live-transcript-stalls.png`: take 6 at 0:30, only its first sentence shown.
-- Evidence: `evidence/transcribing-is-super-slow.png`, "transcribing is super slow … somehow we have
+- Evidence: take 6 at 0:30, only its first sentence shown.
+- Evidence: "transcribing is super slow … somehow we have
   a live's … transcribing, when I look at other software … it's way faster, and then the post
   processing is … also fairly slow" at 0:52–1:15.
 
@@ -48,6 +47,12 @@ real time (`stretches::tests::actual_replay_*`):
 - The words being spoken are guessed about every second and shown greyed in the live box, below
   finished rows: "Live words follow the speaker", "Words still being heard are greyed in the live
   box".
+
+## Review
+
+At the desk, recording a few minutes with the microphone: words appear about two seconds after they
+are spoken, finished sentences stop changing, and only the newest words sit greyed in the live box;
+after Stop the transcript is there within about five seconds.
 
 ## Settled questions
 

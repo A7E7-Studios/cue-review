@@ -1,5 +1,6 @@
 ---
 title: Transcribed tracks
+review: unreviewed
 code:
   - src-tauri/src/transcribe.rs
   - src-tauri/src/stretches.rs
@@ -13,11 +14,11 @@ code:
 ---
 # Transcribed tracks
 
-## Purpose
+## Summary
 
-A take recorded with both the microphone and the computer's audio gets a transcript of both: what
-the reviewer said and what the call or the app played, each row marked with where it was heard,
-and nothing written twice because the microphone also heard the speakers.
+When a take records both the microphone and the computer's audio, as in a call, its transcript holds
+both: what you said and what the call or the app played. Each row is marked with where it was heard,
+and nothing is written twice because the microphone also heard the speakers.
 
 ## Requirements
 
@@ -35,7 +36,6 @@ transcript of one track loses the other half of the conversation.
   the system audio, in the order they were spoken
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::a_take_with_two_tracks_is_transcribed_from_both
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::rows_of_two_tracks_are_merged_by_time
-- **PROOF** desk: open
 
 #### Scenario: Both tracks are ready seconds after Stop
 - **GIVEN** a take of any length recorded with a microphone and system audio
@@ -43,7 +43,6 @@ transcript of one track loses the other half of the conversation.
 - **THEN** the transcript of both tracks is ready within 5 seconds on the reference PC (Ryzen 9
   9950X)
 - **PROOF** test: src-tauri/src/stretches.rs::tests::actual_replay_of_two_tracks_finishes_within_seconds_of_stop
-- **PROOF** desk: open
 
 #### Scenario: A take with one track is transcribed as before
 - **GIVEN** a take recorded with only a microphone, or only system audio
@@ -57,14 +56,12 @@ transcript of one track loses the other half of the conversation.
 - **WHEN** the take is transcribed
 - **THEN** the system audio is transcribed as German and the microphone as English
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::each_track_is_detected_on_its_own
-- **PROOF** desk: open
 
 #### Scenario: An earlier recording gains the call on Retry
 - **GIVEN** a take recorded with both tracks whose transcript was made from the microphone alone
 - **WHEN** the person chooses Retry, or `cue transcribe` runs
 - **THEN** its transcript is made again from both tracks
 - **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_again_reads_both_tracks
-- **PROOF** desk: open
 
 ### Requirement: Each row says where it was heard
 The app SHALL show each row of a take transcribed from two tracks as heard on the microphone or in
@@ -79,7 +76,6 @@ agent acting on the review.
 - **THEN** computer-audio rows sit on the left with their time on the left, and microphone rows
   are set in from the left with their time on the right, with no other mark on a row
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::marks each row of a two-track take with its track
-- **PROOF** desk: open
 
 #### Scenario: A row names its track on demand
 - **GIVEN** a take transcribed from two tracks
@@ -88,7 +84,6 @@ agent acting on the review.
   when the two tracks differ, without moving any text
 - **AND** a screen reader hears the track with the row's time
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::names a row's track on hover and focus and to a screen reader
-- **PROOF** desk: open
 
 #### Scenario: An agent reads each row's track
 - **GIVEN** a take transcribed from two tracks
@@ -108,18 +103,15 @@ audio and once badly as the microphone heard it.
 - **THEN** the call's words appear once, as computer audio, and not again as microphone rows
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::microphone_speech_that_matches_the_system_audio_is_left_out
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::actual_speaker_echo_is_transcribed_once
-- **PROOF** desk: open
 
 #### Scenario: The reviewer's own words are kept
 - **GIVEN** a take in which the microphone picked up the call from the loudspeakers
 - **WHEN** the reviewer speaks while the call is silent
 - **THEN** the reviewer's words are in the transcript as microphone rows
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::microphone_speech_without_a_match_is_kept
-- **PROOF** desk: open
 
 #### Scenario: A reviewer on headphones loses nothing
 - **GIVEN** a take recorded with headphones, so the microphone hears none of the system audio
 - **WHEN** the reviewer and the call speak at the same time
 - **THEN** both are in the transcript, each on its own track
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::microphone_speech_without_a_match_is_kept
-- **PROOF** desk: open

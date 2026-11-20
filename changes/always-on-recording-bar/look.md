@@ -11,44 +11,24 @@ changes what the bar holds, not where it is.
 
 ## Directions rejected
 
-Each direction is shown in every state; `workspace-review-idle.png` tells them apart.
+Each direction was drawn in every state; review, idle tells them apart.
 
-- **Merged row (B)** (`look/directions/merged-row/`): the pickers and Record more join the playback
+- **Merged row (B)**: the pickers and Record more join the playback
   row as light pills, where the microphone name already truncates at 1280px; not picked (Q12).
-- **Pinned bar (C)** (`look/directions/pinned-bar/`): a "Next take" bar pinned to the bottom of the
+- **Pinned bar (C)**: a "Next take" bar pinned to the bottom of the
   sheet, away from the video and the controls it belongs with; not picked (Q12).
 
 ## States drawn
 
 The pick as built, rendered from Storybook (`Workspace/Scenarios`, Windows) at 1280×800.
 
-| Screen | State | Image |
-|---|---|---|
-| Workspace | new recording, idle | `look/workspace-new-idle.png` |
-| Workspace | review, idle | `look/workspace-review-idle.png` |
-| Workspace | review, idle, dark | `look/workspace-review-idle-dark.png` |
-| Workspace | recording take 2 | `look/workspace-recording.png` |
-| Workspace | review, the session's source gone | `look/workspace-source-gone.png` |
-
-Workspace, new recording, idle:
-
-![New recording, idle](look/workspace-new-idle.png)
-
-Workspace, review, idle:
-
-![Review, idle](look/workspace-review-idle.png)
-
-Workspace, review, idle, dark:
-
-![Review, idle, dark](look/workspace-review-idle-dark.png)
-
-Workspace, recording take 2:
-
-![Recording take 2](look/workspace-recording.png)
-
-Workspace, review, the session's source gone:
-
-![Review, source gone](look/workspace-source-gone.png)
+| Screen | State |
+|---|---|
+| Workspace | new recording, idle |
+| Workspace | review, idle |
+| Workspace | review, idle, dark |
+| Workspace | recording take 2 |
+| Workspace | review, the session's source gone |
 
 ### Where the build differs from the board
 

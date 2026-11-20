@@ -1,5 +1,6 @@
 ---
 title: Playback controls
+review: unreviewed
 code:
   - src/workspace/PlaybackBar.tsx
   - src/workspace/workspace.css
@@ -9,10 +10,11 @@ code:
 ---
 # Playback controls
 
-## Purpose
+## Summary
 
-The controls under the video while reviewing a recording: play and pause, the time, the playback
-speed and Focus video, which gives the video the whole window.
+The controls under the video while you review a recording: play and pause, the time, the playback
+speed, and Focus video, which gives the video the whole window. You use them whenever you watch a
+review back.
 
 ## Requirements
 
@@ -28,7 +30,6 @@ changes width moves the controls beside it, and a list shows every choice at onc
 - **AND** the list closes and focus returns to the speed button
 - **PROOF** test: src/workspace/PlaybackBar.test.tsx::chooses a speed from the speed list
 - **PROOF** test: src/App.test.tsx::plays at the speed chosen from the list
-- **PROOF** desk: open
 
 #### Scenario: A person chooses a speed with the keyboard
 - **GIVEN** focus is on the speed button
@@ -37,14 +38,12 @@ changes width moves the controls beside it, and a list shows every choice at onc
 - **AND** ArrowUp and ArrowDown move through the speeds, Enter chooses one, Escape closes the list
   without a change, and focus returns to the speed button
 - **PROOF** test: src/workspace/PlaybackBar.test.tsx::chooses a speed with the keyboard
-- **PROOF** desk: open
 
 #### Scenario: The speed button keeps its width
 - **GIVEN** the speed button reads 1×
 - **WHEN** the person chooses 1.75×
 - **THEN** the speed button keeps the same width and the controls beside it do not move
 - **PROOF** test: src/workspace/playbackStyles.test.ts::gives the speed button a fixed width
-- **PROOF** desk: open
 
 ### Requirement: The playback speed stays
 The app SHALL keep the chosen playback speed for every recording opened afterwards, also after the
@@ -55,7 +54,6 @@ app restarts, because a person who reviews at 1.5× reviews every recording at 1
 - **WHEN** they open another recording, or restart the app and open one
 - **THEN** it plays at 1.5× and the speed button reads 1.5×
 - **PROOF** test: src/App.test.tsx::keeps the chosen speed for the next recording and the next start
-- **PROOF** desk: open
 
 ### Requirement: Focus video hides both sidebars
 The app SHALL hide both the sidebar of recordings and the transcript with one Focus video toggle
@@ -71,7 +69,6 @@ because one toggle that keeps its icon reads as one control in two states.
 - **PROOF** test: src/workspace/PlaybackBar.test.tsx::shows Focus video pressed with the same icon
 - **PROOF** test: src/App.test.tsx::hides the sidebar and the transcript in focus
 - **PROOF** test: src/App.test.tsx::keeps both sidebars hidden in focus when a narrow window widens
-- **PROOF** desk: open
 
 #### Scenario: A person leaves focus
 - **GIVEN** the video is focused
@@ -81,7 +78,6 @@ because one toggle that keeps its icon reads as one control in two states.
 - **AND** Focus video shows not pressed
 - **PROOF** test: src/App.test.tsx::restores both sidebars when focus ends
 - **PROOF** test: src/App.test.tsx::docks the sidebar again after focus even if the window narrowed meanwhile
-- **PROOF** desk: open
 
 #### Scenario: Focus ends when the sidebar or another recording takes over
 - **GIVEN** the video is focused
@@ -90,4 +86,3 @@ because one toggle that keeps its icon reads as one control in two states.
 - **AND** Show sidebar shows the sidebar; a new recording brings it back as leaving focus does
 - **PROOF** test: src/App.test.tsx::ends focus when the sidebar is shown or the workspace leaves review
 - **PROOF** test: src/App.test.tsx::docks the sidebar when Show sidebar ends focus in a narrow window that widens
-- **PROOF** desk: open

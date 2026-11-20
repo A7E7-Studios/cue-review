@@ -1,216 +1,238 @@
-// The overview end to end on two throwaway repositories: a capability in both, a pending change
-// with a look, directions and evidence, every PROOF state and derived state, an LFS image with
-// and without its object, the --assets copy, the --summary text and the schema's shape.
-import { test } from 'node:test';
+// The overview end to end on two throwaway repositories of a notes app: features in both, their
+// review across sides and the commit that set it, Looks (a board present and missing, a page),
+// tables, tested and untested scenarios, systems (nested, across repositories, a feature in
+// several, a system no feature ships in, code outside every system), change folders, components
+// and their system, the --assets copy of boards, the --summary text and the schema's shape.
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { buildOverview, copyAssets, formatSummary, parseRepoArg, isTestAssembly, OVERVIEW_DIR } from '../overview.mjs';
+import { buildOverview, copyAssets, formatSummary, parseRepoArg, isTestAssembly, systemOf, sectionText, OVERVIEW_DIR } from '../overview.mjs';
 import { makeRepo, git, specText, proposalText, DOMAINS } from '../../gate/test/helpers.mjs';
 import { BOM } from '../../gate/lib/git.mjs';
+import { SCHEMA, validate } from './schema.mjs';
 
-const SCHEMA = JSON.parse(fs.readFileSync(path.join(OVERVIEW_DIR, 'overview.schema.json'), 'utf8'));
 const CLI = path.join(OVERVIEW_DIR, 'overview.mjs');
-const HAS_LFS = spawnSync('git', ['lfs', 'version'], { windowsHide: true }).status === 0;
 
-/** A minimal JSON Schema check: type, const, enum, required, properties, additionalProperties: false, items, $ref, pattern, maxLength, minimum. */
-function validate(value, schema, at = '$', root = schema) {
-  const errs = [];
-  if (schema.$ref) return validate(value, schema.$ref.replace('#/$defs/', '').split('/').reduce((s, k) => s[k], root.$defs), at, root);
-  const types = schema.type ? [].concat(schema.type) : null;
-  const typeOf = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : Number.isInteger(v) ? 'integer' : typeof v);
-  if (types && !types.some((t) => t === typeOf(value) || (t === 'number' && typeof value === 'number'))) return [`${at}: ${typeOf(value)} is not ${types.join('|')}`];
-  if ('const' in schema && value !== schema.const) errs.push(`${at}: ${JSON.stringify(value)} is not ${JSON.stringify(schema.const)}`);
-  if (schema.enum && !schema.enum.includes(value)) errs.push(`${at}: ${JSON.stringify(value)} is not one of ${schema.enum.join(', ')}`);
-  if (typeof value === 'string' && schema.pattern && !new RegExp(schema.pattern, 'u').test(value)) errs.push(`${at}: "${value}" does not match ${schema.pattern}`);
-  if (typeof value === 'string' && schema.maxLength !== undefined && [...value].length > schema.maxLength) errs.push(`${at}: longer than ${schema.maxLength}`);
-  if (typeof value === 'number' && schema.minimum !== undefined && value < schema.minimum) errs.push(`${at}: below ${schema.minimum}`);
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    for (const k of schema.required ?? []) if (!(k in value)) errs.push(`${at}: lacks "${k}"`);
-    for (const [k, v] of Object.entries(value)) {
-      if (schema.properties?.[k]) errs.push(...validate(v, schema.properties[k], `${at}.${k}`, root));
-      else if (schema.additionalProperties === false) errs.push(`${at}: unexpected "${k}"`);
+const plain = (o) => JSON.parse(JSON.stringify(o));
+const sc = (name, steps, proofs, table) => ({ name, steps, proofs, ...(table ? { table } : {}) });
+
+/** Runs `fn` with git's author and committer dates at `iso`, so commit dates are known. */
+function on(iso, fn) {
+  const keep = [process.env.GIT_AUTHOR_DATE, process.env.GIT_COMMITTER_DATE];
+  process.env.GIT_AUTHOR_DATE = process.env.GIT_COMMITTER_DATE = iso;
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of [
+      ['GIT_AUTHOR_DATE', keep[0]],
+      ['GIT_COMMITTER_DATE', keep[1]],
+    ]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
   }
-  if (Array.isArray(value) && schema.items) value.forEach((v, i) => errs.push(...validate(v, schema.items, `${at}[${i}]`, root)));
-  return errs;
 }
 
-/**
- * Stores `bytes` in the repo's local LFS store; returns the pointer text git commits instead.
- * `corrupt` stores other bytes of the same length under the oid (git lfs smudge hands them out
- * unchecked).
- */
-function lfsObject(dir, bytes, { store = true, corrupt = false } = {}) {
-  const oid = crypto.createHash('sha256').update(bytes).digest('hex');
-  if (store) {
-    const d = path.join(dir, '.git', 'lfs', 'objects', oid.slice(0, 2), oid.slice(2, 4));
-    fs.mkdirSync(d, { recursive: true });
-    fs.writeFileSync(path.join(d, oid), corrupt ? Buffer.alloc(bytes.length, 0x58) : bytes);
-  }
-  return `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${bytes.length}\n`;
-}
+const BOARD = '<!doctype html><style>.c{color:teal}</style><section id="cursors">Two cursors</section>\n';
+const PAGES = (review, summary = 'A page holds its notes.') =>
+  specText({ title: 'Pages', review, code: ['src/pages.js'], summary, scenarios: [sc('A page opens', ['WHEN a page is chosen', 'THEN it shows'], ['test: src/pages.test.js'])] });
 
-const png = () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), crypto.randomBytes(64)]);
-const sc = (name, steps, proofs) => ({ name, steps, proofs });
-const PASS = (c) => `${c}: pass 2026-10-30, build 1.4.2, by owner`;
-
-function fixtures(t) {
-  const app = makeRepo(
-    {
-      'README.md': '# Sample App\n\nShared notes for **small teams**.\n',
-      'specs/README.md': '# Specs\n',
-      'specs/domains.json': DOMAINS,
-      'tools/gate/config.json': JSON.stringify({ ignore: ['vendor/**'], overview: { excludeModules: ['docs/**', 'dev/**', 'fixtures/**', '**/test/fixtures/**'] } }),
-      'vendor/lib/README.md': '# Vendor lib\n',
-      'vendor/lib/Vendor.asmdef': '{ "name": "Vendor" }\n',
-      '.github/README.md': '# GitHub\n',
-      'docs/README.md': '# Docs\n\nPlanning documents.\n',
-      'dev/mock/README.md': '# A mockup\n',
-      'fixtures/x/package.json': '{ "name": "fixture" }\n',
-      'src/README.md': '# Source\n\nThe app code, one folder per module.\n',
-      'src/arrows/arrows.js': '1\n',
-      'src/arrows/arrows.test.js': '1\n',
-      'src/halls.js': '1\n',
-      'src/palm/README.md': '# Palm menu\n\nThe menu worn on the palm.\n',
-      'src/palm/Palm.asmdef': `${BOM}{ "name": "App.Palm" }\n`,
-      'src/palm/menu.js': '1\n',
-      'src/palm/menu.test.js': '1\n',
-      'src/palm/Tests/App.Palm.Tests.asmdef': '{ "name": "App.Palm.Tests" }\n',
-      'src/colo/App.Colocation.asmdef': '{ "name": "App.Colocation", "references": [] }\n',
-      'src/colo/Colo.cs': '1\n',
-      'src/colo/PlayTests/Play.asmdef': '{ "name": "App.Colocation.PlayModeTests" }\n',
-      'src/colo/Checks/Odd.asmdef': '{ "name": "App.Colocation.Tests.Odd" }\n',
-      'src/colo/Editor/App.Colocation.Editor.asmdef': '{ "name": "App.Colocation.Editor" }\n',
-      'src/colo/Editor/Tool.cs': '1\n',
-      'tools/voice/package.json': JSON.stringify({ name: '@app/voice', description: 'The **assistant** speaks, in `neural` voices.' }),
-      'tools/voice/voice.py': '1\n',
-      'tools/voice/node_modules/dep/package.json': '{ "name": "dep" }\n',
-      'tools/voice/test/fixtures/pkg/package.json': '{ "name": "pkg" }\n',
-    },
-    { prefix: 'overview-app-' },
+function fixtures() {
+  const app = on('2026-10-01T09:00:00Z', () =>
+    makeRepo(
+      {
+        'README.md': '# Notes app\n\nShared notes for **small teams**.\n',
+        'specs/README.md': '# Specs\n',
+        'specs/domains.json': DOMAINS,
+        'specs/systems.json': JSON.stringify([
+          { id: 'editor', title: 'Editor', purpose: 'The app people write notes in.', paths: ['src/'] },
+          { id: 'sync-engine', title: 'Sync engine', purpose: 'Sends edits between devices.', paths: ['src/sync/'] },
+          { id: 'importer', title: 'Importer', purpose: 'Turns text files into notes.', paths: ['tools/importer/'] },
+        ]),
+        // the old key names are not read: the defaults apply
+        'tools/gate/config.json': JSON.stringify({ ignore: ['vendor/**'], overview: { excludeModules: ['src/**'], moduleMarkers: ['go.mod'] } }),
+        'vendor/lib/README.md': '# Vendor lib\n',
+        'vendor/lib/Vendor.asmdef': '{ "name": "Vendor" }\n',
+        '.github/README.md': '# GitHub\n',
+        'docs/README.md': '# Docs\n\nPlanning documents.\n',
+        'dev/mock/README.md': '# A mockup\n',
+        'fixtures/x/package.json': '{ "name": "fixture" }\n',
+        'src/README.md': '# Source\n\nThe app code, one folder per component.\n',
+        'src/cursors/cursors.js': '1\n',
+        'src/cursors/cursors.test.js': '1\n',
+        'src/pages.js': '1\n',
+        'src/pages.test.js': '1\n',
+        'src/editor/Banner.ts': '1\n',
+        'src/sync/README.md': '# Sync\n\nKeeps edits made offline.\n',
+        'src/sync/offline.js': '1\n',
+        'src/sync/offline.test.js': '1\n',
+        'src/quick/README.md': '# Quick menu\n\nThe menu that opens at the cursor.\n',
+        'src/quick/Quick.asmdef': `${BOM}{ "name": "Notes.Quick" }\n`,
+        'src/quick/menu.js': '1\n',
+        'src/quick/menu.test.js': '1\n',
+        'src/quick/Tests/Notes.Quick.Tests.asmdef': '{ "name": "Notes.Quick.Tests" }\n',
+        'src/collab/Notes.Collaboration.asmdef': '{ "name": "Notes.Collaboration", "references": [] }\n',
+        'src/collab/Collab.cs': '1\n',
+        'src/collab/PlayTests/Play.asmdef': '{ "name": "Notes.Collaboration.PlayModeTests" }\n',
+        'src/collab/Checks/Odd.asmdef': '{ "name": "Notes.Collaboration.Tests.Odd" }\n',
+        'src/collab/Editor/Notes.Collaboration.Editor.asmdef': '{ "name": "Notes.Collaboration.Editor" }\n',
+        'src/collab/Editor/Tool.cs': '1\n',
+        'tools/importer/package.json': JSON.stringify({ name: '@notes/importer', description: 'Imports text files.' }),
+        'tools/voice/package.json': JSON.stringify({ name: '@notes/voice', description: 'The **reader** speaks, in `natural` voices.' }),
+        'tools/voice/voice.py': '1\n',
+        'tools/voice/node_modules/dep/package.json': '{ "name": "dep" }\n',
+        'tools/voice/test/fixtures/pkg/package.json': '{ "name": "pkg" }\n',
+      },
+      { prefix: 'overview-app-' },
+    ),
   );
-  const backend = makeRepo(
-    {
-      'README.md': '# Sample backend\n\nThe API and the portal.\n',
-      'specs/domains.json': DOMAINS,
-      'portal/README.md': '# Portal\n\nThe web app people sign in to.\n',
-      'portal/package.json': JSON.stringify({ name: 'portal', description: 'Not the summary: the README has one.' }),
-      'portal/arrows.ts': '1\n',
-      'portal/arrows.test.ts': '1\n',
-      'docs/design/README.md': '# A design proposal\n',
-      'packages/viewer/package.json': JSON.stringify({ name: '@app/viewer', description: 'The three.js product viewer.' }),
-      'packages/viewer/proof/hotspots/README.md': '# Hotspots proof\n',
-    },
-    { prefix: 'overview-backend-' },
+  const backend = on('2026-10-01T09:00:00Z', () =>
+    makeRepo(
+      {
+        'README.md': '# Notes backend\n\nThe API and the site.\n',
+        'specs/domains.json': DOMAINS,
+        'specs/systems.json': JSON.stringify([
+          { id: 'sync-engine', title: 'Sync service', purpose: 'Not the purpose: the app gives one.', paths: ['server/sync/'] },
+          { id: 'site', title: 'Site', purpose: 'The web app people sign in to.', paths: ['site/'] },
+        ]),
+        'site/README.md': '# Site\n\nThe web app people sign in to.\n',
+        'site/package.json': JSON.stringify({ name: 'site', description: 'Not the summary: the README has one.' }),
+        'site/cursors.ts': '1\n',
+        'site/cursors.test.ts': '1\n',
+        'site/legacy/README.md': '# Legacy pages\n\nThe old sign-in pages.\n',
+        'server/sync/README.md': '# Relay\n\nPasses edits on.\n',
+        'server/sync/relay.ts': '1\n',
+        'docs/design/README.md': '# A design proposal\n',
+        'packages/viewer/package.json': JSON.stringify({ name: '@notes/viewer', description: 'The note viewer.' }),
+        'packages/viewer/proof/hotspots/README.md': '# Hotspots proof\n',
+      },
+      { prefix: 'overview-backend-' },
+    ),
   );
-  t.after(() => {
-    app.cleanup();
-    backend.cleanup();
-  });
-  git(app.dir, ['config', 'remote.origin.url', 'https://github.com/example-org/app.git']);
+  git(app.dir, ['config', 'remote.origin.url', 'https://github.com/example-org/notes.git']);
 
-  const look = png();
-  const pick = png();
-  const evidence = png();
   app.write({
-    'specs/collaboration/peer-arrows/spec.md': specText({
-      code: ['src/arrows/'],
+    'specs/collaboration/shared-cursors/spec.md': specText({
+      review: 'approved',
+      code: ['src/cursors/'],
+      looks: ['looks/cursors.html#cursors — Two cursors in one note', 'page: /notes/<id> — Open a note in two windows'],
       scenarios: [
-        sc('A peer walks behind the user', ['GIVEN two devices', 'WHEN one walks behind', 'THEN the other sees an arrow'], ['test: src/arrows/arrows.test.js::Arrows.Behind', PASS('two-headsets')]),
-        sc('A peer leaves', ['WHEN a peer leaves', 'THEN its arrow goes'], ['test: src/arrows/arrows.test.js', 'test: src/arrows/gone.test.js']),
+        sc('A collaborator edits the same note', ['GIVEN two users', 'WHEN one types', 'THEN the other sees a cursor'], ['test: src/cursors/cursors.test.js::Cursors.Others']),
+        sc('A collaborator leaves', ['WHEN a collaborator leaves', 'THEN its cursor goes'], ['test: src/cursors/gone.test.js']),
+        sc('A cursor fades when idle', ['WHEN a collaborator stops typing', 'THEN the cursor fades'], []),
       ],
     }),
-    'specs/collaboration/peer-arrows/look/a-peer-walks-behind-the-user.png': lfsObject(app.dir, look),
-    'specs/collaboration/palm-menu/spec.md': specText({
-      title: 'Palm menu',
-      code: ['src/palm/menu.js', 'src/colo/Editor/Tool.cs'],
-      purpose: 'The menu opens on an upturned palm.',
+    'specs/collaboration/shared-cursors/looks/cursors.html': BOARD,
+    'specs/collaboration/quick-menu/spec.md': specText({
+      title: 'Quick menu',
+      code: ['src/quick/menu.js', 'src/collab/Editor/Tool.cs'],
+      summary: 'The menu opens on a long press.',
+      looks: ['looks/menu.html#menu — The menu at the cursor'],
       scenarios: [
-        sc('Palm up shows the menu', ['WHEN the palm turns up', 'THEN the menu shows'], ['test: src/palm/menu.test.js', 'headset: open']),
-        sc('Palm recall', ['WHEN the user looks at the palm', 'THEN the menu comes back'], ['headset: fail 2026-10-30, build 1.4.2, by owner; it lags', PASS('desk')]),
+        sc('A long press shows the menu', ['WHEN the user presses long', 'THEN the menu shows'], ['test: src/quick/menu.test.js']),
+        sc('The menu comes back', ['WHEN the user presses again', 'THEN the menu comes back'], ['desk: pass 2026-10-30, build 1.4.2, by owner']),
       ],
     }),
-    'specs/layout/halls/spec.md': specText({
-      title: 'Halls',
-      code: ['src/halls.js'],
-      purpose: 'A hall stands around the machines.',
-      scenarios: [sc('A hall stands', ['WHEN a hall is chosen', 'THEN it stands'], [PASS('headset'), 'desk: pass 2026-10-30, build 1.4.2, by owner; crisp'])],
+    'specs/library/offline-edits/spec.md': specText({
+      title: 'Offline edits',
+      code: ['src/sync/', 'src/editor/Banner.ts'],
+      summary: 'You can keep writing when the connection drops.',
+      requirements: [
+        {
+          name: 'Edits made offline are kept',
+          text: 'When the connection drops, the app SHALL keep every edit, because a user otherwise loses work.',
+          scenarios: [
+            sc('An edit made offline reaches the others', ['WHEN a user edits offline and the connection returns', 'THEN the edit reaches the others'], ['test: src/sync/offline.test.js::keeps edits']),
+            sc('Edits wait as long as the connection is gone', [], ['test: src/sync/offline.test.js::keeps edits for days'], [['Offline for', 'The edits are sent'], ['5 seconds', 'when it returns'], ['3 days', 'when it returns']]),
+          ],
+        },
+      ],
     }),
-    'specs/assistant/wake/spec.md': specText({
-      title: 'Wake word',
-      code: ['tools/voice/voice.py'],
-      purpose: 'Saying the name wakes the assistant.',
-      scenarios: [sc('The name wakes it', ['WHEN the user says the name', 'THEN it listens'], [PASS('headset')])],
+    'specs/layout/pages/spec.md': PAGES('unreviewed'),
+    'specs/layout/sections/spec.md': specText({
+      title: 'Sections',
+      review: 'maybe',
+      code: ['src/pages.js'],
+      summary: 'Sections stay where they are placed.',
+      scenarios: [sc('A section stays', ['WHEN a section is placed', 'THEN it shows'], ['test: src/pages.test.js'])],
     }),
-    'specs/assistant/voice/spec.md': specText({
+    'specs/reading/voice/spec.md': specText({
       title: 'Voice',
+      review: 'approved',
       code: ['tools/voice/'],
-      purpose: 'The assistant speaks.',
-      scenarios: [sc('It speaks', ['WHEN it answers', 'THEN it speaks'], ['test: tools/voice/voice.py', 'headset: maybe'])],
+      summary: 'The reader speaks.',
+      scenarios: [
+        sc('It speaks', ['WHEN it answers', 'THEN it speaks'], ['test: tools/voice/voice.py']),
+        sc('It pauses when asked', ['WHEN the user says stop', 'THEN it pauses'], []),
+      ],
     }),
-    'specs/assistant/transcript/spec.md': specText({
-      title: 'Transcript',
-      code: ['tools/voice/voice.py'],
-      purpose: 'What was said is written down.',
-      scenarios: [sc('It writes what it heard', ['WHEN the user speaks', 'THEN the words are written'], ['test: tools/voice/voice.py'])],
-    }),
-    // every scenario approved, but the spec breaks the format (an unknown key): never approved
-    'specs/layout/walls/spec.md': specText({
-      title: 'Walls',
-      code: ['src/halls.js'],
-      purpose: 'Walls stand where they are drawn.',
-      scenarios: [sc('A wall stands', ['WHEN a wall is drawn', 'THEN it stands'], [PASS('headset')])],
-    }).replace('title: Walls\n', 'title: Walls\nowner: me\n'),
   });
-  app.commit('feat: specs (#10)');
+  const specs = on('2026-10-02T09:00:00Z', () => app.commit('feat: specs (#10)'));
+  app.write({ 'specs/layout/pages/spec.md': PAGES('approved') });
+  const approved = on('2026-10-03T09:00:00Z', () => app.commit('docs: approve pages (#11)'));
+  app.write({ 'specs/layout/pages/spec.md': PAGES('approved', 'A page holds its notes, in order.') });
+  on('2026-10-04T09:00:00Z', () => app.commit('docs: reword pages'));
   app.write({
-    'changes/palm-cone/proposal.md': proposalText({
-      title: 'A smaller palm cone',
-      capabilities: ['collaboration/palm-menu', 'assistant/wake'],
-      removes: ['collaboration/palm-cone-old'],
-      followUps: ['palm-cone-angle'],
-    }),
-    'changes/palm-cone/evidence/frame-2.png': lfsObject(app.dir, png(), { corrupt: true }),
-    'changes/palm-cone/look.md': '# Look\n',
-    'changes/palm-cone/look/pick.png': lfsObject(app.dir, pick),
-    'changes/palm-cone/look/directions/a.png': lfsObject(app.dir, png(), { store: false }),
-    'changes/palm-cone/look/directions/b.html': '<p>b</p>\n',
-    'changes/palm-cone/evidence/frame-1.png': evidence,
+    'changes/notes-sync/proposal.md': proposalText({
+      title: 'Offline edits reach everyone',
+      capabilities: ['library/offline-edits', 'collaboration/quick-menu'],
+      removes: ['library/old-sync'],
+    }).replace('At a desk, with a second browser window.\n', 'At a **desk**, with a second\nbrowser window.\n\nThen on a phone, offline.\n\n```\n## not a heading\n```\n\n## Settled questions\n\nNone.\n'),
+    'changes/notes-sync/look.md': '# Look\n',
   });
-  const landed = app.commit('feat: palm cone (#12)');
-  app.write({ 'changes/palm-cone/design.md': '# Design\n' });
-  app.commit('docs: palm cone design');
+  const landed = on('2026-10-05T09:00:00Z', () => app.commit('feat: notes sync (#12)'));
+  app.write({ 'changes/notes-sync/design.md': '# Design\n' });
+  on('2026-10-06T09:00:00Z', () => app.commit('docs: notes sync design'));
 
   backend.write({
-    'specs/collaboration/peer-arrows/spec.md': specText({
-      title: 'Peer arrows on the portal',
-      code: ['portal/arrows.ts'],
-      purpose: 'The portal lists peers.',
-      scenarios: [sc('The portal lists peers', ['WHEN a session runs', 'THEN the portal lists its peers'], ['test: portal/arrows.test.ts', 'desk: open'])],
+    'specs/collaboration/shared-cursors/spec.md': specText({
+      title: 'Shared cursors on the site',
+      review: 'changes-requested',
+      code: ['site/cursors.ts'],
+      summary: 'The site lists collaborators.',
+      looks: ['page: https://example.invalid/site — The collaborator list'],
+      scenarios: [sc('The site lists collaborators', ['WHEN a session runs', 'THEN the site lists its collaborators'], ['test: site/cursors.test.ts'])],
     }),
-    'changes/palm-cone/proposal.md': proposalText({ title: 'Palm cone, backend side', capabilities: ['collaboration/peer-arrows'], review: 'changes-requested', followUps: ['palm-cone-angle', 'portal-peers'] }),
+    'specs/library/offline-edits/spec.md': specText({
+      title: 'Offline edits on the server',
+      review: 'approved',
+      code: ['server/sync/'],
+      summary: 'The server keeps edits in order.',
+      scenarios: [sc('Edits arrive in order', ['WHEN two edits arrive', 'THEN they apply in order'], [])],
+    }),
+    'changes/notes-sync/proposal.md': proposalText({ title: 'Backend side', capabilities: ['library/offline-edits'] }),
+    'changes/no-proposal/tasks.md': '# Tasks\n',
   });
-  backend.commit('feat: backend side');
+  const backendSpecs = on('2026-10-07T09:00:00Z', () => backend.commit('feat: backend specs (#3)'));
 
   // The checkouts move on; the overview reads main.
-  app.branch('elsewhere').write({ 'specs/collaboration/peer-arrows/spec.md': 'garbage\n', 'changes/other/proposal.md': proposalText() });
+  app.branch('elsewhere').write({ 'specs/collaboration/shared-cursors/spec.md': 'garbage\n', 'changes/other/proposal.md': proposalText() });
   app.commit('wip: elsewhere');
   app.write({ 'src/README.md': '# Dirty\n' });
-  return { app, backend, look, pick, evidence, landed };
+  return { app, backend, specs, approved, landed, backendSpecs };
 }
 
-test('overview: two repositories merge into one index whose shape the schema describes', (t) => {
-  const f = fixtures(t);
-  const o = buildOverview([parseRepoArg(`app=${f.app.dir}@main`), parseRepoArg(`backend=${f.backend.dir}@main`)], { now: new Date('2026-10-29T12:00:00Z') });
-  assert.deepEqual(validate(JSON.parse(JSON.stringify(o)), SCHEMA), []);
-  for (const k of SCHEMA.required) assert.ok(k in o, k);
-  assert.equal(o.version, 2);
-  assert.equal(o.generatedAt, '2026-10-29T12:00:00.000Z');
+/** The two repositories, built once for every test that only reads them. */
+let built = null;
+const shared = () => (built ??= fixtures());
+after(() => {
+  built?.app.cleanup();
+  built?.backend.cleanup();
+});
 
+const both = (f) => [parseRepoArg(`app=${f.app.dir}@main`), parseRepoArg(`backend=${f.backend.dir}@main`)];
+
+test('overview: two repositories merge into one index whose shape the schema describes', (t) => {
+  const f = shared();
+  const o = buildOverview(both(f), { now: new Date('2026-10-29T12:00:00Z') });
+  assert.deepEqual(validate(plain(o), SCHEMA), []);
+  assert.notDeepEqual(validate({ ...plain(o), extra: 1 }, SCHEMA), [], 'the check rejects an unknown key');
+  for (const k of SCHEMA.required) assert.ok(k in o, k);
+  assert.equal(o.version, 3);
+  assert.equal(o.generatedAt, '2026-10-29T12:00:00.000Z');
   assert.deepEqual(
     o.repos.map((r) => [r.id, r.ref, r.commit]),
     [
@@ -218,167 +240,262 @@ test('overview: two repositories merge into one index whose shape the schema des
       ['backend', 'main', f.backend.rev('main')],
     ],
   );
-  assert.equal(o.repos[0].name, 'example-org/app');
+  assert.equal(o.repos[0].name, 'example-org/notes');
   assert.equal(o.repos[1].name, path.basename(f.backend.dir));
   assert.equal(o.domains.length, 7);
 
-  // capabilities in domain order, then id; every derived state
+  // features in domain order, then id; the review across sides
   assert.deepEqual(
-    o.capabilities.map((c) => [c.id, c.state]),
+    o.capabilities.map((c) => [c.id, c.review, c.sides.map((s) => s.review)]),
     [
-      ['collaboration/palm-menu', 'failing'],
-      ['collaboration/peer-arrows', 'unreviewed'],
-      ['layout/halls', 'approved'],
-      ['layout/walls', 'unreviewed'],
-      ['assistant/transcript', 'automated'],
-      ['assistant/voice', 'unreviewed'],
-      ['assistant/wake', 'unreviewed'],
+      ['collaboration/quick-menu', 'unreviewed', ['unreviewed']],
+      ['collaboration/shared-cursors', 'changes-requested', ['approved', 'changes-requested']],
+      ['library/offline-edits', 'unreviewed', ['unreviewed', 'approved']],
+      ['layout/pages', 'approved', ['approved']],
+      ['layout/sections', 'unreviewed', [null]],
+      ['reading/voice', 'approved', ['approved']],
     ],
   );
   const cap = (id) => o.capabilities.find((c) => c.id === id);
-  const arrows = cap('collaboration/peer-arrows');
-  assert.equal(arrows.title, 'Peer arrows', 'the first repository given names it');
-  assert.equal(arrows.purpose, 'An arrow shows where each peer stands when they are out of view.');
+  const cursors = cap('collaboration/shared-cursors');
+  assert.equal(cursors.title, 'Shared cursors', 'the first repository given names it');
+  assert.equal(cursors.summary, 'A cursor shows where each collaborator is typing.');
   assert.deepEqual(
-    arrows.sides.map((s) => [s.repo, s.spec, s.code, s.modules, s.problems]),
+    cursors.sides.map((s) => [s.repo, s.spec, s.code, s.systems, s.components, s.problems]),
     [
-      ['app', 'specs/collaboration/peer-arrows/spec.md', ['src/arrows/'], ['src'], []],
-      ['backend', 'specs/collaboration/peer-arrows/spec.md', ['portal/arrows.ts'], ['portal'], []],
+      ['app', 'specs/collaboration/shared-cursors/spec.md', ['src/cursors/'], ['editor'], ['src'], []],
+      ['backend', 'specs/collaboration/shared-cursors/spec.md', ['site/cursors.ts'], ['site'], ['site'], []],
     ],
   );
-  assert.deepEqual(arrows.requirements.map((r) => r.repo), ['app', 'backend']);
-  assert.deepEqual(arrows.pendingChanges, ['palm-cone']);
-  const scenarios = arrows.requirements.flatMap((r) => r.scenarios);
-  assert.deepEqual(
-    scenarios.map((s) => [s.slug, s.human, s.tested]),
-    [
-      ['a-peer-walks-behind-the-user', 'approved', true],
-      ['a-peer-leaves', 'automated', true],
-      ['the-portal-lists-peers', 'open', true],
-    ],
-  );
-  assert.equal(scenarios[0].text, 'GIVEN two devices\nWHEN one walks behind\nTHEN the other sees an arrow');
-  assert.deepEqual(scenarios[0].look, { repo: 'app', path: 'specs/collaboration/peer-arrows/look/a-peer-walks-behind-the-user.png', asset: null });
-  assert.equal(scenarios[1].look, null);
-  assert.deepEqual(scenarios[0].proofs, [
-    { check: 'test', state: 'test', path: 'src/arrows/arrows.test.js', selector: 'Arrows.Behind', exists: true },
-    { check: 'two-headsets', state: 'pass', date: '2026-10-30', build: '1.4.2', by: 'owner' },
+  assert.deepEqual(cursors.systems, ['editor', 'site']);
+  assert.deepEqual(cursors.requirements.map((r) => r.repo), ['app', 'backend']);
+  assert.deepEqual(cursors.pendingChanges, []);
+
+  // the commit that last set review, per side and the newest of them
+  assert.deepEqual(cursors.sides[0].reviewed, { commit: f.specs, date: cursors.sides[0].reviewed.date, pr: 10 });
+  assert.deepEqual([cursors.sides[1].reviewed.commit, cursors.sides[1].reviewed.pr], [f.backendSpecs, 3]);
+  assert.deepEqual(cursors.reviewed, cursors.sides[1].reviewed);
+  assert.equal(Date.parse(cursors.reviewed.date), Date.parse('2026-10-07T09:00:00Z'));
+  assert.deepEqual([cap('layout/pages').reviewed.commit, cap('layout/pages').reviewed.pr], [f.approved, 11], 'not the later reword');
+  assert.equal(cap('layout/pages').summary, 'A page holds its notes, in order.');
+
+  // Looks: a board present, a board missing, pages
+  assert.deepEqual(cursors.looks, [
+    { repo: 'app', kind: 'board', path: 'specs/collaboration/shared-cursors/looks/cursors.html', id: 'cursors', caption: 'Two cursors in one note', exists: true, asset: null },
+    { repo: 'app', kind: 'page', target: '/notes/<id>', caption: 'Open a note in two windows' },
+    { repo: 'backend', kind: 'page', target: 'https://example.invalid/site', caption: 'The collaborator list' },
   ]);
-  assert.equal(scenarios[1].proofs[1].exists, false, 'a test path missing at the ref');
+  assert.deepEqual(cap('collaboration/quick-menu').looks, [
+    { repo: 'app', kind: 'board', path: 'specs/collaboration/quick-menu/looks/menu.html', id: 'menu', caption: 'The menu at the cursor', exists: false, asset: null },
+  ]);
+  assert.deepEqual(cap('layout/pages').looks, []);
 
-  const palm = cap('collaboration/palm-menu').requirements[0].scenarios;
+  // scenarios: tested, a test path missing at the ref, untested, an invalid PROOF line, a table
+  const scenarios = cursors.requirements.flatMap((r) => r.scenarios);
   assert.deepEqual(
-    palm.map((s) => s.human),
-    ['open', 'failing'],
+    scenarios.map((s) => [s.slug, s.tested, s.table]),
+    [
+      ['a-collaborator-edits-the-same-note', true, null],
+      ['a-collaborator-leaves', true, null],
+      ['a-cursor-fades-when-idle', false, null],
+      ['the-site-lists-collaborators', true, null],
+    ],
   );
-  assert.deepEqual(palm[1].proofs[0], { check: 'headset', state: 'fail', date: '2026-10-30', build: '1.4.2', by: 'owner', note: 'it lags' });
-  assert.equal(palm[1].tested, false);
-  assert.equal(cap('layout/halls').requirements[0].scenarios[0].proofs[1].note, 'crisp');
-  // a malformed human line counts as open; a spec that breaks the format is never approved
-  const voice = cap('assistant/voice');
-  assert.deepEqual(voice.requirements[0].scenarios[0].proofs[1], { check: 'headset', state: 'invalid', error: voice.requirements[0].scenarios[0].proofs[1].error });
-  assert.equal(voice.requirements[0].scenarios[0].human, 'open');
-  assert.match(voice.sides[0].problems.join('\n'), /takes "open"/);
-  const walls = cap('layout/walls');
-  assert.deepEqual([walls.requirements[0].scenarios[0].human, walls.pendingChanges, walls.state], ['approved', [], 'unreviewed']);
-  assert.match(walls.sides[0].problems.join('\n'), /unknown front matter key "owner"/);
+  assert.equal(scenarios[0].text, 'GIVEN two users\nWHEN one types\nTHEN the other sees a cursor');
+  assert.deepEqual(scenarios[0].proofs, [{ check: 'test', state: 'test', path: 'src/cursors/cursors.test.js', selector: 'Cursors.Others', exists: true }]);
+  assert.deepEqual(scenarios[1].proofs, [{ check: 'test', state: 'test', path: 'src/cursors/gone.test.js', exists: false }]);
+  assert.deepEqual(scenarios[2].proofs, []);
+  const quick = cap('collaboration/quick-menu').requirements[0].scenarios;
+  assert.deepEqual(quick.map((s) => s.tested), [true, false]);
+  assert.deepEqual(Object.keys(quick[1].proofs[0]), ['check', 'state', 'error']);
+  assert.deepEqual([quick[1].proofs[0].check, quick[1].proofs[0].state], ['desk', 'invalid']);
+  assert.match(quick[1].proofs[0].error, /proven by tests only/);
+  const offline = cap('library/offline-edits');
+  const table = offline.requirements[0].scenarios[1];
+  assert.deepEqual(table.table, { header: ['Offline for', 'The edits are sent'], rows: [['5 seconds', 'when it returns'], ['3 days', 'when it returns']] });
+  assert.equal(table.text, '| Offline for | The edits are sent |\n| 5 seconds | when it returns |\n| 3 days | when it returns |');
+  assert.equal(offline.requirements[1].scenarios[0].tested, false);
 
-  // the change, across both repositories
-  assert.equal(o.changes.length, 1, 'the checkout\'s other branch is not read');
-  const [ch] = o.changes;
-  assert.equal(ch.id, 'palm-cone');
-  assert.equal(ch.title, 'A smaller palm cone');
-  assert.equal(ch.review, 'changes-requested', 'any side asking for changes');
-  assert.deepEqual(ch.followUps, ['palm-cone-angle', 'portal-peers']);
+  // a side whose review does not read: unreviewed, its problem kept with its line
+  const sections = cap('layout/sections');
+  assert.deepEqual(sections.sides[0].problems, [{ line: 1, message: 'review "maybe" is not unreviewed, approved, changes-requested' }]);
+
+  // systems: nested (nearest wins), across repositories, a feature in several, one with no feature
+  assert.deepEqual(offline.sides.map((s) => s.systems), [['editor', 'sync-engine'], ['sync-engine']]);
+  assert.deepEqual(offline.systems, ['editor', 'sync-engine']);
+  assert.deepEqual(offline.sides[0].components, ['src/sync', 'src']);
+  assert.deepEqual(cap('reading/voice').systems, []);
+  assert.deepEqual(
+    o.systems.map((s) => [s.id, s.title, s.sides, s.capabilities, s.components.map((c) => `${c.repo}:${c.path}`)]),
+    [
+      ['editor', 'Editor', [{ repo: 'app', paths: ['src/'] }], ['collaboration/quick-menu', 'collaboration/shared-cursors', 'layout/pages', 'layout/sections', 'library/offline-edits'], ['app:src', 'app:src/collab', 'app:src/collab/Editor', 'app:src/quick']],
+      ['sync-engine', 'Sync engine', [{ repo: 'app', paths: ['src/sync/'] }, { repo: 'backend', paths: ['server/sync/'] }], ['library/offline-edits'], ['app:src/sync', 'backend:server/sync']],
+      ['importer', 'Importer', [{ repo: 'app', paths: ['tools/importer/'] }], [], ['app:tools/importer']],
+      ['site', 'Site', [{ repo: 'backend', paths: ['site/'] }], ['collaboration/shared-cursors'], ['backend:site', 'backend:site/legacy']],
+    ],
+  );
+  assert.equal(o.systems[1].purpose, 'Sends edits between devices.', 'the first repository given');
+
+  // code outside every system, and components in a system that no spec names
+  assert.deepEqual(o.outside, {
+    components: [
+      { repo: 'app', path: 'tools/voice' },
+      { repo: 'backend', path: 'packages/viewer' },
+    ],
+    code: [{ repo: 'app', capability: 'reading/voice', path: 'tools/voice/' }],
+  });
+  assert.deepEqual(o.uncovered, [
+    { repo: 'app', system: 'importer', path: 'tools/importer' },
+    { repo: 'backend', system: 'site', path: 'site/legacy' },
+  ]);
+
+  // the change folders, across both repositories
+  assert.deepEqual(o.changes.map((c) => [c.id, c.title]), [
+    ['no-proposal', 'no-proposal'],
+    ['notes-sync', 'Offline edits reach everyone'],
+  ], 'the checkout\'s other branch is not read');
+  const [bare, ch] = o.changes;
+  assert.deepEqual(bare.sides, [{ repo: 'backend', path: 'changes/no-proposal', capabilities: [], removes: [], review: null, files: ['changes/no-proposal/tasks.md'], landed: null }]);
   const [appSide, backSide] = ch.sides;
-  assert.deepEqual(appSide.capabilities, ['collaboration/palm-menu', 'assistant/wake']);
-  assert.deepEqual(appSide.removes, ['collaboration/palm-cone-old']);
+  assert.deepEqual(appSide.capabilities, ['library/offline-edits', 'collaboration/quick-menu']);
+  assert.deepEqual(appSide.removes, ['library/old-sync']);
   assert.deepEqual(backSide.removes, []);
-  assert.equal(appSide.review, 'unreviewed');
-  assert.deepEqual(appSide.files, [
-    'changes/palm-cone/design.md',
-    'changes/palm-cone/evidence/frame-1.png',
-    'changes/palm-cone/evidence/frame-2.png',
-    'changes/palm-cone/look.md',
-    'changes/palm-cone/look/directions/a.png',
-    'changes/palm-cone/look/directions/b.html',
-    'changes/palm-cone/look/pick.png',
-    'changes/palm-cone/proposal.md',
-  ]);
-  assert.deepEqual(appSide.looks, [{ path: 'changes/palm-cone/look/pick.png', asset: null }]);
-  assert.deepEqual(appSide.directions.map((d) => d.path), ['changes/palm-cone/look/directions/a.png', 'changes/palm-cone/look/directions/b.html']);
-  assert.deepEqual(appSide.evidence, [
-    { path: 'changes/palm-cone/evidence/frame-1.png', asset: null },
-    { path: 'changes/palm-cone/evidence/frame-2.png', asset: null },
-  ]);
-  assert.equal(appSide.landed.commit, f.landed, 'the commit that added proposal.md, not a later one');
-  assert.equal(appSide.landed.pr, 12);
-  assert.ok(!Number.isNaN(Date.parse(appSide.landed.date)));
-  assert.equal(backSide.review, 'changes-requested');
-  assert.equal(backSide.landed.pr, null);
+  assert.equal(appSide.review, 'At a desk, with a second browser window.\n\nThen on a phone, offline.\n\n## not a heading');
+  assert.equal(backSide.review, 'At a desk, with a second browser window.');
+  assert.deepEqual(appSide.files, ['changes/notes-sync/design.md', 'changes/notes-sync/look.md', 'changes/notes-sync/proposal.md']);
+  assert.deepEqual([appSide.landed.commit, appSide.landed.pr], [f.landed, 12], 'the commit that added proposal.md, not a later one');
+  assert.equal(Date.parse(appSide.landed.date), Date.parse('2026-10-05T09:00:00Z'));
+  assert.equal(backSide.landed.pr, 3);
+  assert.deepEqual(offline.pendingChanges, ['notes-sync']);
+  assert.deepEqual(cap('collaboration/quick-menu').pendingChanges, ['notes-sync']);
 
-  // modules: folders with a README.md, a non-test asmdef or a package.json; minus specs/, changes/,
-  // .agents/, .github/, node_modules, the repo's ignore and excludeModules globs (defaults when it has none)
+  // components: folders with a README.md, a non-test asmdef or a package.json, minus specs/,
+  // changes/, .agents/, .github/, node_modules, the repo's ignore and the default excludes (the
+  // old excludeModules and moduleMarkers keys are not read); each with its system
   assert.deepEqual(
-    o.modules.map((m) => [m.repo, m.path, m.readme, m.assembly, m.package, m.title, m.summary, m.capabilities]),
+    o.components.map((m) => [m.repo, m.path, m.system, m.readme, m.assembly, m.package, m.title, m.summary, m.capabilities]),
     [
-      ['app', '.', 'README.md', null, null, 'Sample App', 'Shared notes for small teams.', []],
-      ['app', 'src', 'src/README.md', null, null, 'Source', 'The app code, one folder per module.', ['collaboration/peer-arrows', 'layout/halls', 'layout/walls']],
-      ['app', 'src/colo', null, 'App.Colocation', null, 'App.Colocation', '', []],
-      ['app', 'src/colo/Editor', null, 'App.Colocation.Editor', null, 'App.Colocation.Editor', '', ['collaboration/palm-menu']],
-      ['app', 'src/palm', 'src/palm/README.md', 'App.Palm', null, 'Palm menu', 'The menu worn on the palm.', ['collaboration/palm-menu']],
-      ['app', 'tools/voice', null, null, '@app/voice', '@app/voice', 'The assistant speaks, in neural voices.', ['assistant/transcript', 'assistant/voice', 'assistant/wake']],
-      ['backend', '.', 'README.md', null, null, 'Sample backend', 'The API and the portal.', []],
-      ['backend', 'packages/viewer', null, null, '@app/viewer', '@app/viewer', 'The three.js product viewer.', []],
-      ['backend', 'portal', 'portal/README.md', null, 'portal', 'Portal', 'The web app people sign in to.', ['collaboration/peer-arrows']],
+      ['app', '.', null, 'README.md', null, null, 'Notes app', 'Shared notes for small teams.', []],
+      ['app', 'src', 'editor', 'src/README.md', null, null, 'Source', 'The app code, one folder per component.', ['collaboration/shared-cursors', 'layout/pages', 'layout/sections', 'library/offline-edits']],
+      ['app', 'src/collab', 'editor', null, 'Notes.Collaboration', null, 'Notes.Collaboration', '', []],
+      ['app', 'src/collab/Editor', 'editor', null, 'Notes.Collaboration.Editor', null, 'Notes.Collaboration.Editor', '', ['collaboration/quick-menu']],
+      ['app', 'src/quick', 'editor', 'src/quick/README.md', 'Notes.Quick', null, 'Quick menu', 'The menu that opens at the cursor.', ['collaboration/quick-menu']],
+      ['app', 'src/sync', 'sync-engine', 'src/sync/README.md', null, null, 'Sync', 'Keeps edits made offline.', ['library/offline-edits']],
+      ['app', 'tools/importer', 'importer', null, null, '@notes/importer', '@notes/importer', 'Imports text files.', []],
+      ['app', 'tools/voice', null, null, null, '@notes/voice', '@notes/voice', 'The reader speaks, in natural voices.', ['reading/voice']],
+      ['backend', '.', null, 'README.md', null, null, 'Notes backend', 'The API and the site.', []],
+      ['backend', 'packages/viewer', null, null, null, '@notes/viewer', '@notes/viewer', 'The note viewer.', []],
+      ['backend', 'server/sync', 'sync-engine', 'server/sync/README.md', null, null, 'Relay', 'Passes edits on.', ['library/offline-edits']],
+      ['backend', 'site', 'site', 'site/README.md', null, 'site', 'Site', 'The web app people sign in to.', ['collaboration/shared-cursors']],
+      ['backend', 'site/legacy', 'site', 'site/legacy/README.md', null, null, 'Legacy pages', 'The old sign-in pages.', []],
     ],
   );
-  assert.deepEqual(cap('collaboration/palm-menu').sides[0].modules, ['src/palm', 'src/colo/Editor'], 'each code path to its deepest module');
-  assert.deepEqual(cap('assistant/voice').sides[0].modules, ['tools/voice'], 'a folder path starts at that folder');
+  assert.deepEqual(cap('collaboration/quick-menu').sides[0].components, ['src/quick', 'src/collab/Editor'], 'each code path to its deepest component');
 
   assert.deepEqual(o.totals, {
     repos: 2,
     domains: 7,
-    modules: 9,
-    capabilities: { total: 7, failing: 1, unreviewed: 4, approved: 1, automated: 1 },
-    scenarios: { total: 10, failing: 1, open: 3, approved: 4, automated: 2, tested: 6 },
-    changes: { total: 1, unreviewed: 0, changesRequested: 1 },
+    systems: 4,
+    components: 13,
+    capabilities: { total: 6, unreviewed: 3, approved: 2, changesRequested: 1 },
+    scenarios: { total: 13, tested: 9, untested: 4 },
+    changes: { total: 2 },
   });
 });
 
-test('overview: --assets copies every referenced image, smudging LFS pointers; an object it cannot get is missing', { skip: HAS_LFS ? false : 'git lfs is not installed' }, (t) => {
-  const f = fixtures(t);
-  const o = buildOverview([parseRepoArg(`app=${f.app.dir}@main`), parseRepoArg(`backend=${f.backend.dir}@main`)]);
+test('overview: one side asks for changes: the feature is changes-requested', () => {
+  const o = buildOverview(both(shared()));
+  const cursors = o.capabilities.find((c) => c.id === 'collaboration/shared-cursors');
+  assert.deepEqual(
+    cursors.sides.map((s) => [s.repo, s.review]),
+    [
+      ['app', 'approved'],
+      ['backend', 'changes-requested'],
+    ],
+  );
+  assert.equal(cursors.review, 'changes-requested');
+});
+
+test('overview: an untested scenario is a gap, not a review item', () => {
+  const o = buildOverview(both(shared()));
+  const voice = o.capabilities.find((c) => c.id === 'reading/voice');
+  assert.deepEqual(
+    voice.requirements[0].scenarios.map((s) => [s.slug, s.tested]),
+    [
+      ['it-speaks', true],
+      ['it-pauses-when-asked', false],
+    ],
+  );
+  assert.equal(voice.review, 'approved', 'the review state is the spec\'s');
+  assert.equal(o.totals.scenarios.untested, 4);
+  const toReview = formatSummary(o).split('\nTo review')[1].split('\nChange folders')[0];
+  assert.ok(!toReview.includes('reading/voice'), toReview);
+});
+
+test('overview: a feature in two systems: both list it, and it lists both', () => {
+  const o = buildOverview(both(shared()));
+  const offline = o.capabilities.find((c) => c.id === 'library/offline-edits');
+  assert.deepEqual(offline.systems, ['editor', 'sync-engine']);
+  for (const id of ['editor', 'sync-engine']) assert.ok(o.systems.find((s) => s.id === id).capabilities.includes('library/offline-edits'), id);
+});
+
+test('overview: a path belongs to the nearest system declaring it or a folder above it', () => {
+  const systems = [
+    { id: 'editor', paths: ['src/'] },
+    { id: 'sync', paths: ['src/sync/', 'lib/sync.js'] },
+    { id: 'bare', paths: ['tools'] },
+  ];
+  assert.equal(systemOf(systems, 'src/a.js'), 'editor');
+  assert.equal(systemOf(systems, 'src/'), 'editor');
+  assert.equal(systemOf(systems, 'src/sync/'), 'sync');
+  assert.equal(systemOf(systems, 'src/sync/deep/x.ts'), 'sync');
+  assert.equal(systemOf(systems, 'src/syncer.js'), 'editor', 'a folder name is no prefix of a sibling');
+  assert.equal(systemOf(systems, 'lib/sync.js'), 'sync');
+  assert.equal(systemOf(systems, 'lib/sync.json'), null);
+  assert.equal(systemOf(systems, 'tools/x/'), 'bare', 'a folder declared without its /');
+  assert.equal(systemOf(systems, 'README.md'), null);
+  assert.equal(systemOf([], 'src/a.js'), null);
+});
+
+test('overview: a proposal\'s section as plain text', () => {
+  const text = '---\ntitle: X\ncapabilities:\n  - a/b\n---\n# X\n\n## Why\n\nBecause.\n\n## Review\nOn a `phone`,\nwith [the app](https://example.invalid).\n\n\nThen at a desk.\n### A detail\nKept.\n## Out of scope\n\nNothing.\n';
+  assert.equal(sectionText(text, 'Review'), 'On a phone, with the app.\n\nThen at a desk.\n\nA detail\n\nKept.');
+  assert.equal(sectionText(text, 'Why'), 'Because.');
+  assert.equal(sectionText(text, 'Calls for the owner'), null);
+  assert.equal(sectionText('---\ntitle: X\n---\n## Review\n', 'Review'), '');
+  // a fence's body is text, one paragraph, without its delimiters; an empty paragraph drops out
+  const fenced = '---\ntitle: X\n---\n## Review\n\n<br>\n\n```js\n### not a heading\n\nstill code\n```\n\nafter\n';
+  assert.equal(sectionText(fenced, 'Review'), '### not a heading still code\n\nafter');
+  const touching = '---\ntitle: X\n---\n## Review\nBefore.\n```\n<section id="a">*Card*</section>\n```\n~~~\n```js\n~~~\nAfter.\n';
+  assert.equal(sectionText(touching, 'Review'), 'Before.\n\n<section id="a">*Card*</section>\n\n```js\n\nAfter.');
+});
+
+test('overview: --assets copies every board that exists into its folder', (t) => {
+  const f = shared();
+  const o = buildOverview(both(f));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overview-assets-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const n = copyAssets(o, dir);
-  assert.deepEqual(n, { copied: 4, missing: 2 });
-  assert.deepEqual(validate(JSON.parse(JSON.stringify(o)), SCHEMA), []);
+  assert.deepEqual(copyAssets(o, dir), { copied: 1 });
+  assert.deepEqual(validate(plain(o), SCHEMA), []);
   assert.equal(o.assetsDir, dir.replace(/\\/g, '/'));
-  const look = o.capabilities.find((c) => c.id === 'collaboration/peer-arrows').requirements[0].scenarios[0].look;
-  assert.equal(look.asset, 'app/specs/collaboration/peer-arrows/look/a-peer-walks-behind-the-user.png');
-  assert.ok(fs.readFileSync(path.join(dir, ...look.asset.split('/'))).equals(f.look), 'the LFS object, not its pointer');
-  const side = o.changes[0].sides[0];
-  assert.ok(fs.readFileSync(path.join(dir, ...side.looks[0].asset.split('/'))).equals(f.pick));
-  assert.ok(fs.readFileSync(path.join(dir, ...side.evidence[0].asset.split('/'))).equals(f.evidence), 'a plain blob is copied as it is');
-  assert.deepEqual(side.directions[0], { path: 'changes/palm-cone/look/directions/a.png', asset: null, missing: 'lfs' });
-  assert.equal(side.directions[1].asset, 'app/changes/palm-cone/look/directions/b.html');
-  assert.ok(!fs.existsSync(path.join(dir, 'app', 'changes', 'palm-cone', 'look', 'directions', 'a.png')));
-  // bytes that do not match the pointer's sha256 are not the object
-  assert.deepEqual(side.evidence[1], { path: 'changes/palm-cone/evidence/frame-2.png', asset: null, missing: 'lfs' });
-  assert.ok(!fs.existsSync(path.join(dir, 'app', 'changes', 'palm-cone', 'evidence', 'frame-2.png')));
+  const [board] = o.capabilities.find((c) => c.id === 'collaboration/shared-cursors').looks;
+  assert.equal(board.asset, 'app/specs/collaboration/shared-cursors/looks/cursors.html');
+  assert.equal(fs.readFileSync(path.join(dir, ...board.asset.split('/')), 'utf8'), BOARD);
+  const [missing] = o.capabilities.find((c) => c.id === 'collaboration/quick-menu').looks;
+  assert.equal(missing.asset, null, 'a board missing at the ref is not copied');
+  assert.ok(!fs.existsSync(path.join(dir, 'app', 'specs', 'collaboration', 'quick-menu')));
 });
 
 test('overview: --assets refuses a path that would leave its folder', (t) => {
-  const f = fixtures(t);
+  const f = shared();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overview-guard-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  for (const bad of ['../../escaped.png', 'changes/palm-cone/c:evil.png', 'changes\\palm-cone\\x.png', 'changes//x.png']) {
+  for (const bad of ['../../escaped.html', 'specs/c:evil.html', 'specs\\x\\y.html', 'specs//x.html']) {
     const o = buildOverview([parseRepoArg(`app=${f.app.dir}@main`)]);
-    o.changes[0].sides[0].looks[0].path = bad;
+    o.capabilities.find((c) => c.id === 'collaboration/shared-cursors').looks[0].path = bad;
     assert.throws(() => copyAssets(o, path.join(dir, 'assets')), /refusing to copy/, bad);
   }
-  assert.ok(!fs.existsSync(path.join(dir, 'escaped.png')) && !fs.existsSync(path.join(path.dirname(dir), 'escaped.png')));
+  assert.ok(!fs.existsSync(path.join(dir, 'escaped.html')) && !fs.existsSync(path.join(path.dirname(dir), 'escaped.html')));
 });
 
 test('overview: landed is the first-parent commit that added proposal.md, renames counted as adds', (t) => {
@@ -404,33 +521,53 @@ test('overview: landed is the first-parent commit that added proposal.md, rename
   assert.deepEqual([side.path, side.landed.commit, side.landed.pr], ['changes/moved', r.rev('HEAD'), 77]);
 });
 
-test('overview: --summary prints each domain\'s capabilities and the changes to review', (t) => {
-  const f = fixtures(t);
-  const text = formatSummary(buildOverview([parseRepoArg(`app=${f.app.dir}@main`), parseRepoArg(`backend=${f.backend.dir}@main`)]));
-  assert.match(text, /^Overview of app \(example-org\/app main [0-9a-f]{9}\), backend/);
-  assert.match(text, /7 capabilities \(1 failing, 4 unreviewed, 1 approved, 1 automated\) · 10 scenarios · 1 changes to review · 9 modules/);
-  assert.match(text, /\nCollaboration \(collaboration\)\n\s+capability\s+state\s+approved\s+open\s+failing\s+automated\s+repos\n/);
-  assert.match(text, /collaboration\/palm-menu\s+failing\s+0\s+1\s+1\s+0\s+app\n/);
-  assert.match(text, /collaboration\/peer-arrows\s+unreviewed\s+1\s+1\s+0\s+1\s+app, backend\n/);
-  assert.match(text, /\nLibrary \(library\)\n {2}\(no capabilities\)\n/);
-  assert.match(text, /\nTo review \(1\)\n\s+palm-cone\s+changes-requested\s+app #12, backend\s+A smaller palm cone\n/);
-  assert.match(text, /\nModules \(9: app 6, backend 3\)\n/);
-  assert.match(text, /\n {2}app:src\/colo\/Editor\s+App\.Colocation\.Editor {2}\[collaboration\/palm-menu\]\n/);
+test('overview: reviewed is the first-parent commit that last set review, a merged verdict its merge', (t) => {
+  const r = makeRepo({ 'README.md': '# Root\n\nThe root.\n', 'specs/domains.json': DOMAINS, 'src/cursors/x.js': '1\n', 'specs/collaboration/shared-cursors/spec.md': specText() }, { prefix: 'overview-reviewed-' });
+  t.after(() => r.cleanup());
+  const first = buildOverview([{ id: 'app', dir: r.dir, ref: 'main' }]).capabilities[0];
+  assert.deepEqual([first.reviewed.commit, first.reviewed.pr], [r.main, null], 'the commit that added the spec set it');
+  r.branch('triage').write({ 'specs/collaboration/shared-cursors/spec.md': specText({ review: 'approved' }) });
+  r.commit('docs: approve');
+  git(r.dir, ['checkout', '-q', 'main']);
+  git(r.dir, ['merge', '-q', '--no-ff', '-m', 'Review results (#41)', 'triage']);
+  const cap = buildOverview([{ id: 'app', dir: r.dir, ref: 'main' }]).capabilities[0];
+  assert.deepEqual([cap.review, cap.reviewed.commit, cap.reviewed.pr], ['approved', r.rev('HEAD'), 41]);
+});
+
+test('overview: --summary prints the features by domain, those to review, the change folders and the systems', (t) => {
+  const f = shared();
+  const text = formatSummary(buildOverview(both(f)));
+  assert.match(text, /^Overview of app \(example-org\/notes main [0-9a-f]{9}\), backend/);
+  assert.match(text, /\n6 features \(3 unreviewed, 2 approved, 1 changes requested\) · 13 scenarios \(9 tested, 4 untested\) · 2 change folders · 4 systems · 13 components\n/);
+  assert.match(text, /\nCollaboration \(collaboration\)\n {2}feature\s+review\s+tested {2}systems\s+repos\n/);
+  assert.match(text, /\n {2}collaboration\/quick-menu\s+unreviewed\s+1\/2 {2}editor\s+app\n/);
+  assert.match(text, /\n {2}collaboration\/shared-cursors\s+changes-requested\s+3\/4 {2}editor, site\s+app, backend\n/);
+  assert.match(text, /\n {2}library\/offline-edits\s+unreviewed\s+2\/3 {2}editor, sync-engine\s+app, backend\n/);
+  assert.match(text, /\n {2}reading\/voice\s+approved\s+1\/2\s{2}-\s+app\n/);
+  assert.match(text, /\nSearch \(search\)\n {2}\(no features\)\n/);
+  assert.match(
+    text,
+    /\nTo review \(4\)\n {2}collaboration\/quick-menu\s+unreviewed\s+notes-sync\n {2}collaboration\/shared-cursors\s+changes-requested\s+\(no change folder\)\n {2}library\/offline-edits\s+unreviewed\s+notes-sync\n {2}layout\/sections\s+unreviewed\s+\(no change folder\)\n/,
+  );
+  assert.match(text, /\nChange folders \(2\)\n {2}no-proposal\s+backend\s+no-proposal\n {2}notes-sync\s+app #12, backend #3\s+Offline edits reach everyone\n/);
+  assert.match(text, /\nSystems \(4\)\n {2}editor\s+5 features\s+app\s+Editor\n {2}sync-engine\s+1 feature\s+app, backend\s+Sync engine\n {2}importer\s+0 features\s+app\s+Importer {2}\(no feature ships in it\)\n/);
+  assert.match(text, /\n {2}No feature ships in: importer\n {2}Outside every system: 2 components, 1 code paths\n$/);
 });
 
 test('overview: the command line writes the JSON, the summary and the assets; usage and setup errors exit 2', (t) => {
-  const f = fixtures(t);
+  const f = shared();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overview-cli-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const run = (...args) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', windowsHide: true });
   const out = path.join(dir, 'overview.json');
-  let r = run('--repo', `app=${f.app.dir}`, '--repo', `backend=${f.backend.dir}`, '--ref', 'main', '--out', out, '--summary', ...(HAS_LFS ? ['--assets', path.join(dir, 'assets')] : []));
+  let r = run('--repo', `app=${f.app.dir}`, '--repo', `backend=${f.backend.dir}`, '--ref', 'main', '--out', out, '--summary', '--assets', path.join(dir, 'assets'));
   assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
   assert.match(r.stdout, /^Overview of app/);
   const o = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.deepEqual(validate(o, SCHEMA), []);
   assert.equal(o.repos[0].ref, 'main');
-  if (HAS_LFS) assert.match(r.stderr, /2 image\(s\) not resolved/);
+  assert.ok(fs.existsSync(path.join(dir, 'assets', 'app', 'specs', 'collaboration', 'shared-cursors', 'looks', 'cursors.html')));
   r = run('--repo', `app=${f.app.dir}@main`);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).repos.length, 1, 'JSON on stdout without --out or --summary');
@@ -443,24 +580,24 @@ test('overview: the command line writes the JSON, the summary and the assets; us
   assert.equal(run('--repo', `app=${dir}`).status, 2, 'not a git repository');
 });
 
-test('overview: a repository with no specs yet still lists its modules', (t) => {
-  const r = makeRepo({ 'README.md': '# Root\n\nThe root.\n', 'a/README.md': '## A\n\n- a list\n\nThe a module.\n' }, { prefix: 'overview-empty-' });
+test('overview: a repository with no specs and no systems still lists its components, none outside', (t) => {
+  const r = makeRepo({ 'README.md': '# Root\n\nThe root.\n', 'a/README.md': '## A\n\n- a list\n\nThe a component.\n', 'a/x.js': '1\n' }, { prefix: 'overview-empty-' });
   t.after(() => r.cleanup());
   const o = buildOverview([{ id: 'only', dir: r.dir, ref: 'main' }]);
-  assert.deepEqual(validate(JSON.parse(JSON.stringify(o)), SCHEMA), []);
-  assert.deepEqual(o.capabilities, []);
-  assert.deepEqual(o.changes, []);
-  assert.deepEqual(o.domains, []);
+  assert.deepEqual(validate(plain(o), SCHEMA), []);
+  assert.deepEqual([o.capabilities, o.changes, o.domains, o.systems, o.uncovered], [[], [], [], [], []]);
+  assert.deepEqual(o.outside, { components: [], code: [] }, 'a repository that declares no system has nothing outside one');
   assert.deepEqual(
-    o.modules.map((m) => [m.path, m.title, m.summary]),
+    o.components.map((m) => [m.path, m.system, m.title, m.summary]),
     [
-      ['.', 'Root', 'The root.'],
-      ['a', 'A', 'The a module.'],
+      ['.', null, 'Root', 'The root.'],
+      ['a', null, 'A', 'The a component.'],
     ],
   );
+  assert.equal(formatSummary(o).includes('\nSystems (0)\n  (none declared)\n'), true);
 });
 
-test('overview: Python and Gradle folders are modules; a config\'s own markers replace the defaults', (t) => {
+test('overview: Python and Gradle folders are components; a config\'s own markers replace the defaults', (t) => {
   const r = makeRepo(
     {
       'README.md': '# Root\n\nThe root.\n',
@@ -476,9 +613,9 @@ test('overview: Python and Gradle folders are modules; a config\'s own markers r
     { prefix: 'overview-markers-' },
   );
   t.after(() => r.cleanup());
-  const rows = (o) => o.modules.map((m) => [m.path, m.package, m.manifest, m.title, m.summary]);
+  const rows = (o) => o.components.map((m) => [m.path, m.package, m.manifest, m.title, m.summary]);
   let o = buildOverview([{ id: 'only', dir: r.dir, ref: 'main' }]);
-  assert.deepEqual(validate(JSON.parse(JSON.stringify(o)), SCHEMA), []);
+  assert.deepEqual(validate(plain(o), SCHEMA), []);
   assert.deepEqual(rows(o), [
     ['.', null, null, 'Root', 'The root.'],
     ['android/app', null, 'android/app/build.gradle.kts', 'app', ''],
@@ -487,32 +624,31 @@ test('overview: Python and Gradle folders are modules; a config\'s own markers r
     ['py', 'notes-sync', 'py/pyproject.toml', 'notes-sync', 'Keeps notes in step.'],
     ['web', 'web', 'web/package.json', 'web', 'The web app.'],
   ]);
-  r.write({ 'tools/gate/config.json': JSON.stringify({ overview: { moduleMarkers: ['go.mod', 'pyproject.toml'] } }) });
+  r.write({ 'tools/gate/config.json': JSON.stringify({ overview: { componentMarkers: ['go.mod', 'pyproject.toml'], excludeComponents: ['poetry/**'] } }) });
   r.commit('chore: markers');
   o = buildOverview([{ id: 'only', dir: r.dir, ref: 'main' }]);
   assert.deepEqual(rows(o), [
     ['go', null, 'go/go.mod', 'go', ''],
-    ['poetry', 'old-style', 'poetry/pyproject.toml', 'old-style', 'Poetry metadata.'],
     ['py', 'notes-sync', 'py/pyproject.toml', 'notes-sync', 'Keeps notes in step.'],
     ['web', 'web-py', 'web/pyproject.toml', 'web-py', ''],
   ]);
 });
 
-test('overview: test assemblies are not modules', () => {
+test('overview: test assemblies are not components', () => {
   for (const [name, folder] of [
-    ['App.Colocation.Tests', 'Assets/Scripts/Colocation/Tests'],
-    ['App.Ui.PlayTests', 'Assets/Scripts/UI/Play'],
+    ['Notes.Collaboration.Tests', 'Assets/Scripts/Collaboration/Tests'],
+    ['Notes.Ui.PlayTests', 'Assets/Scripts/UI/Play'],
     ['X.EditModeTests', 'a'],
     ['X.PlayModeTests', 'a'],
     ['X', 'Assets/Scripts/X/PlayModeTests'],
-    ['App.Tests.Shared', 'Assets/Scripts/Shared'],
+    ['Notes.Tests.Shared', 'Assets/Scripts/Shared'],
   ]) {
     assert.ok(isTestAssembly(name, folder), `${name} in ${folder}`);
   }
   for (const [name, folder] of [
-    ['App.Colocation', 'Assets/Scripts/Colocation'],
-    ['App.EditorTools', 'Assets/Scripts/EditorTools'],
-    ['App.Testing', 'Assets/Scripts/Testing'],
+    ['Notes.Collaboration', 'Assets/Scripts/Collaboration'],
+    ['Notes.EditorTools', 'Assets/Scripts/EditorTools'],
+    ['Notes.Testing', 'Assets/Scripts/Testing'],
   ]) {
     assert.ok(!isTestAssembly(name, folder), `${name} in ${folder}`);
   }

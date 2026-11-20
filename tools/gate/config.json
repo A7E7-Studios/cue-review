@@ -37,6 +37,7 @@
   "budgets": [
     { "pattern": "changes/**/*.md", "bytes": 30720 },
     { "pattern": "specs/**/spec.md", "bytes": 30720 },
+    { "pattern": "specs/**/looks/*.html", "bytes": 30720 },
     { "pattern": "**/AGENTS.md", "bytes": 32768 },
     { "pattern": "**/README.md", "bytes": 40960 }
   ],
@@ -75,7 +76,10 @@
     { "id": "todo", "message": "roadmap: TODO", "pattern": "\\bTODO\\b" }
   ],
   "overview": {
-    "excludeModules": ["dev/**", "docs/**", "**/proof/**", "fixtures/**", "**/test/fixtures/**", "src-tauri/fixtures/**"],
-    "moduleMarkers": ["README.md", "package.json", "Cargo.toml"]
+    "excludeComponents": ["dev/**", "docs/**", "**/proof/**", "fixtures/**", "**/test/fixtures/**", "src-tauri/fixtures/**"],
+    "componentMarkers": ["README.md", "package.json", "Cargo.toml"]
+  },
+  "solutionMap": {
+    "repos": [{ "id": "cue-review", "path": "." }]
   }
 }

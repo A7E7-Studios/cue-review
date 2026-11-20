@@ -5,11 +5,11 @@
 Picked by the agent on the owner's delegation (the owner was away); the reasons are under the
 proposal's Calls for the owner (Q8–Q11).
 
-- **Slim rail** (`look/directions/slim-rail/`): a 4 px rounded thumb in a 10 px gutter, no arrows,
+- **Slim rail**: a 4 px rounded thumb in a 10 px gutter, no arrows,
   kept 12 px clear of the dialog's corners. Always visible, so Settings shows that it scrolls.
-- **Styled dropdown** (`look/directions/styled-dropdown/`): still a native select; its open list
+- **Styled dropdown**: still a native select; its open list
   looks like the app's menus, with a check on the current theme.
-- **Darker and lifted** (`look/directions/darker-and-lifted/`): 50% black behind, the dialog one
+- **Darker and lifted**: 50% black behind, the dialog one
   step lighter than the sheet, as dark themes show elevation.
 - **Close cross**: 16 px with 1.5 px strokes, in place of 15 px with 1 px diagonals.
 
@@ -17,40 +17,24 @@ proposal's Calls for the owner (Q8–Q11).
 
 Each is drawn in Settings over the review workspace, 1280×820 at 100% scaling.
 
-- **Hover-reveal scrollbar** (`look/directions/hover-reveal/`): hides that the dialog scrolls, and
-  WebView2 repainted its thumb late (the render shows the pointer over the dialog, thumb hidden).
-- **Native thin scrollbar** (`look/directions/native-thin/`): keeps Chromium's arrow buttons and
+- **Hover-reveal scrollbar**: hides that the dialog scrolls, and
+  WebView2 repainted its thumb late (with the pointer over the dialog, its thumb stayed hidden).
+- **Native thin scrollbar**: keeps Chromium's arrow buttons and
   ignores the corner inset.
-- **Segmented Light | Dark** (`look/directions/segmented/`): one click, but no longer the dropdown
+- **Segmented Light | Dark**: one click, but no longer the dropdown
   the owner pointed at.
-- **Styled field, system list** (`look/directions/styled-field/`): the open list, which is what
+- **Styled field, system list**: the open list, which is what
   looked unstyled, stays the system's.
-- **Darker only** (`look/directions/darker-only/`): 60% black; the split comes only from the back.
+- **Darker only**: 60% black; the split comes only from the back.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Settings | light, scrolled content, pointer over the dialog | `look/settings-light.png` |
-| Settings | dark | `look/settings-dark.png` |
-| Settings | Appearance open, light | `look/appearance-open-light.png` |
-| Settings | Appearance open, dark | `look/appearance-open-dark.png` |
-
-Settings, light:
-
-![Settings, light](look/settings-light.png)
-
-Settings, dark:
-
-![Settings, dark](look/settings-dark.png)
-
-Settings, Appearance open, light:
-
-![Appearance open, light](look/appearance-open-light.png)
-
-Settings, Appearance open, dark:
-
-![Appearance open, dark](look/appearance-open-dark.png)
+| Screen | State |
+|---|---|
+| Settings | light, scrolled content, pointer over the dialog |
+| Settings | dark |
+| Settings | Appearance open, light |
+| Settings | Appearance open, dark |
 
 ## Components
 
