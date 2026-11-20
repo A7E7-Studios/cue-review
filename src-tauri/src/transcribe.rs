@@ -388,8 +388,10 @@ const HEARD_SLACK_MS: u64 = 1_000;
 /// `transcript` without the rows Whisper made up over silence or noise: a
 /// row stays when at least a tenth of its time lies within
 /// [`HEARD_SLACK_MS`] of `regions`, the speech found in the same audio, and
-/// a row of no length when it lies there at all. The raw output it was read
-/// from keeps every row.
+/// a row of no length when it lies there at all. A row's time runs from
+/// its first word's alignment point, else its start, to its end: Whisper
+/// starts a row where the one before it ended, which can be long before its
+/// words. The raw output it was read from keeps every row.
 fn heard_rows(mut transcript: Transcript, regions: &[(u64, u64)]) -> Transcript {
     let mut sorted = regions.to_vec();
     sorted.sort_unstable();
@@ -404,7 +406,8 @@ fn heard_rows(mut transcript: Transcript, regions: &[(u64, u64)]) -> Transcript 
         }
     }
     transcript.segments.retain(|row| {
-        let (start, end) = (row.start_ms, row.end_ms);
+        let end = row.end_ms;
+        let start = crate::agent::segment_seek_ms(row).min(end);
         if end <= start {
             return near.iter().any(|&(from, to)| from <= start && start <= to);
         }
@@ -974,6 +977,8 @@ pub fn live_commit(
                 Until::Cancelled(cancel),
                 &raw,
             )?;
+            // A stretch can hold most of 30 s without speech.
+            let words = heard_rows(words, &after(done));
             stretches.push(words, end_ms, &language, &file_name(&model.path), heard)
         } else {
             stretches.skip(end_ms);
@@ -1009,20 +1014,17 @@ fn redo_stretch(
     let length = Some(part.end_ms - part.start_ms);
     let log = folder.join("transcode.log");
     to_speech(audio, &speech, None, length, &log, Some(cancel))?;
-    let mut spoken = true;
+    let mut regions = speech_regions(&speech, folder, cancel)?;
     if let Some(system) = system {
         let reference = folder.join("echo-reference.wav");
         to_speech(system, &reference, None, length, &log, Some(cancel))?;
-        let regions = speech_regions(&speech, folder, cancel)?;
-        spoken = !echo::silence_echo(&speech, &reference, &regions)?
-            .speech
-            .is_empty();
+        regions = echo::silence_echo(&speech, &reference, &regions)?.speech;
     }
-    let (words, model) = if spoken {
+    let (words, model) = if !regions.is_empty() {
         fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
         let raw = stretches::raw(take, stretches.track, part.start_ms);
         let threads = live_threads(logical_threads());
-        run_final(
+        let (words, model) = run_final(
             root,
             &speech,
             folder,
@@ -1031,9 +1033,10 @@ fn redo_stretch(
             threads,
             Until::Cancelled(cancel),
             &raw,
-        )?
+        )?;
+        (heard_rows(words, &regions), model)
     } else {
-        // Nothing but echo is left of it.
+        // No speech, or nothing but echo, is left of it.
         (Transcript::default(), run.model.clone())
     };
     stretches.replace(part.start_ms, words, language, &file_name(&model.path));
@@ -1626,8 +1629,13 @@ impl Pass<'_> {
                 convert(&speech, part.start_ms, part.end_ms - part.start_ms)?;
                 fs::create_dir_all(stretches::folder(folder)).map_err(|e| e.to_string())?;
                 let raw = stretches::raw(folder, track, part.start_ms);
+                let regions = if holds_no_audio(&speech) {
+                    Vec::new()
+                } else {
+                    (tools.regions)(&speech)?
+                };
                 going()?;
-                let words = (tools.whisper)(&speech, language, &raw)?;
+                let words = heard_rows((tools.whisper)(&speech, language, &raw)?, &regions);
                 saved.replace(part.start_ms, words, language, &(tools.model)(language)?);
                 stretches::save(folder, saved)?;
             }
@@ -2035,6 +2043,42 @@ Speech segment 0: start = 1.0, end = 2.0
         assert!(heard_rows(rows_at(&[("said", 0, 500)]), &[])
             .segments
             .is_empty());
+        // A reply after a long silence, its row started where the silence
+        // did: measured from its word's alignment point, it is kept.
+        let late = |seek_ms| {
+            let mut reply = rows_at(&[("Ja.", 0, 31_000)]);
+            reply.segments[0].words[0].seek_ms = seek_ms;
+            heard_rows(reply, &[(30_000, 31_000)])
+        };
+        assert_eq!(texts(&late(Some(30_200))), ["Ja."]);
+        // Without one, from its start: 2 s of its 31 s near speech.
+        assert!(late(None).segments.is_empty());
+    }
+    #[test]
+    fn a_stretch_transcribed_again_leaves_out_rows_over_silence() {
+        let (root, folder) = take_folder();
+        // An unclear start taken for English, then German decided the take.
+        let mut take = Stretches::new("mic.wav", None);
+        let english = Some(guessed("en", 0.5));
+        take.push(
+            spoken("nonsense"),
+            30_000,
+            "en",
+            "ggml-small.en.bin",
+            english,
+        );
+        let german = Some(guessed("de", 0.96));
+        take.push(spoken("zwei"), 40_000, "de", "ggml-small.bin", german);
+        stretches::save(&folder, &take).unwrap();
+        // Stop transcribes the first stretch again in German, and Whisper
+        // makes up a row over its silence there, as over the rest's.
+        let stop = FakePass {
+            made_up: true,
+            ..FakePass::hearing("ja")
+        };
+        let transcript = stop.run(root.path(), &folder, 60_000, true).unwrap();
+        assert_eq!(*stop.languages.borrow(), ["de", "de"]);
+        assert_eq!(texts(&transcript), ["de-words", "zwei", "de-words"]);
     }
     #[test]
     fn rows_over_silence_are_left_out_of_a_take() {
