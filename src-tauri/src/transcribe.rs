@@ -2124,6 +2124,31 @@ Speech segment 0: start = 1.0, end = 2.0
         assert_eq!(texts(&transcript), ["de-words", "zwei", "de-words"]);
     }
     #[test]
+    fn a_stretch_with_no_speech_left_is_not_transcribed_again() {
+        let (root, folder) = take_folder();
+        let mut take = Stretches::new("mic.wav", None);
+        let english = Some(guessed("en", 0.5));
+        take.push(
+            spoken("nonsense"),
+            30_000,
+            "en",
+            "ggml-small.en.bin",
+            english,
+        );
+        let german = Some(guessed("de", 0.96));
+        take.push(spoken("zwei"), 40_000, "de", "ggml-small.bin", german);
+        stretches::save(&folder, &take).unwrap();
+        // Stop would transcribe the first stretch again in German, but the
+        // detector hears no speech in it, nor after the stretches.
+        let stop = FakePass {
+            silent: true,
+            ..FakePass::hearing("ja")
+        };
+        let transcript = stop.run(root.path(), &folder, 60_000, true).unwrap();
+        assert!(stop.languages.borrow().is_empty(), "Whisper ran");
+        assert_eq!(texts(&transcript), ["zwei"]);
+    }
+    #[test]
     fn rows_over_silence_are_left_out_of_a_take() {
         let (root, folder) = take_folder();
         // Stop without stretches, then Retry and `cue transcribe`.

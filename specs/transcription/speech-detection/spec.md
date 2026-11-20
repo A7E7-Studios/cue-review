@@ -14,8 +14,9 @@ said and leaves out the text the speech model makes up over silence and noise.
 
 ### Requirement: Rows made up over silence are left out
 The app SHALL leave out of a take's transcript every row of which less than a tenth lies within one
-second of the speech the detector found in the same audio, a row running from where its first word
-is heard to its end, for every speech model and both tracks, in every final transcription: each
+and a half seconds of the speech the detector heard in the same audio, a row running from where its
+first word is heard to its end, for every speech model and both tracks, in every final
+transcription: each
 stretch transcribed while recording or again at Stop, the pass after Stop, the pass that refines
 it, Retry and `cue transcribe`, because the speech model writes text over silence and noise, the
 larger model most of all, and such rows read as things someone said.
@@ -37,6 +38,7 @@ larger model most of all, and such rows read as things someone said.
 - **THEN** the transcript shown after Stop has no row over that silence, before the pass that
   refines it has run
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::a_stretch_transcribed_again_leaves_out_rows_over_silence
+- **PROOF** test: src-tauri/src/transcribe.rs::tests::a_stretch_with_no_speech_left_is_not_transcribed_again
 - **PROOF** desk: open
 
 #### Scenario: Both tracks are cleaned alike

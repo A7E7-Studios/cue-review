@@ -24,7 +24,8 @@ other microphone rows.
 
 - Every final transcription (each stretch while recording or again at Stop, the pass after Stop,
   the refining pass, Retry, `cue transcribe`) leaves out each row of which less than a tenth lies
-  within one second of detected speech, for every model and both tracks: scenarios "Text made up
+  within 1.5 s of the speech the detector heard (one second beyond the half second a whole-take
+  pass pads it by), for every model and both tracks: scenarios "Text made up
   over silence is left out", "Stop's transcript leaves out what was made up while recording" and
   "Both tracks are cleaned alike".
 - A short reply stays, next to detected speech or after a long silence: "A short reply beside
