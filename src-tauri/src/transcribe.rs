@@ -375,12 +375,58 @@ pub(crate) fn speech_regions(
     folder: &Path,
     cancel: &AtomicBool,
 ) -> Result<Vec<(u64, u64)>, String> {
-    detect(speech, folder, cancel, 100)
+    detect(speech, folder, cancel, STRETCH_PAD_MS)
 }
 // Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
 // JSON token times are not mapped back to the original recording timeline.
 fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
     Ok(!detect(speech, folder, cancel, 500)?.is_empty())
+}
+/// How much a whole-take pass pads the detector's speech regions.
+const PASS_PAD_MS: u32 = 500;
+/// How much the speech regions of the audio cut into stretches are padded,
+/// so the pauses that end a stretch stay visible ([`speech_regions`]).
+const STRETCH_PAD_MS: u32 = 100;
+/// How far from the speech the detector heard, before its padding, a row's
+/// time still counts as heard: a second beyond the [`PASS_PAD_MS`] of a
+/// whole-take pass's regions, wherever the regions come from, because
+/// Whisper's row times drift from the speech they belong to.
+const HEARD_REACH_MS: u64 = 1_500;
+/// `transcript` without the rows Whisper made up over silence or noise: a
+/// row stays when at least a tenth of its time lies within
+/// [`HEARD_REACH_MS`] of the speech the detector heard in the same audio,
+/// given as `regions` padded by `padded_ms`, and a row of no length when it
+/// lies there at all. A row's time runs from its first word's alignment
+/// point, else its start, to its end: Whisper starts a row where the one
+/// before it ended, which can be long before its words. The raw output it
+/// was read from keeps every row.
+fn heard_rows(mut transcript: Transcript, regions: &[(u64, u64)], padded_ms: u32) -> Transcript {
+    let reach = HEARD_REACH_MS.saturating_sub(padded_ms.into());
+    let mut sorted = regions.to_vec();
+    sorted.sort_unstable();
+    // Widened regions that touch are joined, so no time counts twice.
+    let mut near: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+    for (start, end) in sorted {
+        let start = start.saturating_sub(reach);
+        let end = end.saturating_add(reach);
+        match near.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => near.push((start, end)),
+        }
+    }
+    transcript.segments.retain(|row| {
+        let end = row.end_ms;
+        let start = crate::agent::segment_seek_ms(row).min(end);
+        if end <= start {
+            return near.iter().any(|&(from, to)| from <= start && start <= to);
+        }
+        let heard: u64 = near
+            .iter()
+            .map(|&(from, to)| end.min(to).saturating_sub(start.max(from)))
+            .sum();
+        heard * 10 >= end - start
+    });
+    transcript
 }
 fn empty_transcript() -> Transcript {
     Transcript {
@@ -940,6 +986,8 @@ pub fn live_commit(
                 Until::Cancelled(cancel),
                 &raw,
             )?;
+            // A stretch can hold most of 30 s without speech.
+            let words = heard_rows(words, &after(done), STRETCH_PAD_MS);
             stretches.push(words, end_ms, &language, &file_name(&model.path), heard)
         } else {
             stretches.skip(end_ms);
@@ -975,20 +1023,17 @@ fn redo_stretch(
     let length = Some(part.end_ms - part.start_ms);
     let log = folder.join("transcode.log");
     to_speech(audio, &speech, None, length, &log, Some(cancel))?;
-    let mut spoken = true;
+    let mut regions = speech_regions(&speech, folder, cancel)?;
     if let Some(system) = system {
         let reference = folder.join("echo-reference.wav");
         to_speech(system, &reference, None, length, &log, Some(cancel))?;
-        let regions = speech_regions(&speech, folder, cancel)?;
-        spoken = !echo::silence_echo(&speech, &reference, &regions)?
-            .speech
-            .is_empty();
+        regions = echo::silence_echo(&speech, &reference, &regions)?.speech;
     }
-    let (words, model) = if spoken {
+    let (words, model) = if !regions.is_empty() {
         fs::create_dir_all(stretches::folder(take)).map_err(|e| e.to_string())?;
         let raw = stretches::raw(take, stretches.track, part.start_ms);
         let threads = live_threads(logical_threads());
-        run_final(
+        let (words, model) = run_final(
             root,
             &speech,
             folder,
@@ -997,9 +1042,10 @@ fn redo_stretch(
             threads,
             Until::Cancelled(cancel),
             &raw,
-        )?
+        )?;
+        (heard_rows(words, &regions, STRETCH_PAD_MS), model)
     } else {
-        // Nothing but echo is left of it.
+        // No speech, or nothing but echo, is left of it.
         (Transcript::default(), run.model.clone())
     };
     stretches.replace(part.start_ms, words, language, &file_name(&model.path));
@@ -1386,7 +1432,7 @@ fn transcribe_media_with(
             let log = scratch(folder, target, "transcode.log");
             to_speech_until(source, target, from_ms, length_ms, &log, converting)
         },
-        regions: &|speech| detect(speech, folder, stop, 500),
+        regions: &|speech| detect(speech, folder, stop, PASS_PAD_MS),
         detect: &|speech, regions| {
             detect_take_language(speech, regions, folder, threads, detecting)
         },
@@ -1592,8 +1638,22 @@ impl Pass<'_> {
                 convert(&speech, part.start_ms, part.end_ms - part.start_ms)?;
                 fs::create_dir_all(stretches::folder(folder)).map_err(|e| e.to_string())?;
                 let raw = stretches::raw(folder, track, part.start_ms);
+                let regions = if holds_no_audio(&speech) {
+                    Vec::new()
+                } else {
+                    (tools.regions)(&speech)?
+                };
                 going()?;
-                let words = (tools.whisper)(&speech, language, &raw)?;
+                let words = if regions.is_empty() {
+                    // No speech is left of it.
+                    Transcript::default()
+                } else {
+                    heard_rows(
+                        (tools.whisper)(&speech, language, &raw)?,
+                        &regions,
+                        PASS_PAD_MS,
+                    )
+                };
                 saved.replace(part.start_ms, words, language, &(tools.model)(language)?);
                 stretches::save(folder, saved)?;
             }
@@ -1630,7 +1690,11 @@ impl Pass<'_> {
                     _ => folder.join("whisper.json"),
                 };
                 going()?;
-                (tools.whisper)(&speech, language, &raw)?
+                heard_rows(
+                    (tools.whisper)(&speech, language, &raw)?,
+                    &regions,
+                    PASS_PAD_MS,
+                )
             }
         };
         if let (Some(saved), Some((language, detected))) = (saved.as_mut(), held) {
@@ -1680,16 +1744,19 @@ pub(crate) fn held_language(
         .or_else(|| settings::chosen_language(settings).map(|language| (language, false)))
 }
 /// A whole-take pass whose outside work is faked, for tests here and of the
-/// callers: speech everywhere unless `silent`, a detector that hears `heard`
-/// (`heard_on_system` in the system track of a take with two) and counts how
-/// often it is asked, and a Whisper that returns one word naming the
-/// language it was held to.
+/// callers: speech in the first second unless `silent`, a detector that
+/// hears `heard` (`heard_on_system` in the system track of a take with two)
+/// and counts how often it is asked, and a Whisper that returns one word
+/// naming the language it was held to.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct FakePass {
     pub heard: Option<&'static str>,
     pub heard_on_system: Option<&'static str>,
     pub silent: bool,
+    /// Whisper also makes up "Vielen Dank." over the silence from 20 s to
+    /// 50 s, and keeps both rows in its raw output, as the real one does.
+    pub made_up: bool,
     pub detections: Count,
     /// The language of each Whisper run, in order. (The two tracks of a
     /// take run at the same time: see [`FakePass::languages_of`].)
@@ -1806,21 +1873,32 @@ impl FakePass {
             whisper: &|_, language, raw| {
                 self.languages.borrow_mut().push(language.into());
                 self.note(raw, format!("whisper {} {language}", file_name(raw)));
-                let text = format!("{language}-words");
-                Ok(Transcript {
-                    segments: vec![Segment {
-                        id: "segment-0".into(),
-                        start_ms: 100,
-                        end_ms: 400,
-                        text: text.clone(),
-                        words: vec![Word {
-                            text,
-                            start_ms: 100,
-                            end_ms: 400,
-                            seek_ms: Some(150),
-                        }],
-                        track: None,
+                let row = |index: usize, text: String, start_ms: u64, end_ms: u64| Segment {
+                    id: format!("segment-{index}"),
+                    start_ms,
+                    end_ms,
+                    text: text.clone(),
+                    words: vec![Word {
+                        text,
+                        start_ms,
+                        end_ms,
+                        seek_ms: Some(start_ms + 50),
                     }],
+                    track: None,
+                };
+                let mut segments = vec![row(0, format!("{language}-words"), 100, 400)];
+                if self.made_up {
+                    segments.push(row(1, "Vielen Dank.".into(), 20_000, 50_000));
+                    let rows = segments.iter().map(|row| row.text.as_str());
+                    let raw_rows: Vec<_> = rows
+                        .map(|text| serde_json::json!({ "text": text }))
+                        .collect();
+                    let bytes =
+                        serde_json::to_vec(&serde_json::json!({ "transcription": raw_rows }));
+                    fs::write(raw, bytes.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                }
+                Ok(Transcript {
+                    segments,
                     language: Some(language.into()),
                     status: Some("complete".into()),
                     ..Default::default()
@@ -1920,6 +1998,197 @@ Speech segment 0: start = 1.0, end = 2.0
 "
         )
         .is_err());
+    }
+    /// A transcript of one row for each `(text, start, end)`.
+    fn rows_at(rows: &[(&str, u64, u64)]) -> Transcript {
+        let row = |(index, &(text, start_ms, end_ms)): (usize, &(&str, u64, u64))| Segment {
+            id: format!("segment-{index}"),
+            start_ms,
+            end_ms,
+            text: text.into(),
+            words: vec![Word {
+                text: text.into(),
+                start_ms,
+                end_ms,
+                seek_ms: None,
+            }],
+            track: None,
+        };
+        Transcript {
+            segments: rows.iter().enumerate().map(row).collect(),
+            language: Some("de".into()),
+            status: Some("complete".into()),
+            ..Default::default()
+        }
+    }
+    fn texts(transcript: &Transcript) -> Vec<&str> {
+        let rows = transcript.segments.iter();
+        rows.map(|row| row.text.as_str()).collect()
+    }
+    #[test]
+    fn a_row_is_kept_by_its_share_of_detected_speech() {
+        // Speech from 10 s to 20 s, as a whole-take pass pads it: within a
+        // second of it is 9 s to 21 s.
+        let speech = [(10_000, 20_000)];
+        let transcript = heard_rows(
+            rows_at(&[
+                ("said", 12_000, 15_000),
+                // A short reply just after the speech the detector found.
+                ("Ja.", 20_500, 20_900),
+                // Made up over silence.
+                ("Vielen Dank.", 40_000, 70_000),
+                // 1 s of its 10 s near speech, a tenth: kept.
+                ("a tenth", 20_000, 30_000),
+                // 0.9 s of its 10 s: left out.
+                ("less", 20_100, 30_100),
+                // Rows of no length: kept within a second of speech.
+                ("at its edge", 21_000, 21_000),
+                ("past it", 21_001, 21_001),
+            ]),
+            &speech,
+            PASS_PAD_MS,
+        );
+        assert_eq!(
+            texts(&transcript),
+            ["said", "Ja.", "a tenth", "at its edge"]
+        );
+        assert_eq!(transcript.language.as_deref(), Some("de"));
+        assert_eq!(transcript.segments[1].id, "segment-1");
+        // Widened regions that overlap count once: 9 s to 11.6 s is 2.6 s,
+        // short of a tenth of 31 s, though each region's second adds 2.1 s.
+        let close = [(10_000, 10_100), (10_500, 10_600)];
+        let long = rows_at(&[("long", 9_000, 40_000), ("tenth", 9_000, 35_000)]);
+        assert_eq!(texts(&heard_rows(long, &close, PASS_PAD_MS)), ["tenth"]);
+        // Regions in any order; near the start of the audio.
+        let unordered = [(50_000, 60_000), (0, 300)];
+        let rows = rows_at(&[("first", 0, 900), ("later", 52_000, 55_000)]);
+        assert_eq!(
+            texts(&heard_rows(rows, &unordered, PASS_PAD_MS)),
+            ["first", "later"]
+        );
+        // No speech found keeps no row.
+        assert!(heard_rows(rows_at(&[("said", 0, 500)]), &[], PASS_PAD_MS)
+            .segments
+            .is_empty());
+        // A reply after a long silence, its row started where the silence
+        // did: measured from its word's alignment point, it is kept.
+        let late = |seek_ms| {
+            let mut reply = rows_at(&[("Ja.", 0, 31_000)]);
+            reply.segments[0].words[0].seek_ms = seek_ms;
+            heard_rows(reply, &[(30_000, 31_000)], PASS_PAD_MS)
+        };
+        assert_eq!(texts(&late(Some(30_200))), ["Ja."]);
+        // Without one, from its start: 2 s of its 31 s near speech.
+        assert!(late(None).segments.is_empty());
+        // A stretch's regions are padded 400 ms less, so they reach 400 ms
+        // further: the same speech, the same rows kept.
+        let reply = || rows_at(&[("Ja.", 21_300, 21_300)]);
+        assert!(heard_rows(reply(), &speech, PASS_PAD_MS)
+            .segments
+            .is_empty());
+        let stretch = [(10_400, 19_600)];
+        assert!(heard_rows(reply(), &stretch, STRETCH_PAD_MS)
+            .segments
+            .is_empty());
+        let reply = || rows_at(&[("Ja.", 20_900, 20_900)]);
+        assert_eq!(texts(&heard_rows(reply(), &speech, PASS_PAD_MS)), ["Ja."]);
+        assert_eq!(
+            texts(&heard_rows(reply(), &stretch, STRETCH_PAD_MS)),
+            ["Ja."]
+        );
+    }
+    #[test]
+    fn a_stretch_transcribed_again_leaves_out_rows_over_silence() {
+        let (root, folder) = take_folder();
+        // An unclear start taken for English, then German decided the take.
+        let mut take = Stretches::new("mic.wav", None);
+        let english = Some(guessed("en", 0.5));
+        take.push(
+            spoken("nonsense"),
+            30_000,
+            "en",
+            "ggml-small.en.bin",
+            english,
+        );
+        let german = Some(guessed("de", 0.96));
+        take.push(spoken("zwei"), 40_000, "de", "ggml-small.bin", german);
+        stretches::save(&folder, &take).unwrap();
+        // Stop transcribes the first stretch again in German, and Whisper
+        // makes up a row over its silence there, as over the rest's.
+        let stop = FakePass {
+            made_up: true,
+            ..FakePass::hearing("ja")
+        };
+        let transcript = stop.run(root.path(), &folder, 60_000, true).unwrap();
+        assert_eq!(*stop.languages.borrow(), ["de", "de"]);
+        assert_eq!(texts(&transcript), ["de-words", "zwei", "de-words"]);
+    }
+    #[test]
+    fn a_stretch_with_no_speech_left_is_not_transcribed_again() {
+        let (root, folder) = take_folder();
+        let mut take = Stretches::new("mic.wav", None);
+        let english = Some(guessed("en", 0.5));
+        take.push(
+            spoken("nonsense"),
+            30_000,
+            "en",
+            "ggml-small.en.bin",
+            english,
+        );
+        let german = Some(guessed("de", 0.96));
+        take.push(spoken("zwei"), 40_000, "de", "ggml-small.bin", german);
+        stretches::save(&folder, &take).unwrap();
+        // Stop would transcribe the first stretch again in German, but the
+        // detector hears no speech in it, nor after the stretches.
+        let stop = FakePass {
+            silent: true,
+            ..FakePass::hearing("ja")
+        };
+        let transcript = stop.run(root.path(), &folder, 60_000, true).unwrap();
+        assert!(stop.languages.borrow().is_empty(), "Whisper ran");
+        assert_eq!(texts(&transcript), ["zwei"]);
+    }
+    #[test]
+    fn rows_over_silence_are_left_out_of_a_take() {
+        let (root, folder) = take_folder();
+        // Stop without stretches, then Retry and `cue transcribe`.
+        for reuse in [true, false] {
+            let pass = FakePass {
+                made_up: true,
+                ..FakePass::hearing("de")
+            };
+            let transcript = pass.run(root.path(), &folder, 60_000, reuse).unwrap();
+            assert_eq!(texts(&transcript), ["de-words"], "reuse {reuse}");
+        }
+    }
+    #[test]
+    fn rows_over_silence_are_left_out_of_both_tracks() {
+        let (root, folder) = two_track_folder();
+        let pass = FakePass {
+            made_up: true,
+            ..FakePass::hearing("de")
+        };
+        let transcript = pass.run(root.path(), &folder, 60_000, false).unwrap();
+        assert_eq!(
+            rows(&transcript),
+            [(SYSTEM, "de-words", 100), (MICROPHONE, "de-words", 100)]
+        );
+    }
+    #[test]
+    fn the_raw_output_keeps_the_rows_left_out() {
+        let (root, folder) = two_track_folder();
+        let pass = FakePass {
+            made_up: true,
+            ..FakePass::hearing("de")
+        };
+        let transcript = pass.run(root.path(), &folder, 60_000, false).unwrap();
+        assert!(!texts(&transcript).contains(&"Vielen Dank."));
+        for raw in ["whisper.json", "whisper-system.json"] {
+            let raw: Value = serde_json::from_slice(&fs::read(folder.join(raw)).unwrap()).unwrap();
+            let rows = raw["transcription"].as_array().unwrap().iter();
+            let rows: Vec<_> = rows.map(|row| row["text"].as_str().unwrap()).collect();
+            assert_eq!(rows, ["de-words", "Vielen Dank."]);
+        }
     }
     #[test]
     fn the_detected_language_is_read_from_the_log() {
