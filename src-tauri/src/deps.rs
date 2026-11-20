@@ -1100,7 +1100,7 @@ impl Run {
 /// at its end: `total time`, from the start of loading the model to the end
 /// of the run, less `load time`, in whole ms. Loading the 1.6 GB larger
 /// model takes most of a run of the sample. `None` when the log lacks
-/// either line.
+/// either line, or its total time is shorter than its load time.
 pub(crate) fn transcribing_ms(log: &str) -> Option<u64> {
     let timing = |name: &str| {
         log.lines().rev().find_map(|line| {
@@ -1120,7 +1120,7 @@ pub(crate) fn transcribing_ms(log: &str) -> Option<u64> {
         })
     };
     let (load, total) = (timing("load time")?, timing("total time")?);
-    Some((total - load).max(0.0).round() as u64)
+    (total >= load).then(|| (total - load).round() as u64)
 }
 /// A measurement stopped before its end, because a recording started.
 #[derive(Debug, PartialEq, Eq)]
@@ -3541,10 +3541,18 @@ whisper_print_timings:    total time =  1505.64 ms
             Some(381),
             "the last total time counts"
         );
-        // Without either line, or with one unreadable, there is none.
+        // Without either line, with one unreadable, or with a total time
+        // shorter than the load time, there is none.
         let load_only = "whisper_print_timings:     load time =  1124.59 ms\n";
         let unreadable = load_only.to_owned() + "whisper_print_timings:    total time =  n/a ms\n";
-        for log in ["", PROCESSOR_BUILD, load_only, unreadable.as_str()] {
+        let short = timings(1_124.59, 1_000.0);
+        for log in [
+            "",
+            PROCESSOR_BUILD,
+            load_only,
+            unreadable.as_str(),
+            short.as_str(),
+        ] {
             assert_eq!(transcribing_ms(log), None, "{log}");
         }
         // A run without them counts whole.
