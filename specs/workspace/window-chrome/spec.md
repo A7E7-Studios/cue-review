@@ -15,7 +15,8 @@ code:
 ## Summary
 
 The bar across the top of the window: the app's name, the sidebar toggle, Settings and, on Windows,
-Minimize, Maximize and Close. You meet it in every window; its toggle hides and shows the sidebar.
+Minimize, Maximize and Close. You meet it whenever the app is open; its toggle hides and shows the
+sidebar.
 
 ## Requirements
 

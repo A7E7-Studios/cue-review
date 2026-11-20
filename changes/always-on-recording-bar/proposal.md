@@ -15,8 +15,8 @@ Start a new recording to capture another source." The owner wants one recording 
 with the display and microphone in it, for a new recording, for Record more and while recording.
 
 - Evidence: "if you're not recording the record button feels a
-  bit lost … and it's the call to action" at 7:53–8:01 (said while recording, so the frame shows
-  the dock it was compared with).
+  bit lost … and it's the call to action" at 7:53–8:01 (said while recording, so the dock it was
+  compared with was on screen).
 - Evidence: "for the record more, I don't have any options
   for the audio device and so on" at 0:36.
 

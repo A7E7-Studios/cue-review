@@ -27,13 +27,13 @@ where the computer can run it.
 
 ### Requirement: Each take is transcribed in its own language with that language's model
 The app SHALL transcribe each take with its language's model, small.en for English and the
-multilingual small model for every other language, using the language chosen in Settings for every
-take without detecting, and, while that language is Auto, which it is until a person chooses
-another, detecting each take's language from its first speech and holding the take to it once a
-guess is confident, because a recording in another language than the one assumed comes out as
-nonsense, the small models make far fewer mistakes than base (5.8 % against 14.6 % of the words of a
-five-minute review), and a take held to one language never switches language mid-way on short or
-noisy audio.
+multilingual small model for every other language, using a language other than Auto chosen in
+Settings for every take without detecting, and, while the language is Auto, which it is until a
+person chooses another, detecting each take's language from its first speech and holding the take to
+it once a guess is confident, because a recording in another language than the one assumed comes out
+as nonsense, the small models make far fewer mistakes than base (5.8 % against 14.6 % of the words
+of a five-minute review), and a take held to one language never switches language mid-way on short
+or noisy audio.
 
 #### Scenario: A German take is transcribed as German without a setting
 - **GIVEN** no language has been chosen and both small models are installed

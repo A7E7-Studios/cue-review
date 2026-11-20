@@ -62,7 +62,9 @@ are in [docs/VERIFICATION.md](docs/VERIFICATION.md#unattended-set); per area:
 
 The component library is the app's own: `src/ui/` (tokens in `src/ui/tokens.css`, the dialog),
 `src/chrome/`, `src/workspace/`, `src/dialogs/` and `src/Sidebar.tsx`, with the rules, tokens and
-mocks in [docs/DESIGN.md](docs/DESIGN.md). Storybook is the working specification.
+mocks in [docs/DESIGN.md](docs/DESIGN.md). Storybook is the working specification. A design is
+drawn on `src/ui/tokens.css` and critiqued against docs/DESIGN.md as its brief, never on the kit's
+house style in `tools/design/`.
 
 - **Storybook.** `npm run storybook` serves `http://127.0.0.1:6006`. One story alone, for a
   screenshot: `http://127.0.0.1:6006/iframe.html?id=<story-id>&viewMode=story&globals=theme:dark`

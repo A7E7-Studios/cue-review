@@ -15,7 +15,7 @@ nothing.
 - Evidence: "like right click there's a bit of weird
   stuff happening, refresh, save as, print, more tools, like there should be things that either
   matter or they should not exist" at 7:24–7:41. The window recording does not capture the popup
-  menu itself; the frame shows the workspace the owner right-clicked.
+  menu itself, only the workspace the owner right-clicked.
 
 ## What changes
 

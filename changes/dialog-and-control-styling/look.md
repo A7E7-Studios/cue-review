@@ -18,7 +18,7 @@ proposal's Calls for the owner (Q8–Q11).
 Each is drawn in Settings over the review workspace, 1280×820 at 100% scaling.
 
 - **Hover-reveal scrollbar**: hides that the dialog scrolls, and
-  WebView2 repainted its thumb late (the render shows the pointer over the dialog, thumb hidden).
+  WebView2 repainted its thumb late (with the pointer over the dialog, its thumb stayed hidden).
 - **Native thin scrollbar**: keeps Chromium's arrow buttons and
   ignores the corner inset.
 - **Segmented Light | Dark**: one click, but no longer the dropdown

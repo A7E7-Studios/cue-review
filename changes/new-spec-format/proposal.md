@@ -54,11 +54,12 @@ The new gate refuses the old config and formats, so every spec and change folder
 
 ## Review
 
-At the desk, no build needed, since nothing the app does changes: open the Solution map
-(`node tools/solution-map/solution-map.mjs`), where all 20 features wait for you. Read each
-Summary: does it say what the feature does and when you meet it? The three one-sentence statements
-should say what the three statements they replace said. Each feature's own review, in the app, is
-in the `## Review` of the change folders that name it.
+At the desk. Reading needs no build: open the Solution map (`node
+tools/solution-map/solution-map.mjs`), where all 20 features wait for you, and read each Summary:
+does it say what the feature does and when you meet it? The three one-sentence statements should say
+what the statements they replace said. A verdict counts only on a build that contains this change's
+merge commit, since this folder names every feature; the app behaves as before it. Each feature's
+own review, in the app, is in the `## Review` of the change folders that name it.
 
 ## Settled questions
 

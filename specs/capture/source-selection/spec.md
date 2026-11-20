@@ -8,9 +8,9 @@ code:
 
 ## Summary
 
-The source picker lists first the sources most useful for a visual review, and a new recording
-starts with an available source. You meet it whenever you choose what to record; refreshing the
-list keeps the source you chose.
+The source picker lists first the sources most useful for a visual review, and starts with the first
+available one. You meet it whenever you choose what to record; refreshing the list keeps the source
+you chose.
 
 ## Requirements
 

@@ -27,9 +27,9 @@ The app SHALL cut a take's speech into stretches while the recording goes on (a 
 s, in the middle of the longest gap of at least 0.2 s, the silence before the first word included;
 else at 30 s), skip the stretches without speech untranscribed (a cut in the silence before the
 first word, one at 30 s before any speech, and 28 s without speech, of which the last second is
-kept), transcribe each other finished stretch once with the language's model, and make the take's
-transcript from them at Stop, because the person should not wait after Stop for the whole take to be
-transcribed.
+kept), transcribe each remaining finished stretch once with the language's model, and make the
+take's transcript from them at Stop, because the person should not wait after Stop for the whole
+take to be transcribed.
 
 #### Scenario: The transcript is ready seconds after Stop
 - **GIVEN** a take recorded with a PC microphone or system audio, of any length
