@@ -66,7 +66,13 @@ too).
   lies within one second of detected speech, and left out otherwise; a tenth of nothing would keep
   every one.
 - **A stretch transcribed again** (in the take's decided language) has its speech detected again
-  to filter it, also where it has one track; one with no speech left is not transcribed.
+  to filter it, also where it has one track; one with no speech left is not transcribed, while
+  recording and at Stop alike.
+- **"Within one second" counts from the speech as a whole-take pass sees it**, which the detector
+  pads by half a second, so 1.5 s from the speech it heard; the regions a stretch is cut by are
+  padded by 0.1 s and are widened by 1.4 s, so a row is judged the same after Stop and on Retry.
+  The owner's figures were measured on the whole-take regions. Changing the reach costs one
+  constant.
 
 ## Out of scope
 

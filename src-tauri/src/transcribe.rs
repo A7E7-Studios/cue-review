@@ -375,31 +375,40 @@ pub(crate) fn speech_regions(
     folder: &Path,
     cancel: &AtomicBool,
 ) -> Result<Vec<(u64, u64)>, String> {
-    detect(speech, folder, cancel, 100)
+    detect(speech, folder, cancel, STRETCH_PAD_MS)
 }
 // Gate only wholly speech-free inputs. Never crop audio: the pinned CLI's --vad
 // JSON token times are not mapped back to the original recording timeline.
 fn has_speech(speech: &Path, folder: &Path, cancel: &AtomicBool) -> Result<bool, String> {
     Ok(!detect(speech, folder, cancel, 500)?.is_empty())
 }
-/// How far from the speech the detector found a row's time still counts as
-/// heard: Whisper's row times drift from the speech they belong to.
-const HEARD_SLACK_MS: u64 = 1_000;
+/// How much a whole-take pass pads the detector's speech regions.
+const PASS_PAD_MS: u32 = 500;
+/// How much the speech regions of the audio cut into stretches are padded,
+/// so the pauses that end a stretch stay visible ([`speech_regions`]).
+const STRETCH_PAD_MS: u32 = 100;
+/// How far from the speech the detector heard, before its padding, a row's
+/// time still counts as heard: a second beyond the [`PASS_PAD_MS`] of a
+/// whole-take pass's regions, wherever the regions come from, because
+/// Whisper's row times drift from the speech they belong to.
+const HEARD_REACH_MS: u64 = 1_500;
 /// `transcript` without the rows Whisper made up over silence or noise: a
 /// row stays when at least a tenth of its time lies within
-/// [`HEARD_SLACK_MS`] of `regions`, the speech found in the same audio, and
-/// a row of no length when it lies there at all. A row's time runs from
-/// its first word's alignment point, else its start, to its end: Whisper
-/// starts a row where the one before it ended, which can be long before its
-/// words. The raw output it was read from keeps every row.
-fn heard_rows(mut transcript: Transcript, regions: &[(u64, u64)]) -> Transcript {
+/// [`HEARD_REACH_MS`] of the speech the detector heard in the same audio,
+/// given as `regions` padded by `padded_ms`, and a row of no length when it
+/// lies there at all. A row's time runs from its first word's alignment
+/// point, else its start, to its end: Whisper starts a row where the one
+/// before it ended, which can be long before its words. The raw output it
+/// was read from keeps every row.
+fn heard_rows(mut transcript: Transcript, regions: &[(u64, u64)], padded_ms: u32) -> Transcript {
+    let reach = HEARD_REACH_MS.saturating_sub(padded_ms.into());
     let mut sorted = regions.to_vec();
     sorted.sort_unstable();
     // Widened regions that touch are joined, so no time counts twice.
     let mut near: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
     for (start, end) in sorted {
-        let start = start.saturating_sub(HEARD_SLACK_MS);
-        let end = end.saturating_add(HEARD_SLACK_MS);
+        let start = start.saturating_sub(reach);
+        let end = end.saturating_add(reach);
         match near.last_mut() {
             Some(last) if start <= last.1 => last.1 = last.1.max(end),
             _ => near.push((start, end)),
@@ -978,7 +987,7 @@ pub fn live_commit(
                 &raw,
             )?;
             // A stretch can hold most of 30 s without speech.
-            let words = heard_rows(words, &after(done));
+            let words = heard_rows(words, &after(done), STRETCH_PAD_MS);
             stretches.push(words, end_ms, &language, &file_name(&model.path), heard)
         } else {
             stretches.skip(end_ms);
@@ -1034,7 +1043,7 @@ fn redo_stretch(
             Until::Cancelled(cancel),
             &raw,
         )?;
-        (heard_rows(words, &regions), model)
+        (heard_rows(words, &regions, STRETCH_PAD_MS), model)
     } else {
         // No speech, or nothing but echo, is left of it.
         (Transcript::default(), run.model.clone())
@@ -1423,7 +1432,7 @@ fn transcribe_media_with(
             let log = scratch(folder, target, "transcode.log");
             to_speech_until(source, target, from_ms, length_ms, &log, converting)
         },
-        regions: &|speech| detect(speech, folder, stop, 500),
+        regions: &|speech| detect(speech, folder, stop, PASS_PAD_MS),
         detect: &|speech, regions| {
             detect_take_language(speech, regions, folder, threads, detecting)
         },
@@ -1635,7 +1644,16 @@ impl Pass<'_> {
                     (tools.regions)(&speech)?
                 };
                 going()?;
-                let words = heard_rows((tools.whisper)(&speech, language, &raw)?, &regions);
+                let words = if regions.is_empty() {
+                    // No speech is left of it.
+                    Transcript::default()
+                } else {
+                    heard_rows(
+                        (tools.whisper)(&speech, language, &raw)?,
+                        &regions,
+                        PASS_PAD_MS,
+                    )
+                };
                 saved.replace(part.start_ms, words, language, &(tools.model)(language)?);
                 stretches::save(folder, saved)?;
             }
@@ -1672,7 +1690,11 @@ impl Pass<'_> {
                     _ => folder.join("whisper.json"),
                 };
                 going()?;
-                heard_rows((tools.whisper)(&speech, language, &raw)?, &regions)
+                heard_rows(
+                    (tools.whisper)(&speech, language, &raw)?,
+                    &regions,
+                    PASS_PAD_MS,
+                )
             }
         };
         if let (Some(saved), Some((language, detected))) = (saved.as_mut(), held) {
@@ -2005,7 +2027,8 @@ Speech segment 0: start = 1.0, end = 2.0
     }
     #[test]
     fn a_row_is_kept_by_its_share_of_detected_speech() {
-        // Speech from 10 s to 20 s: within a second of it is 9 s to 21 s.
+        // Speech from 10 s to 20 s, as a whole-take pass pads it: within a
+        // second of it is 9 s to 21 s.
         let speech = [(10_000, 20_000)];
         let transcript = heard_rows(
             rows_at(&[
@@ -2023,6 +2046,7 @@ Speech segment 0: start = 1.0, end = 2.0
                 ("past it", 21_001, 21_001),
             ]),
             &speech,
+            PASS_PAD_MS,
         );
         assert_eq!(
             texts(&transcript),
@@ -2034,13 +2058,16 @@ Speech segment 0: start = 1.0, end = 2.0
         // short of a tenth of 31 s, though each region's second adds 2.1 s.
         let close = [(10_000, 10_100), (10_500, 10_600)];
         let long = rows_at(&[("long", 9_000, 40_000), ("tenth", 9_000, 35_000)]);
-        assert_eq!(texts(&heard_rows(long, &close)), ["tenth"]);
+        assert_eq!(texts(&heard_rows(long, &close, PASS_PAD_MS)), ["tenth"]);
         // Regions in any order; near the start of the audio.
         let unordered = [(50_000, 60_000), (0, 300)];
         let rows = rows_at(&[("first", 0, 900), ("later", 52_000, 55_000)]);
-        assert_eq!(texts(&heard_rows(rows, &unordered)), ["first", "later"]);
+        assert_eq!(
+            texts(&heard_rows(rows, &unordered, PASS_PAD_MS)),
+            ["first", "later"]
+        );
         // No speech found keeps no row.
-        assert!(heard_rows(rows_at(&[("said", 0, 500)]), &[])
+        assert!(heard_rows(rows_at(&[("said", 0, 500)]), &[], PASS_PAD_MS)
             .segments
             .is_empty());
         // A reply after a long silence, its row started where the silence
@@ -2048,11 +2075,27 @@ Speech segment 0: start = 1.0, end = 2.0
         let late = |seek_ms| {
             let mut reply = rows_at(&[("Ja.", 0, 31_000)]);
             reply.segments[0].words[0].seek_ms = seek_ms;
-            heard_rows(reply, &[(30_000, 31_000)])
+            heard_rows(reply, &[(30_000, 31_000)], PASS_PAD_MS)
         };
         assert_eq!(texts(&late(Some(30_200))), ["Ja."]);
         // Without one, from its start: 2 s of its 31 s near speech.
         assert!(late(None).segments.is_empty());
+        // A stretch's regions are padded 400 ms less, so they reach 400 ms
+        // further: the same speech, the same rows kept.
+        let reply = || rows_at(&[("Ja.", 21_300, 21_300)]);
+        assert!(heard_rows(reply(), &speech, PASS_PAD_MS)
+            .segments
+            .is_empty());
+        let stretch = [(10_400, 19_600)];
+        assert!(heard_rows(reply(), &stretch, STRETCH_PAD_MS)
+            .segments
+            .is_empty());
+        let reply = || rows_at(&[("Ja.", 20_900, 20_900)]);
+        assert_eq!(texts(&heard_rows(reply(), &speech, PASS_PAD_MS)), ["Ja."]);
+        assert_eq!(
+            texts(&heard_rows(reply(), &stretch, STRETCH_PAD_MS)),
+            ["Ja."]
+        );
     }
     #[test]
     fn a_stretch_transcribed_again_leaves_out_rows_over_silence() {
