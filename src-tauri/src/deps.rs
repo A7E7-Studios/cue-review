@@ -937,6 +937,12 @@ pub struct Measured {
     pub model: String,
     /// The processor build's counted time for the sample, in ms.
     pub processor_ms: u64,
+    /// The time the processor's counted run spent transcribing, without
+    /// loading the model ([`Run::transcribing_ms`]), in ms: what the larger
+    /// model's time is judged against. A measurement saved without it is
+    /// made again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor_transcribing_ms: Option<u64>,
     /// Each card the Vulkan build listed, with its counted time.
     pub cards: Vec<CardTime>,
     /// The card that transcribes: the fastest one, when it beat the
@@ -968,7 +974,8 @@ pub struct CardTime {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LargeTime {
-    /// It took this many ms.
+    /// It spent this many ms transcribing, without loading the model
+    /// ([`Run::transcribing_ms`]).
     Ms(u64),
     /// It failed, or the log shows the processor.
     Failed,
@@ -1008,20 +1015,29 @@ impl Measured {
                 .and_then(|card| card.ms)
                 .is_some_and(|ms| offers_large(self.processor_ms, ms))
     }
-    /// Whether the larger model, timed on the card, was slower than the
-    /// processor with the small model, or failed there.
-    fn large_slow(&self) -> bool {
-        match self.large {
-            Some(LargeTime::Ms(ms)) => ms > self.processor_ms,
-            Some(LargeTime::Failed) => true,
-            None => false,
+    /// The larger model's time spent transcribing on the card and the
+    /// processor's with the small model, once both are known.
+    fn transcribing_times(&self) -> Option<(u64, u64)> {
+        match self.large? {
+            LargeTime::Ms(large) => Some((large, self.processor_transcribing_ms?)),
+            LargeTime::Failed => None,
         }
     }
+    /// Whether the larger model, timed on the card, spent longer
+    /// transcribing than the processor with the small model, or failed there.
+    fn large_slow(&self) -> bool {
+        self.large == Some(LargeTime::Failed)
+            || self
+                .transcribing_times()
+                .is_some_and(|(large, processor)| large > processor)
+    }
     /// Whether the larger model may run on the card: offered, and timed
-    /// there no slower than the processor with the small model.
+    /// there transcribing no slower than the processor with the small model.
     fn large_fits(&self) -> bool {
         self.large_offered()
-            && matches!(self.large, Some(LargeTime::Ms(ms)) if ms <= self.processor_ms)
+            && self
+                .transcribing_times()
+                .is_some_and(|(large, processor)| large <= processor)
     }
 }
 /// A card that runs the sample in two thirds of the processor's time or less
@@ -1032,7 +1048,8 @@ fn offers_large(processor_ms: u64, card_ms: u64) -> bool {
 }
 /// Whether the devices are to be measured: nothing was saved, or it was
 /// saved on another computer than `now`, or on another sample than
-/// [`SAMPLE`], or with base while `model`, the
+/// [`SAMPLE`], or without the processor's transcribing time, which the
+/// larger model is judged against, or with base while `model`, the
 /// one the sample is timed with now ([`sample_model`]), is a small model: a
 /// measurement made before the small models were there is made again with
 /// one. Small and small.en are the same size, so one measured with either
@@ -1041,6 +1058,7 @@ fn needs_measuring(saved: Option<&Measured>, now: &Computer, model: Option<&Spee
     saved.is_none_or(|saved| {
         saved.computer != *now
             || saved.sample != SAMPLE
+            || saved.processor_transcribing_ms.is_none()
             || (!small_sized(&saved.model) && model.is_some_and(|model| small_sized(model.name)))
     })
 }
@@ -1066,9 +1084,43 @@ pub(crate) enum On {
 pub(crate) struct Run {
     /// It exited with success.
     pub ok: bool,
+    /// From its start to its exit.
     pub ms: u64,
     /// What it wrote to stderr.
     pub log: String,
+}
+impl Run {
+    /// The time it spent transcribing, without loading the model, in ms:
+    /// its log's [`transcribing_ms`], else its whole time.
+    pub fn transcribing_ms(&self) -> u64 {
+        transcribing_ms(&self.log).unwrap_or(self.ms)
+    }
+}
+/// The time a run spent transcribing, from the timings `whisper-cli` logs
+/// at its end: `total time`, from the start of loading the model to the end
+/// of the run, less `load time`, in whole ms. Loading the 1.6 GB larger
+/// model takes most of a run of the sample. `None` when the log lacks
+/// either line.
+pub(crate) fn transcribing_ms(log: &str) -> Option<u64> {
+    let timing = |name: &str| {
+        log.lines().rev().find_map(|line| {
+            let value = line
+                .trim()
+                .strip_prefix("whisper_print_timings:")?
+                .trim_start()
+                .strip_prefix(name)?
+                .trim_start()
+                .strip_prefix('=')?
+                .trim()
+                .strip_suffix("ms")?
+                .trim()
+                .parse::<f64>()
+                .ok()?;
+            (value.is_finite() && value >= 0.0).then_some(value)
+        })
+    };
+    let (load, total) = (timing("load time")?, timing("total time")?);
+    Some((total - load).max(0.0).round() as u64)
 }
 /// A measurement stopped before its end, because a recording started.
 #[derive(Debug, PartialEq, Eq)]
@@ -1127,6 +1179,7 @@ fn measure_with(
         sample: SAMPLE.into(),
         model: model.name.into(),
         processor_ms,
+        processor_transcribing_ms: Some(processor[1].transcribing_ms()),
         chosen: fastest(processor_ms, &cards),
         cards,
         stopped: false,
@@ -1153,19 +1206,22 @@ fn time_large(card: u32, sample: Sampler<'_>) -> Result<LargeTime, Cut> {
     let (one, other) = (one?, other?);
     let time = large_time([&first, &second], [&one, &other], card);
     eprintln!(
-        "large-v3-turbo on card {card}: {} ms, two at once {} and {} ms: {time:?}",
-        second.ms, one.ms, other.ms
+        "large-v3-turbo on card {card}: {} ms, {} ms of it transcribing, two at once {} and {} ms: {time:?}",
+        second.ms,
+        second.transcribing_ms(),
+        one.ms,
+        other.ms
     );
     Ok(time)
 }
-/// The larger model's time on `card`: the second of its two runs one after
-/// the other (`timed`), when both ended well on the card, and so did both of
-/// the two it ran at the same time (`together`). Otherwise it failed: a card
-/// with too little memory for two would fail every take with two tracks.
-/// The card itself goes on with the small models.
+/// The larger model's time on `card`: what the second of its two runs one
+/// after the other (`timed`) spent transcribing, when both ended well on the
+/// card, and so did both of the two it ran at the same time (`together`).
+/// Otherwise it failed: a card with too little memory for two would fail
+/// every take with two tracks. The card itself goes on with the small models.
 fn large_time(timed: [&Run; 2], together: [&Run; 2], card: u32) -> LargeTime {
     match (counted(timed, Some(card)), counted(together, Some(card))) {
-        (Some(ms), Some(_)) => LargeTime::Ms(ms),
+        (Some(_), Some(_)) => LargeTime::Ms(timed[1].transcribing_ms()),
         _ => LargeTime::Failed,
     }
 }
@@ -1479,8 +1535,9 @@ fn wake_measuring() {
 }
 
 /// What every run of a measurement transcribes: whisper.cpp's `jfk.wav`
-/// played twice back to back, 22 s, as long as a stretch, so loading the
-/// model, 1.6 GB for the larger one, does not decide the time.
+/// played twice back to back, 22 s, as long as a stretch. Loading the model
+/// still takes much of a whole run, most of one with the larger model, which
+/// is judged by its time spent transcribing ([`Run::transcribing_ms`]).
 pub(crate) const SAMPLE: &str = "jfk.wav twice";
 /// The doubled sample a measurement writes and removes, in the data root.
 const SAMPLE_FILE: &str = "speech-sample.wav";
@@ -2287,6 +2344,25 @@ whisper_backend_init_gpu: device 0: CPU (type: 0)
 whisper_backend_init_gpu: no GPU found
 whisper_print_timings:    total time =  2541.21 ms
 ";
+    /// The timings at the end of a run of large-v3-turbo on the RTX 5090:
+    /// 1505.64 ms from loading to the end, 1124.59 ms of them loading.
+    const LARGE_TIMINGS: &str = "whisper_print_timings:     load time =  1124.59 ms
+whisper_print_timings:     fallbacks =   0 p /   0 h
+whisper_print_timings:      mel time =     8.33 ms
+whisper_print_timings:   sample time =    88.48 ms /   279 runs (     0.32 ms per run)
+whisper_print_timings:   encode time =    77.56 ms /     1 runs (    77.56 ms per run)
+whisper_print_timings:   decode time =     0.00 ms /     1 runs (     0.00 ms per run)
+whisper_print_timings:   batchd time =   105.01 ms /   277 runs (     0.38 ms per run)
+whisper_print_timings:   prompt time =     5.28 ms /    54 runs (     0.10 ms per run)
+whisper_print_timings:    total time =  1505.64 ms
+";
+    /// The load and total times `whisper-cli` logs at its end, in ms.
+    fn timings(load: f64, total: f64) -> String {
+        format!(
+            "whisper_print_timings:     load time = {load:8.2} ms\n\
+             whisper_print_timings:    total time = {total:8.2} ms\n"
+        )
+    }
 
     #[test]
     fn the_cards_and_the_card_in_use_are_read_from_the_vulkan_log() {
@@ -3449,6 +3525,157 @@ whisper_print_timings:    total time =  2541.21 ms
         let device = facts.device();
         assert_eq!(device.kind, DeviceKind::GraphicsCard);
         assert!(device.large_slow && !device.large_in_use);
+    }
+
+    #[test]
+    fn loading_the_larger_model_does_not_count_against_it() {
+        // A run's time spent transcribing is its total time less its load
+        // time, from the timings it logs at its end, line ends of either kind.
+        assert_eq!(transcribing_ms(LARGE_TIMINGS), Some(381));
+        assert_eq!(
+            transcribing_ms(&LARGE_TIMINGS.replace('\n', "\r\n")),
+            Some(381)
+        );
+        assert_eq!(
+            transcribing_ms(&format!("{VULKAN_DEVICES}{ON_CARD_0}{LARGE_TIMINGS}")),
+            Some(381),
+            "the last total time counts"
+        );
+        // Without either line, or with one unreadable, there is none.
+        let load_only = "whisper_print_timings:     load time =  1124.59 ms\n";
+        let unreadable = load_only.to_owned() + "whisper_print_timings:    total time =  n/a ms\n";
+        for log in ["", PROCESSOR_BUILD, load_only, unreadable.as_str()] {
+            assert_eq!(transcribing_ms(log), None, "{log}");
+        }
+        // A run without them counts whole.
+        assert_eq!(run(true, 2_098, PROCESSOR_BUILD).transcribing_ms(), 2_098);
+        assert_eq!(run(true, 2_098, LARGE_TIMINGS).transcribing_ms(), 381);
+
+        // This PC: the whole run of the sample took 2088 ms on the processor
+        // with small and 10 ms more on the RTX 5090 with Large, which spent
+        // 1240 ms of it loading the model.
+        let card_0 = format!("{VULKAN_DEVICES}{ON_CARD_0}");
+        let card_1 = format!("{VULKAN_DEVICES}{ON_CARD_1}");
+        let bench = |times: bool| {
+            let timed = |log: &str, load, total| {
+                if times {
+                    format!("{log}{}", timings(load, total))
+                } else {
+                    log.to_owned()
+                }
+            };
+            let (processor, large) = (
+                timed(PROCESSOR_BUILD, 290.81, 1_990.81),
+                timed(&card_0, 1_240.0, 1_662.0),
+            );
+            let (card_0, card_1) = (card_0.clone(), card_1.clone());
+            move |on: On, model: &'static SpeechModel| -> Result<Run, Cut> {
+                Ok(match on {
+                    On::Processor => run(true, 2_088, &processor),
+                    On::Card(0) if model == &LARGE => run(true, 2_098, &large),
+                    On::Card(0) => run(true, 1_102, &card_0),
+                    On::Card(_) => run(true, 5_022, &card_1),
+                })
+            }
+        };
+        let with_large = models(&[&BASE, &SMALL, &LARGE]);
+        let measured = |times| {
+            let root = tempfile::tempdir().unwrap();
+            let sample = bench(times);
+            measure_into(root.path(), computer(), false, with_large.path(), &sample).unwrap();
+            load_measured(root.path()).unwrap()
+        };
+        let saved = measured(true);
+        assert_eq!(
+            saved.processor_ms, 2_088,
+            "the card is chosen on whole runs"
+        );
+        assert_eq!(saved.chosen, Some(0));
+        assert_eq!(saved.processor_transcribing_ms, Some(1_700));
+        assert_eq!(saved.large, Some(LargeTime::Ms(422)));
+        // Large is no slower, so with Large chosen it transcribes on the card,
+        // and Settings and `cue setup` say so.
+        let facts = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(saved)
+        };
+        assert!(facts.large());
+        let device = facts.device();
+        assert!(device.large_offered && !device.large_slow && device.large_in_use);
+        assert_eq!(
+            FinalRun::on(facts.card(), facts.large().then(large), small()).model,
+            large()
+        );
+        // Runs whose logs lack the timings count whole: Large's 2098 ms is
+        // slower than the processor's 2088 ms.
+        let whole = measured(false);
+        assert_eq!(
+            (whole.processor_transcribing_ms, whole.large),
+            (Some(2_088), Some(LargeTime::Ms(2_098)))
+        );
+        let facts = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(whole)
+        };
+        assert!(!facts.large() && facts.device().large_slow);
+    }
+
+    #[test]
+    fn a_measurement_without_transcribing_times_is_made_again() {
+        // A measurement saved with the processor's whole time only, and the
+        // larger model's whole run 10 ms slower than it.
+        let root = tempfile::tempdir().unwrap();
+        let mut old = serde_json::to_value(Measured {
+            processor_ms: 2_088,
+            large: Some(LargeTime::Ms(2_098)),
+            ..fast()
+        })
+        .unwrap();
+        assert!(old
+            .as_object_mut()
+            .unwrap()
+            .remove("processorTranscribingMs")
+            .is_some());
+        fs::write(
+            root.path().join("speech-device.json"),
+            serde_json::to_vec_pretty(&old).unwrap(),
+        )
+        .unwrap();
+        let saved = load_measured(root.path()).unwrap();
+        assert_eq!(saved.processor_transcribing_ms, None);
+        // Until it is made again Large is judged neither slow nor fit: the
+        // small models transcribe on the card.
+        let facts = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(saved.clone())
+        };
+        assert_eq!(facts.card(), Some(0));
+        assert!(!facts.large() && !facts.device().large_slow);
+        // At the next start it is due without being asked: the devices are
+        // timed again, then the larger model, once.
+        assert!(needs_measuring(Some(&saved), &computer(), Some(&SMALL)));
+        let bench = Bench::new(2_700, &[(RTX, 1_300, true), (AMD, 6_000, true)]);
+        let sample = |on, model| bench.sample(on, model);
+        let with_large = models(&[&BASE, &SMALL, &LARGE]);
+        measure_into(root.path(), computer(), false, with_large.path(), &sample).unwrap();
+        let runs = bench.runs();
+        assert_eq!(runs.len(), 10, "{runs:?}");
+        assert_eq!(runs[6..], [(On::Card(0), "large-v3-turbo"); 4]);
+        let again = load_measured(root.path()).unwrap();
+        assert_eq!(again.processor_transcribing_ms, Some(2_700));
+        assert_eq!(again.large, Some(LargeTime::Ms(2_000)));
+        assert!(!needs_measuring(Some(&again), &computer(), Some(&SMALL)));
+        measure_into(root.path(), computer(), false, with_large.path(), &sample).unwrap();
+        assert!(bench.runs().is_empty());
+        let facts = Facts {
+            large_chosen: true,
+            large_installed: true,
+            ..ready(again)
+        };
+        assert!(facts.large());
     }
 
     #[test]

@@ -209,6 +209,37 @@ cannot.
 - **THEN** Settings shows no model choice
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::does not offer the larger model without a fast graphics card
 
+### Requirement: The larger model is judged by the time it spends transcribing
+The app SHALL judge the larger model, timed on the graphics card after its download, by the time
+each run spends transcribing, whisper's own total time less the time it spends loading the model,
+against the same for the small model on the processor, and count a run's whole time only when its
+log lacks those times, because loading the 1.6 GB model takes most of a run of the 22 s sample
+while a take's pass loads it once for hours of audio: a card whose whole sample run with Large is
+10 ms slower than the processor's with small transcribes a 2.5-hour track in 113 s against the
+processor's 994 s.
+
+#### Scenario: Loading the larger model does not count against it
+- **GIVEN** a graphics card that spends most of a run of the sample loading the larger model, and
+  whose whole run with it is a little slower than the processor's whole run with the small model
+- **WHEN** the larger model is timed on it after its download
+- **THEN** it counts as no slower, and with Large chosen it transcribes every take on the card
+- **AND** Settings and `cue setup` do not report it as slower
+- **PROOF** test: src-tauri/src/deps.rs::tests::loading_the_larger_model_does_not_count_against_it
+- **PROOF** desk: open
+
+#### Scenario: A run without whisper's times counts whole
+- **GIVEN** a run of the sample whose log has no load time or no total time
+- **WHEN** the larger model on the card or the small model on the processor is timed
+- **THEN** that run's whole time is compared
+- **PROOF** test: src-tauri/src/deps.rs::tests::loading_the_larger_model_does_not_count_against_it
+
+#### Scenario: A measurement without transcribing times is made again
+- **GIVEN** a saved measurement of this computer that holds no transcribing time for the processor
+- **WHEN** the app starts
+- **THEN** it measures the devices again in the background and times the larger model again,
+  without the person asking
+- **PROOF** test: src-tauri/src/deps.rs::tests::a_measurement_without_transcribing_times_is_made_again
+
 ### Requirement: The CLI installs and reports the language's models
 `cue setup --install` SHALL also download every model the chosen language needs, and `cue setup`
 SHALL report them as `languageModels`, because an agent setting up a computer without the app needs
