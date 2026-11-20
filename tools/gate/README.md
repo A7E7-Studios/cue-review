@@ -1,10 +1,11 @@
 # Gate
 
 The deterministic formality gate: it checks that a branch keeps the repository's formats (specs,
-change folders, living docs, byte budgets, links, the nearest README and the PR description), that
-a project's copy of the kit is as its lock says, and that the branch touches nothing only the owner
-may merge. It judges form, never whether the code is right; tests and the independent review do
-that. The formats it enforces are defined in `specs/README.md` and `changes/README.md`.
+their boards and review state, change folders, living docs, byte budgets, links, the nearest README
+and the PR description), that a project's copy of the kit is as its lock says and its design system
+is in place, and that the branch touches nothing only the owner may merge. It judges form, never
+whether the code is right; tests and the independent review do that. The formats it enforces are
+defined in `specs/README.md` and `changes/README.md`.
 
 No npm dependencies; Node 22 or later; nothing to install.
 
@@ -32,7 +33,7 @@ run exit 0 and head its summary `WOULD FAIL`; every other run is strict unless `
 never covers [`protected`](#protected-paths): a PR that touches a protected path exits 1 always.
 
 The summary on stdout is Markdown — a verdict line, a table of checks, every failing finding with
-`file:line`, then information (each `pass` or `fail` the PR writes first) — so CI appends it to
+`file:line`, then information (each `review` value the PR sets first) — so CI appends it to
 `$GITHUB_STEP_SUMMARY` unchanged.
 
 ## What it reads
@@ -52,36 +53,42 @@ The PR description comes from `--pr-body`, else from the Actions event payload
 
 | Check | Fails when |
 |---|---|
-| `specs` | a capability folder breaks the format: its path (`specs/<domain>/<capability>/spec.md`, both kebab-case, the domain in `specs/domains.json`), its front matter (`title`, `code` with at least one path, no other key), a `code` or `test:` path missing at head (a folder ends `/`, a file does not), one `# <title>` equal to the front matter title, one non-empty `## Purpose` then one `## Requirements`, each `### Requirement:` with a statement and at least one `#### Scenario:`, each scenario only `**GIVEN**`/`**WHEN**`/`**THEN**`/`**AND**` bullets (a `**WHEN**` and a `**THEN**` required) ending in at least one PROOF line, a PROOF line malformed or out of place or a check twice, scenario slugs repeated, a `look/<slug>.png` naming no scenario, a stray file; `specs/domains.json` unreadable; a scenario whose text changed since the merge base (or that is new) carrying `pass` or `fail`; or a changed scenario dropping a human check it had at the merge base (it keeps each, as `open`) |
-| `changes` | a `changes/<id>/` with an id that is not kebab-case, no `proposal.md`, front matter that breaks the format (`title`; `capabilities`, `<domain>/<capability>` items each with a spec at head; optional `removes`, the capabilities it deletes, each with no spec at head and one at the merge base, or already removed by a change folder on main; at least one item in the two; `review`, `unreviewed` or `changes-requested`; optional `follow-ups`, change ids; no other key); a file directly in `changes/` other than its README; a PR that changes a spec's requirement text without adding or modifying a change folder whose `capabilities` names the capability; or a PR that deletes a spec without one whose `removes` names it (`removes` answers only for a spec the PR deletes) |
-| `history` | an added line of a living doc, outside code fences and inline code, matches a rule in `config.json`: a PR or issue reference, a cross-repo reference (two or more name characters before `#`), an ISO date outside a PROOF line, `used to` (not after `is`, `was`, `be`, `get` and their forms), `(ruled`, work promised for later (`follow-up PR`, `pull request`, `issue`, `ticket`, `task` or `work`; `to be done`, `will be added` or `is planned` + `later`), `TODO`. The workflow's own words — a `follow-up` change, the `follow-ups` field — are not hits. Write a hex colour as inline code: a bare `#333` reads as a PR reference |
+| `specs` | a capability folder breaks the format ([specs/README.md](../../specs/README.md)): its path (`specs/<domain>/<capability>/spec.md`, both kebab-case, the domain in `specs/domains.json`); its front matter (`title`, `review` one of `unreviewed`, `approved`, `changes-requested`, `code` with at least one path, no other key); its body (one `# <title>` equal to the title, a non-empty `## Summary`, an optional `## Looks` of Looks lines, then `## Requirements`; each `### Requirement:` a statement of one paragraph holding `SHALL` and `because`, then at least one `#### Scenario:`; each scenario's optional steps, one `**WHEN**` and one `**THEN**` with at most one `**GIVEN**` first and `**AND**` after any, then an optional table, then its PROOF lines, each `test: <path>[::<selector>]`); a `code` or `test:` path missing at head (a folder ends `/`, a file does not); scenario slugs repeated; a board a Looks line names missing from the folder's `looks/`, without the line's `id`, or loading anything from outside itself (in a start tag, `src`, `poster`, `srcset`, `imagesrcset`, an object's `data`, or `href` and `xlink:href` on any element but `a` and `area`; in CSS, `url(…)`, `@import` or `image-set(…)`; a `data:` URL or a `#fragment` stays inside); a board no Looks line names, or any other stray file; an image or video file anywhere under `specs/` or `changes/`; `specs/domains.json` unreadable; `specs/systems.json`, when present, not a list of `{ id, title, purpose, paths }` (kebab-case unique ids, non-empty title and purpose, paths present at head, no path declared by two systems); or a spec not `review: unreviewed` when the PR adds it, changes its text or its boards, or carries a change folder that names it |
+| `changes` | a `changes/<id>/` with an id that is not kebab-case, no `proposal.md`, a file other than `proposal.md`, `looks.html`, `look.md`, `design.md` and `tasks.md`, a `looks.html` loading anything from outside itself (read as a board is, in `specs`), or front matter that breaks the format (`title`; `capabilities`, `<domain>/<capability>` items each with a spec at head; optional `removes`, the capabilities it deletes, each with no spec at head and one at the merge base, or already removed by a change folder on main; at least one item in the two; no other key); a file directly in `changes/` other than its README; a PR that changes a spec's text or a file under its `looks/` without adding or modifying a change folder whose `capabilities` names the capability; or a PR that deletes a spec without one whose `removes` names it (`removes` answers only for a spec the PR deletes) |
+| `history` | an added line of a living doc, outside code fences and inline code, matches a rule in `config.json`: a PR or issue reference, a cross-repo reference (two or more name characters before `#`), an ISO date outside a PROOF line, `used to` (not after `is`, `was`, `be`, `get` and their forms), `(ruled`, work promised for later (`follow-up PR`, `pull request`, `issue`, `ticket`, `task` or `work`; `to be done`, `will be added` or `is planned` + `later`), `TODO`. Write a hex colour as inline code: a bare `#333` reads as a PR reference |
 | `budgets` | a changed file over its byte budget is new, or grew since the merge base |
 | `links` | a relative link or anchor on an added line of a changed `.md` does not resolve at head; or a link anywhere else that resolved at the merge base no longer does, because the PR deleted or renamed a file of any kind or a folder, or changed a doc's headings |
 | `readme` | code changed under a folder whose nearest `README.md` did not change, and no commit in range carries `Doc-Impact: none; <reason>`; or a `Doc-Impact` line reads otherwise |
 | `pr` | with `--pr` only: the PR changes code and its description lacks a non-empty `## Tests` or `## Review` |
 | `kit` | in a project that carries the kit (it has `tools/kit/lock.json`): a file the lock lists is missing or holds other bytes than its git blob id; a file under a path the kit owns is neither in the lock nor one the project owns (`projectOwned`, its `tools/gate/config.json` among them); or the PR deletes the lock. A drift main already had is information for a PR that touches neither a kit file nor the lock (a change to the project's own files touches neither). Skipped where there is no lock, the kit's own repository among them ([tools/kit](../kit/README.md)) |
+| `design` | with a `design` block in `config.json`: its `tokens` or `brief` file is missing at head. Skipped without the block |
 | `protected` | the PR touches a protected path: **the owner merges this PR; agents never do**. Never report-only; see [Protected paths](#protected-paths) |
 
 Rules the table leaves implicit:
 
-- **Old problems are not this PR's.** A capability folder, change folder, `specs/domains.json` or
-  kit copy the PR touches answers for every problem it has. One it does not touch fails only on problems
-  it did not have at the merge base — a `code` or `test:` path this PR deleted, a capability a
-  pending change names that this PR removed; the rest are listed as information. A PR that writes
-  anything under `specs/` answers for `specs/domains.json`.
-- **Scenario text** is its step bullets, whitespace collapsed (re-wrapping a bullet changes
-  nothing); a scenario is keyed by its requirement's name and its own, so a renamed scenario or
-  requirement is new. PROOF lines are not text. A `pass` or `fail` written on an unchanged scenario
-  is a notice at the top of the information, naming the scenario, the check and the value.
-- **Requirement text** is a spec's title, purpose, requirements and scenarios without PROOF lines
-  and without `code`. A PR that changes only PROOF lines, only `code` paths, or only deletes change
-  folders needs no change folder. A deleted change folder is not a written one.
+- **Old problems are not this PR's.** A capability folder, change folder, `specs/domains.json`,
+  `specs/systems.json` or kit copy the PR touches answers for every problem it has. One it does
+  not touch fails only on problems it did not have at the merge base — a `code`, `test:` or
+  system path this PR deleted, a capability a pending change names that this PR removed; the rest
+  are listed as information. A PR that writes anything under `specs/` answers for
+  `specs/domains.json`.
+- **A spec's text** is its title, Summary, Looks lines, requirements and scenarios (steps and
+  tables, whitespace collapsed, so re-wrapping a bullet changes nothing), without PROOF lines,
+  `code` and `review`. Its boards count with it: a PR that adds, edits or deletes a file under a
+  capability's `looks/` changes that spec's text. A PR that changes only PROOF lines, only `code`
+  paths, only `review` values, only `specs/systems.json`, or only deletes change folders needs no
+  change folder. A deleted change folder is not a written one.
+- **The review.** A spec the PR adds, whose text or boards it changes, or that a change folder it
+  adds or modifies names in `capabilities`, is `review: unreviewed` at head. A `review` that
+  differs from the merge base on any other spec is a review result: a notice at the top of the
+  information, naming the capability and the value it sets.
+- **An untested scenario** (no PROOF line) is valid; the `specs` summary counts it.
 - **Code**, for `readme` and `pr`, is any path outside `*.md`, `specs/` and `changes/`, except a
   `.meta` sidecar (as Unity writes) of a Markdown file or of a folder (at head or at the merge base). The nearest
   README is looked up at head, then at the merge base for a deleted folder; when it is the root
   `README.md` the result is information only.
 - **Ignored paths** (`config.json` `ignore`: vendored packages and samples) are no check's
-  concern in `history`, `budgets`, `links` and `readme`, and the overview lists no module under
+  concern in `history`, `budgets`, `links` and `readme`, and the overview lists no component under
   them. `pr` still counts them as code.
 - **Budgets** take the first matching pattern, and one with `"bytes": null` leaves its files
   unbudgeted; an over-budget file that did not grow is information.
@@ -125,10 +132,14 @@ The JSON report lists what fails the run in `blocking`.
 | `livingDocs` | `{ include, exclude }`: globs of the living docs, the docs that state what IS and that the history lint reads. Change folders are planning, never living |
 | `budgets` | `[{ pattern, bytes }]`: the byte budget of the files a glob matches; the first matching entry wins, and `"bytes": null` means no budget, so a `null` entry placed first exempts what it matches from the entries after it |
 | `history` | `[{ id, message, pattern, flags?, skipProofLines? }]`, JavaScript regular expressions |
-| `overview.excludeModules` | globs of folders the overview lists no module from (planning and fixture folders); the gate does not read it |
-| `overview.moduleMarkers` | file-name globs (no `/`) that make a folder a module in the overview ([its Modules](../overview/README.md#modules)); without the key, its defaults. The gate does not read it |
+| `design` | optional: the project's design system, `{ tokens, brief, catalogues?, render? }`: `tokens` the repository path of a CSS file of custom properties, `brief` that of the style brief (Markdown), `catalogues` a list of `{ name, open }` (a kebab-case name and a URL template holding `{entry}`), `render` a command. The `design` check reads `tokens` and `brief`; the starter names the kit's house style |
+| `overview.excludeComponents` | globs of folders the overview lists no component from (planning and fixture folders); the gate does not read it |
+| `overview.componentMarkers` | file-name globs (no `/`) that make a folder a component in the overview ([its Components](../overview/README.md#components)); without the key, its defaults. The gate does not read it |
+| `solutionMap` | optional: `{ repos, pages?, review? }` for [the Solution map](../solution-map/README.md#config): `repos` the solution's repositories as `{ id, path }`, paths relative to this one; the starter names this repository alone. The gate does not read it |
 
-The values are each repository's own, in its `config.json`. A new project starts from
+The values are each repository's own, in its `config.json`. `loadConfig` refuses a mistyped key,
+and names the new name of `overview.moduleMarkers` (`componentMarkers`) and
+`overview.excludeModules` (`excludeComponents`). A new project starts from
 [`config.template.json`](config.template.json), which the tests read too, so they hold in every
 repository whatever its own values.
 
@@ -150,10 +161,10 @@ Globs: `**` spans folders, `*` and `?` stay inside one.
 | `gate.mjs` | the command line |
 | `config.json`, `config.template.json` | this repository's config; the starter a new project copies |
 | `lib/index.mjs` | `runGate()`, `loadConfig()` |
-| `lib/checks.mjs` | the checks |
+| `lib/checks.mjs` | the checks; `readDomains`, `readSystems` and `specsLayout`, which the overview may reuse |
 | `lib/context.mjs` | revisions, changed paths, the Markdown diff, commits, nearest README |
 | `lib/kit.mjs` | the lock: `parseLock`, `blobId`, `kitProblems`; shared with [`tools/kit`](../kit/README.md) |
-| `lib/spec.mjs` | `parseSpec`, `parseChange`, `parseProof`, front matter, scenario slugs and the derived states; shared with [`tools/overview`](../overview/README.md) |
+| `lib/spec.mjs` | `parseSpec`, `parseChange`, `parseProof`, `parseLook`, front matter, scenario slugs, the spec text and the derived states (`isTested`, `reviewState`); shared with [`tools/overview`](../overview/README.md) |
 | `lib/git.mjs` | reads a repository at a revision through git objects |
 | `lib/markdown.mjs` | fences, inline code, heading anchors, links, a document's first heading and paragraph |
 | `lib/diff.mjs`, `lib/glob.mjs`, `lib/trailers.mjs`, `lib/pr.mjs`, `lib/report.mjs` | diff parsing, globs, `Doc-Impact`, the PR description, the Markdown summary |
@@ -165,4 +176,6 @@ cd tools/gate && npm test        # node --test; builds throwaway repositories in
 ```
 
 Every check has passing and failing cases on small repositories built by `test/helpers.mjs`;
-`test/units.test.mjs` covers the parsers.
+`test/units.test.mjs` covers the parsers. The tests run on `config.template.json` without its
+`design` block, since a test repository holds no house style; the `design` check's tests pass it
+back in.

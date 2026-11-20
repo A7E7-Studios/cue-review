@@ -1,0 +1,13 @@
+{
+  "name": "solution-map",
+  "private": true,
+  "description": "The Solution map: a local web page over the overview's index, served on 127.0.0.1. No dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node solution-map.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

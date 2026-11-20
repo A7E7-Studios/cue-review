@@ -4,7 +4,6 @@ capabilities:
   - <domain>/<capability>
 removes:
   - <domain>/<capability this change deletes; drop the key when it deletes none>
-review: unreviewed
 ---
 # <title>
 
@@ -13,13 +12,18 @@ review: unreviewed
 <The problem in the owner's terms: who meets it, when, and what it costs them. Two to four
 sentences.>
 
-- Evidence, when a review found it: `evidence/<what-it-shows>.png`, "<the owner's words>" at
-  <m:ss>. Drop the line otherwise.
+- Feedback, when a review found it: one line per remark, each with the owner's words, its time
+  (<m:ss>), the review session's id and the feature it concerns. Drop the list otherwise.
 
 ## What changes
 
 - <One observable change per line. The spec edits carry the detail; name the scenario each one
-  becomes.>
+  becomes, and every code path it covers.>
+
+## Review
+
+<What the owner looks at once this lands, and where: at a desk, on a device, with a second
+person, against which account. One short paragraph.>
 
 ## Settled questions
 

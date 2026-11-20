@@ -1,7 +1,7 @@
 {
   "name": "overview",
   "private": true,
-  "description": "The overview index generator: capabilities, scenarios, review state, pending changes and modules across repositories, as JSON. No dependencies.",
+  "description": "The overview index generator: features, their review state, scenarios, systems, change folders and components across repositories, as JSON. No dependencies.",
   "type": "module",
   "engines": {
     "node": ">=22"

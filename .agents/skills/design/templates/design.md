@@ -16,6 +16,7 @@ modules and files.>
 | Area | Detail |
 |---|---|
 | Modules and READMEs | <each module, and the README that changes with it> |
+| Code reused | <the existing code this builds on or refactors to share, rather than a second version> |
 | State on the network | <who owns each piece of state, who may change it, how it reaches the others> |
 | Formats and contracts | <each file format or API contract, its version, the migration, the reader on the other side> |
 | Storage | <what is stored where, how long, what happens to what is already stored> |
@@ -29,12 +30,7 @@ Leave out a row that does not apply.
 |---|---|
 | <scenario name> | `<path>::<selector>`, <new or existing> |
 | <new logic, as the ship skill defines it> | `<path>::<selector>`, unit test |
-
-## Human checks
-
-| Scenario | Check | What the person looks at |
-|---|---|---|
-| <scenario name> | <desk, headset, two-headsets, printed-card or live-tenant> | <what they do, and what passes> |
+| <scenario no automation reaches> | none: untested, because <why no test can reach it> |
 
 ## Risks
 

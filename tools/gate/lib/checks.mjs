@@ -3,7 +3,7 @@
 import path from 'node:path';
 import { matches } from './glob.mjs';
 import { splitLines, fenceMask, stripInlineCode, anchors, links, PROOF_LINE } from './markdown.mjs';
-import { ID, SPEC_FILE, parseSpec, parseChange, requirementText, scenarioKey, scenarioText, isCapabilityId } from './spec.mjs';
+import { ID, SPEC_FILE, BOARD, REVIEW_STATES, parseSpec, parseChange, requirementText, isCapabilityId, isTested, pathProblem } from './spec.mjs';
 import { addedLines, isCode, isIgnored, nearestReadme } from './context.mjs';
 import { prSections } from './pr.mjs';
 import { LOCK_FILE, kitProblems, owns } from './kit.mjs';
@@ -20,7 +20,7 @@ const info = finding('info');
 const live = (ctx) => ctx.changes.filter((c) => c.status !== 'D');
 
 /**
- * Judges units (a capability folder, a change folder, specs/domains.json) by what they hold at
+ * Judges units (a capability folder, a change folder, specs/domains.json, specs/systems.json) by what they hold at
  * head. A unit this PR touched answers for every problem it has; an untouched unit fails only on
  * problems it did not have at the merge base (this PR deleted a path it names, say), and its older
  * ones are information.
@@ -45,6 +45,10 @@ function judge(ctx, units) {
 const touched = (ctx, prefix) => ctx.changes.some((c) => c.path === prefix || c.path.startsWith(`${prefix}/`));
 
 // ---------------------------------------------------------------------------------------------
+
+/** An image or video file: never committed under specs/ or changes/. */
+export const MEDIA = /\.(png|jpe?g|gif|webp|bmp|tiff?|avif|heic|ico|svg|mp4|mov|webm|mkv|avi)$/i;
+export const MEDIA_MESSAGE = 'an image or video file: none is committed under specs/ or changes/ (a look is an HTML board beside its spec, feedback is text)';
 
 /** specs/domains.json at `rev`: { ids: Set | null, problems: [{ file, message }] }. null ids: unreadable. */
 export function readDomains(repo, rev) {
@@ -72,12 +76,65 @@ export function readDomains(repo, rev) {
   return { ids, problems };
 }
 
+export const SYSTEMS_FILE = 'specs/systems.json';
+
+/**
+ * specs/systems.json at `rev`: { present, systems, problems: [{ file, message }] }. The file is
+ * optional: absent, `systems` is [] and nothing is wrong; unreadable, `systems` is null. `systems`
+ * holds the entries with a valid, unique id, as written.
+ */
+export function readSystems(repo, rev) {
+  const file = SYSTEMS_FILE;
+  const text = repo.text(rev, file);
+  if (text === null) return { present: false, systems: [], problems: [] };
+  let list;
+  try {
+    list = JSON.parse(text);
+  } catch (e) {
+    return { present: true, systems: null, problems: [{ file, message: `not JSON: ${e.message}` }] };
+  }
+  if (!Array.isArray(list)) return { present: true, systems: null, problems: [{ file, message: 'a list of { "id", "title", "purpose", "paths" }' }] };
+  const tree = repo.tree(rev);
+  const systems = [];
+  const ids = new Set();
+  const owner = new Map();
+  const problems = [];
+  list.forEach((s, i) => {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return problems.push({ file, message: `entry ${i} is not an object` });
+    const name = typeof s.id === 'string' && ID.test(s.id) ? s.id : null;
+    if (!name) problems.push({ file, message: `entry ${i}: id ${JSON.stringify(s.id)} is not kebab-case` });
+    else if (ids.has(name)) problems.push({ file, message: `system "${name}" appears twice` });
+    else {
+      ids.add(name);
+      systems.push(s);
+    }
+    const who = name ? `system "${name}"` : `entry ${i}`;
+    for (const k of ['title', 'purpose']) {
+      if (typeof s[k] !== 'string' || !s[k].trim()) problems.push({ file, message: `${who}: "${k}" is a non-empty string` });
+    }
+    if (!Array.isArray(s.paths) || s.paths.length === 0) return problems.push({ file, message: `${who}: "paths" is a non-empty list of repository paths` });
+    for (const p of s.paths) {
+      if (typeof p !== 'string') {
+        problems.push({ file, message: `${who}: paths: ${JSON.stringify(p)} is not a string` });
+        continue;
+      }
+      const bad = pathProblem(p) ?? pathAtRev(tree, p);
+      if (bad) problems.push({ file, message: `${who}: paths: ${bad}` });
+      if (owner.has(p)) problems.push({ file, message: `${who}: paths: ${p} is declared by ${owner.get(p)} too; a path belongs to one system` });
+      else owner.set(p, who);
+    }
+  });
+  return { present: true, systems, problems };
+}
+
+const SPECS_TOP = ['specs/README.md', 'specs/domains.json', SYSTEMS_FILE];
+
 /** The layout of specs/ at `rev`: capability folders with their files, and stray paths. */
 export function specsLayout(repo, rev) {
   const capabilities = new Map();
   const stray = [];
   for (const p of repo.tree(rev).files.keys()) {
-    if (!p.startsWith('specs/') || p === 'specs/README.md' || p === 'specs/domains.json') continue;
+    if (!p.startsWith('specs/') || SPECS_TOP.includes(p)) continue;
     const segs = p.split('/');
     if (segs.length < 4) {
       stray.push(p);
@@ -90,7 +147,7 @@ export function specsLayout(repo, rev) {
   return { capabilities, stray };
 }
 
-/** What is wrong with a `code` or `test:` path in a tree, or null: a folder ends with `/`, a file does not. */
+/** What is wrong with a `code`, `test:` or system path in a tree, or null: a folder ends with `/`, a file does not. */
 function pathAtRev(tree, p) {
   if (p.endsWith('/')) {
     if (tree.dirs.has(p.slice(0, -1))) return null;
@@ -98,6 +155,139 @@ function pathAtRev(tree, p) {
   }
   if (tree.files.has(p)) return null;
   return tree.dirs.has(p) ? `${p} is a folder; end it with /` : `no file ${p}`;
+}
+
+const lineAt = (text, index) => text.slice(0, index).split('\n').length;
+const escapeRx = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Elements whose content is text, not markup: nothing in it loads (style's own CSS aside). */
+const RAW_TEXT = ['script', 'style', 'textarea', 'title', 'noscript', 'template'];
+const START_TAG = /<([A-Za-z][\w:-]*)(?=[\s/>])((?:[^>"']|"[^"]*"|'[^']*')*)>/y;
+const ATTRIBUTE = /([^\s=/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
+
+/** An attribute value as the browser sees it: its character references decoded. */
+function decodeValue(v) {
+  const named = { quot: '"', apos: "'", amp: '&', lt: '<', gt: '>' };
+  return v.replace(/&(?:(quot|apos|amp|lt|gt)|#(\d+)|#x([0-9a-f]+));/gi, (m, name, dec, hex) => {
+    if (name) return named[name.toLowerCase()];
+    const code = dec ? Number(dec) : parseInt(hex, 16);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m;
+  });
+}
+
+/** A srcset's candidate URLs, read as a browser reads them: a URL up to whitespace, then its descriptors up to a comma. */
+function srcsetUrls(v) {
+  const out = [];
+  let i = 0;
+  while (i < v.length) {
+    while (i < v.length && /[\s,]/.test(v[i])) i++;
+    let j = i;
+    while (j < v.length && !/\s/.test(v[j])) j++;
+    let url = v.slice(i, j);
+    if (url.endsWith(',')) url = url.replace(/,+$/, '');
+    else {
+      let depth = 0;
+      for (; j < v.length; j++) {
+        if (v[j] === '(') depth++;
+        else if (v[j] === ')') depth--;
+        else if (v[j] === ',' && depth <= 0) break;
+      }
+    }
+    if (url) out.push({ at: i, url });
+    i = j;
+  }
+  return out;
+}
+
+/** The quoted image candidates of each image-set(…): strings at its own depth, not those in type(…) or url(…). */
+function imageSetUrls(css) {
+  const out = [];
+  for (const m of css.matchAll(/image-set\(/gi)) {
+    let depth = 1;
+    for (let i = m.index + m[0].length; i < css.length && depth > 0; i++) {
+      const c = css[i];
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === '"' || c === "'") {
+        const end = css.indexOf(c, i + 1);
+        const close = end < 0 ? css.length : end;
+        if (depth === 1) out.push({ at: i + 1, url: css.slice(i + 1, close) });
+        i = close;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Where a board loads something from outside itself: [{ line, url }]. The HTML is read left to
+ * right as a browser reads it: comments, and the text of script, style, textarea, title, noscript
+ * and template, are not markup. From each start tag: src, poster, srcset and imagesrcset, an
+ * object's data, href or xlink:href on every element but a and area (a link is followed, not
+ * loaded), and what an iframe's srcdoc loads; values decoded as a browser decodes them; from CSS (style elements and style attributes, comments dropped): url(…), @import
+ * and image-set(…). A data: URL or a #fragment stays inside the board. A board is self-contained:
+ * nothing from the network, and no other file.
+ */
+export function networkLoads(html) {
+  const out = [];
+  const add = (index, url) => {
+    const u = String(url ?? '').trim();
+    if (u && !/^(?:data:|#)/i.test(u)) out.push({ index, url: u });
+  };
+  const css = (index, text) => {
+    const t = text.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, (c) => c.replace(/[^\n]/g, ' '));
+    for (const m of t.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi)) add(index + m.index, m[1] ?? m[2] ?? m[3]);
+    for (const m of t.matchAll(/@import\s+(?:"([^"]*)"|'([^']*)')/gi)) add(index + m.index, m[1] ?? m[2]);
+    for (const s of imageSetUrls(t)) add(index + s.at, s.url);
+  };
+  for (let i = 0; i < html.length; ) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0) break;
+    if (html.startsWith('<!--', lt)) {
+      const end = html.indexOf('-->', lt + 4);
+      i = end < 0 ? html.length : end + 3;
+      continue;
+    }
+    START_TAG.lastIndex = lt;
+    const tag = START_TAG.exec(html);
+    if (!tag) {
+      i = lt + 1;
+      continue;
+    }
+    const element = tag[1].toLowerCase();
+    const from = lt + 1 + tag[1].length;
+    for (const a of tag[2].matchAll(ATTRIBUTE)) {
+      const written = a[2] ?? a[3] ?? a[4];
+      if (written === undefined) continue;
+      const name = a[1].toLowerCase();
+      const at = from + a.index + a[0].length - written.length - (a[4] === undefined ? 1 : 0);
+      const value = decodeValue(written);
+      if (name === 'style') css(at, value);
+      else if (name === 'srcset' || name === 'imagesrcset') for (const c of srcsetUrls(value)) add(at + c.at, c.url);
+      else if (name === 'src' || name === 'poster' || (name === 'data' && element === 'object')) add(at, value);
+      else if ((name === 'href' || name === 'xlink:href') && element !== 'a' && element !== 'area') add(at, value);
+      else if (name === 'srcdoc') for (const l of networkLoads(value)) add(at, l.url);
+    }
+    i = lt + tag[0].length;
+    if (RAW_TEXT.includes(element) && !tag[2].trimEnd().endsWith('/')) {
+      const close = new RegExp(String.raw`<\/${element}(?=[\s/>])`, 'i');
+      const m = close.exec(html.slice(i));
+      const end = m ? i + m.index : html.length;
+      if (element === 'style') css(i, html.slice(i, end));
+      i = end;
+    }
+  }
+  const seen = new Set();
+  return out
+    .sort((a, b) => a.index - b.index)
+    .map(({ index, url }) => ({ line: lineAt(html, index), url }))
+    .filter((o) => !seen.has(`${o.line}\u0000${o.url}`) && seen.add(`${o.line}\u0000${o.url}`));
+}
+
+/** Whether an HTML text holds an element with this id, its value quoted or not. */
+export function holdsId(html, id) {
+  const v = escapeRx(id);
+  return new RegExp(`(?<![\\w:-])id\\s*=\\s*(?:(["'])${v}\\1|${v}(?=[\\s>/]))`).test(html);
 }
 
 /** Everything wrong with one capability folder at `rev`, as [{ file, line?, message }]. */
@@ -108,22 +298,22 @@ export function capabilityProblems(repo, rev, folder, domainIds) {
   if (!ID.test(domain)) out.push({ file: spec, message: `domain "${domain}" is not kebab-case` });
   else if (domainIds && !domainIds.has(domain)) out.push({ file: spec, message: `domain "${domain}" is not in specs/domains.json` });
   if (!ID.test(cap)) out.push({ file: spec, message: `capability "${cap}" is not kebab-case` });
+  const tree = repo.tree(rev);
+  const inFolder = [...tree.files.keys()].filter((f) => f.startsWith(`${folder}/`) && f !== spec);
   const text = repo.text(rev, spec);
   if (text === null) {
     out.push({ file: spec, message: `${folder}/ has no spec.md` });
+    for (const f of inFolder) if (MEDIA.test(f)) out.push({ file: f, message: MEDIA_MESSAGE });
     return out;
   }
   const parsed = parseSpec(text);
   for (const p of parsed.problems) out.push({ file: spec, line: p.line, message: p.message });
-  const tree = repo.tree(rev);
   for (const c of parsed.code) {
     const bad = pathAtRev(tree, c);
     if (bad) out.push({ file: spec, line: 1, message: `code: ${bad}` });
   }
-  const slugs = new Set();
   for (const r of parsed.requirements) {
     for (const s of r.scenarios) {
-      slugs.add(s.slug);
       for (const p of s.proofs) {
         if (p.state !== 'test' || p.error) continue;
         const bad = pathAtRev(tree, p.path);
@@ -131,26 +321,107 @@ export function capabilityProblems(repo, rev, folder, domainIds) {
       }
     }
   }
-  for (const f of repo.tree(rev).files.keys()) {
-    if (!f.startsWith(`${folder}/`) || f === spec) continue;
+  // Each board a Looks line names: present, holding the id, loading nothing from the network.
+  const named = new Set();
+  for (const l of parsed.looks) {
+    if (l.kind !== 'board') continue;
+    named.add(l.board);
+    const file = `${folder}/${l.board}`;
+    const html = repo.text(rev, file);
+    if (html === null) out.push({ file: spec, line: l.n, message: `Looks: no board ${file}` });
+    else if (!holdsId(html, l.id)) out.push({ file: spec, line: l.n, message: `Looks: ${l.board} holds no element with id "${l.id}"` });
+  }
+  for (const board of named) {
+    const file = `${folder}/${board}`;
+    for (const n of networkLoads(repo.text(rev, file) ?? '')) {
+      out.push({ file, line: n.line, message: `loads ${n.url} from outside the board: a board is self-contained, its CSS inline and nothing loaded from the network or another file` });
+    }
+  }
+  for (const f of inFolder) {
     const rest = f.slice(folder.length + 1);
-    const look = /^look\/([^/]+)\.png$/.exec(rest);
-    if (look && slugs.has(look[1])) continue;
-    out.push({
-      file: f,
-      message: look
-        ? `look ${look[1]}.png names no scenario of ${spec} (its slugs: ${[...slugs].join(', ') || 'none'})`
-        : `stray file: a capability folder holds spec.md and look/<scenario-slug>.png`,
-    });
+    if (named.has(rest)) continue;
+    let message = 'stray file: a capability folder holds spec.md and the boards its Looks name, looks/<name>.html';
+    if (MEDIA.test(f)) message = MEDIA_MESSAGE;
+    else if (BOARD.test(rest)) message = `board ${rest} is named by no Looks line of ${spec}`;
+    out.push({ file: f, message });
   }
   return out;
+}
+
+/** The capability (`<domain>/<capability>`) whose boards a path is under, or null. */
+const BOARD_PATH = /^specs\/([^/]+)\/([^/]+)\/looks\//;
+export function boardCapability(p) {
+  const m = BOARD_PATH.exec(p);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/** The change folders this PR adds or modifies (a deleted folder is not written): Map id -> parseChange at head. */
+function writtenChanges(ctx) {
+  const ids = new Set();
+  for (const c of live(ctx)) {
+    const m = /^changes\/([^/]+)\//.exec(c.path);
+    if (m) ids.add(m[1]);
+  }
+  return new Map([...ids].map((id) => [id, parseChange(ctx.repo.text(ctx.head, `changes/${id}/proposal.md`) ?? '')]));
+}
+
+/**
+ * The review rule: a spec this PR adds is `unreviewed`; one whose text or boards this PR changes,
+ * or that a change folder this PR writes names, goes back to `unreviewed`. Any other change of
+ * `review` is a review result, shown as a notice.
+ */
+function reviewFindings(ctx) {
+  const { repo, head } = ctx;
+  const caps = new Set();
+  for (const c of live(ctx)) {
+    const m = SPEC_FILE.exec(c.path);
+    if (m) caps.add(`${m[1]}/${m[2]}`);
+  }
+  for (const c of ctx.changes) {
+    const cap = boardCapability(c.path);
+    if (cap) caps.add(cap);
+  }
+  const naming = new Map();
+  for (const [id, p] of writtenChanges(ctx)) {
+    for (const cap of p.capabilities) {
+      if (!naming.has(cap)) naming.set(cap, []);
+      naming.get(cap).push(id);
+      caps.add(cap);
+    }
+  }
+  const findings = [];
+  let changed = 0;
+  for (const cap of [...caps].sort()) {
+    const file = `specs/${cap}/spec.md`;
+    const text = repo.text(head, file);
+    if (text === null) continue;
+    const now = parseSpec(text);
+    if (!REVIEW_STATES.includes(now.review)) continue; // the format check names it
+    const was = repo.text(ctx.mergeBase, file);
+    const reasons = [];
+    if (was === null) reasons.push('it is new');
+    else if (requirementText(parseSpec(was)) !== requirementText(now)) reasons.push('its spec text changed');
+    if (ctx.changes.some((c) => boardCapability(c.path) === cap)) reasons.push('its boards changed');
+    if (reasons.length) changed++;
+    for (const id of naming.get(cap) ?? []) reasons.push(`this PR carries change folder ${id}, which names it`);
+    if (reasons.length) {
+      if (now.review !== 'unreviewed') {
+        findings.push(fail(`${cap}: review is "${now.review}", but ${reasons.join('; ')}: a new or changed feature goes back to review: unreviewed`, file, 1));
+      }
+      continue;
+    }
+    const before = parseSpec(was).review;
+    if (before !== now.review) findings.push({ ...info(`${cap}: sets review: ${now.review}`, file, 1), notice: true });
+  }
+  return { findings, changed };
 }
 
 export function checkSpecs(ctx) {
   const { repo, head } = ctx;
   const layout = specsLayout(repo, head);
   const hasSpecs = layout.capabilities.size > 0 || repo.has(head, 'specs/domains.json');
-  if (!hasSpecs && layout.stray.length === 0) return result('specs', 'specs', [], 'no specs at head');
+  const hasSystems = repo.has(head, SYSTEMS_FILE) || repo.has(ctx.mergeBase, SYSTEMS_FILE);
+  if (!hasSpecs && !hasSystems && layout.stray.length === 0) return result('specs', 'specs', [], 'no specs at head');
   const domainsAt = new Map();
   const domains = (rev) => {
     if (!domainsAt.has(rev)) domainsAt.set(rev, readDomains(repo, rev));
@@ -161,55 +432,29 @@ export function checkSpecs(ctx) {
     // A PR that writes anything under specs/ answers for the domains its specs are judged against.
     units.push({ changed: touched(ctx, 'specs'), at: (rev) => domains(rev).problems });
   }
+  if (hasSystems) units.push({ changed: ctx.changed.has(SYSTEMS_FILE), at: (rev) => readSystems(repo, rev).problems });
   for (const p of layout.stray) {
-    units.push({
-      changed: ctx.changed.has(p),
-      at: (rev) => (repo.has(rev, p) ? [{ file: p, message: 'stray file: specs/ holds README.md, domains.json and specs/<domain>/<capability>/ folders' }] : []),
-    });
+    const message = MEDIA.test(p) ? MEDIA_MESSAGE : 'stray file: specs/ holds README.md, domains.json, systems.json and specs/<domain>/<capability>/ folders';
+    units.push({ changed: ctx.changed.has(p), at: (rev) => (repo.has(rev, p) ? [{ file: p, message }] : []) });
   }
   for (const folder of layout.capabilities.keys()) {
     units.push({ changed: touched(ctx, folder), at: (rev) => capabilityProblems(repo, rev, folder, domains(rev).ids) });
   }
   const findings = judge(ctx, units);
+  const review = reviewFindings(ctx);
+  findings.push(...review.findings);
 
-  // A scenario whose text changed since the merge base carries no pass or fail, and keeps every
-  // human check it had, as open. A pass or fail written on an unchanged scenario is shown.
-  let changedScenarios = 0;
-  for (const c of live(ctx)) {
-    if (!SPEC_FILE.test(c.path)) continue;
-    const now = parseSpec(repo.text(head, c.path));
-    const before = new Map();
-    for (const r of parseSpec(repo.text(ctx.mergeBase, c.path) ?? '').requirements) for (const s of r.scenarios) before.set(scenarioKey(r, s), s);
-    for (const r of now.requirements) {
-      for (const s of r.scenarios) {
-        const key = scenarioKey(r, s);
-        const was = before.get(key);
-        const where = `${r.name} / ${s.name}`;
-        const verdicts = s.proofs.filter((p) => p.state === 'pass' || p.state === 'fail');
-        if (was && scenarioText(was) === scenarioText(s)) {
-          const old = new Set(was.proofs.map((p) => p.raw));
-          for (const p of verdicts) {
-            if (old.has(p.raw)) continue;
-            findings.push({ ...info(`${where}: writes "${p.raw.replace(/^[-*+]\s+\*\*PROOF\*\*\s*/, '')}"`, c.path, p.n), notice: true });
-          }
-          continue;
-        }
-        changedScenarios++;
-        const why = was ? 'whose text changed since the merge base' : 'new in this PR';
-        for (const p of verdicts) findings.push(fail(`${where}: "${p.check}: ${p.state}" on a scenario ${why}; every human check resets to open`, c.path, p.n));
-        if (!was) continue;
-        const kept = new Set(s.proofs.map((p) => p.check));
-        for (const check of new Set(was.proofs.filter((p) => !p.error && p.check !== 'test').map((p) => p.check))) {
-          if (!kept.has(check)) findings.push(fail(`${where}: drops its "${check}" check; a changed scenario keeps every human check it had at the merge base, as "${check}: open"`, c.path, s.n));
-        }
-      }
+  let scenarios = 0;
+  let untested = 0;
+  for (const f of layout.capabilities.keys()) {
+    const t = repo.text(head, `${f}/spec.md`);
+    if (!t) continue;
+    for (const r of parseSpec(t).requirements) {
+      scenarios += r.scenarios.length;
+      untested += r.scenarios.filter((s) => !isTested(s)).length;
     }
   }
-  const scenarios = [...layout.capabilities.keys()].reduce((n, f) => {
-    const t = repo.text(head, `${f}/spec.md`);
-    return n + (t ? parseSpec(t).requirements.reduce((m, r) => m + r.scenarios.length, 0) : 0);
-  }, 0);
-  return result('specs', 'specs', findings, `${layout.capabilities.size} capabilities, ${scenarios} scenarios, ${changedScenarios} new or changed in this PR`);
+  return result('specs', 'specs', findings, `${layout.capabilities.size} capabilities, ${scenarios} scenarios (${untested} untested), ${review.changed} feature(s) new or changed in this PR`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -224,6 +469,9 @@ function proposalsAt(repo, rev) {
   return out;
 }
 
+/** The files a change folder may hold. */
+export const CHANGE_FILES = ['proposal.md', 'looks.html', 'look.md', 'design.md', 'tasks.md'];
+
 /**
  * Everything wrong with one change folder at `rev`, as [{ file, line?, message }]. A capability it
  * names has a spec at `rev`; one it removes has none at `rev` and had one at the merge base, or is already removed by
@@ -234,6 +482,14 @@ export function changeProblems(repo, rev, folder, mergeBase = rev) {
   const proposal = `${folder}/proposal.md`;
   const out = [];
   if (!ID.test(id)) out.push({ file: proposal, message: `change id "${id}" is not kebab-case` });
+  for (const f of repo.tree(rev).files.keys()) {
+    if (!f.startsWith(`${folder}/`) || CHANGE_FILES.includes(f.slice(folder.length + 1))) continue;
+    out.push({ file: f, message: MEDIA.test(f) ? MEDIA_MESSAGE : `stray file: a change folder holds only ${CHANGE_FILES.join(', ')}` });
+  }
+  // The directions page: self-contained, as a board is.
+  for (const n of networkLoads(repo.text(rev, `${folder}/looks.html`) ?? '')) {
+    out.push({ file: `${folder}/looks.html`, line: n.line, message: `loads ${n.url} from outside the page: the directions page is self-contained, its CSS inline and nothing loaded from the network or another file` });
+  }
   const text = repo.text(rev, proposal);
   if (text === null) {
     out.push({ file: proposal, message: `${folder}/ has no proposal.md` });
@@ -271,39 +527,47 @@ export function checkChanges(ctx) {
   }
   const units = [];
   for (const p of stray) {
-    units.push({ changed: ctx.changed.has(p), at: (rev) => (repo.has(rev, p) ? [{ file: p, message: 'stray file: a change is a folder, changes/<change-id>/' }] : []) });
+    const message = MEDIA.test(p) ? MEDIA_MESSAGE : 'stray file: a change is a folder, changes/<change-id>/';
+    units.push({ changed: ctx.changed.has(p), at: (rev) => (repo.has(rev, p) ? [{ file: p, message }] : []) });
   }
   for (const f of folders) units.push({ changed: touched(ctx, f), at: (rev) => changeProblems(repo, rev, f, ctx.mergeBase) });
   const findings = judge(ctx, units);
 
-  // A PR that changes the requirement text of a spec adds or modifies a change folder that names
-  // the capability; one that deletes a spec, a folder whose `removes` names it. A deleted folder
-  // is not written.
-  const written = new Set();
-  for (const c of live(ctx)) {
-    const m = /^changes\/([^/]+)\//.exec(c.path);
-    if (m) written.add(m[1]);
+  // A PR that changes a spec's text (its spec.md, or a file under its looks/) adds or modifies a
+  // change folder that names the capability; one that deletes a spec, a folder whose `removes`
+  // names it. A deleted folder is not written.
+  const proposals = writtenChanges(ctx);
+  const edits = new Map();
+  const edit = (cap, what) => {
+    if (!edits.has(cap)) edits.set(cap, []);
+    if (!edits.get(cap).includes(what)) edits.get(cap).push(what);
+  };
+  for (const c of ctx.changes) {
+    if (SPEC_FILE.test(c.path)) {
+      const before = repo.text(ctx.mergeBase, c.path);
+      const now = repo.text(head, c.path);
+      const cap = SPEC_FILE.exec(c.path).slice(1).join('/');
+      if (now === null) edit(cap, 'deletes');
+      else if (requirementText(parseSpec(before ?? '')) !== requirementText(parseSpec(now))) edit(cap, 'spec text');
+    }
+    const cap = boardCapability(c.path);
+    if (cap && (repo.has(head, `specs/${cap}/spec.md`) || repo.has(ctx.mergeBase, `specs/${cap}/spec.md`))) edit(cap, 'boards');
   }
-  const proposals = new Map([...written].map((id) => [id, parseChange(repo.text(head, `changes/${id}/proposal.md`) ?? '')]));
-  const edits = ctx.changes.filter((c) => SPEC_FILE.test(c.path)).filter((c) => {
-    const before = repo.text(ctx.mergeBase, c.path);
-    const now = repo.text(head, c.path);
-    return requirementText(parseSpec(before ?? '')) !== requirementText(parseSpec(now ?? ''));
-  });
-  for (const e of edits) {
-    const cap = SPEC_FILE.exec(e.path).slice(1).join('/');
-    const deleted = !repo.has(head, e.path);
+  const written = [...proposals.keys()];
+  for (const [cap, what] of edits) {
+    const deleted = what.includes('deletes');
     // `removes` answers only for a spec this PR deletes; a spec still here needs `capabilities`.
-    const naming = [...proposals].filter(([, p]) => (deleted ? p.removes : p.capabilities).includes(cap)).map(([id]) => id);
+    const naming = [...proposals].filter(([, p]) => (deleted ? p.removes : p.capabilities).includes(cap));
     if (naming.length) continue;
     const need = `a change folder whose "${deleted ? 'removes' : 'capabilities'}" names ${cap}`;
-    const have = written.size ? `the change folder(s) written (${[...written].join(', ')}) do not name it` : 'this PR adds or modifies no change folder';
-    findings.push(fail(`${deleted ? 'deletes' : 'changes the requirement text of'} ${cap}, which needs ${need}; ${have}`, e.path));
+    const have = written.length ? `the change folder(s) written (${written.join(', ')}) do not name it` : 'this PR adds or modifies no change folder';
+    const verb = deleted ? 'deletes' : `changes the ${['spec text', 'boards'].filter((w) => what.includes(w)).join(' and the ')} of`;
+    findings.push(fail(`${verb} ${cap}, which needs ${need}; ${have}`, `specs/${cap}/spec.md`));
   }
   const summary =
     `${folders.size} change folder(s) at head` +
-    (written.size ? `; this PR writes ${[...written].join(', ')}` : '') +
-    (edits.length ? `; ${edits.length} spec(s) with changed requirement text` : '');
+    (written.length ? `; this PR writes ${written.join(', ')}` : '') +
+    (edits.size ? `; ${edits.size} spec(s) with changed text or boards` : '');
   return result('changes', 'change folders', findings, summary);
 }
 
@@ -555,6 +819,24 @@ export function checkKit(ctx) {
 
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The project's design system, config.json `design`: its tokens file and its style brief are
+ * present at head. A config with no `design` block skips it.
+ */
+export function checkDesign(ctx) {
+  const d = ctx.config.design;
+  const title = 'design system (config.json design)';
+  if (!d) return result('design', title, [], 'no design block in config.json', 'skip');
+  const findings = [];
+  for (const key of ['tokens', 'brief']) {
+    if (!ctx.repo.has(ctx.head, d[key])) findings.push(fail(`design.${key}: no file ${d[key]} at head`, d[key]));
+  }
+  const catalogues = d.catalogues ?? [];
+  return result('design', title, findings, `tokens ${d.tokens}, brief ${d.brief}, ${catalogues.length} catalogue(s)${d.render ? ', a render command' : ''}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+
 export const PROTECTED_MESSAGE = 'the owner merges this PR; agents never do';
 
 /**
@@ -579,4 +861,4 @@ export function checkProtected(ctx) {
 /** Checks whose failure fails the run even when it is report-only: safety boundaries. */
 export const ALWAYS_BLOCKING = ['protected'];
 
-export const CHECKS = [checkSpecs, checkChanges, checkHistory, checkBudgets, checkLinks, checkReadme, checkPr, checkKit, checkProtected];
+export const CHECKS = [checkSpecs, checkChanges, checkHistory, checkBudgets, checkLinks, checkReadme, checkPr, checkKit, checkDesign, checkProtected];
