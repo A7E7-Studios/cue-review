@@ -85,8 +85,9 @@ in the `## Review` of the change folders that name it.
 - **The change-level verdicts do not carry over.** `always-on-recording-bar` and
   `macos-camera-capture` were `changes-requested`, answered by `macos-recording-controls`; their
   features start `unreviewed` like every other, as the kit's migration says.
-- **`design.md`'s Human checks tables** in older change folders stay as they were written; the
-  `## Review` sections say the same for the owner.
+- **`design.md`'s Human checks tables and `tasks.md`'s `check:` items** in older change folders
+  stay as they were written: they are the plans those changes were built from, and the `## Review`
+  sections say the same for the owner.
 
 ## Out of scope
 
