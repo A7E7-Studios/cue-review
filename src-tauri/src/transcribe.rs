@@ -2691,6 +2691,7 @@ Speech segment 0: start = 1.0, end = 2.0
             sample: deps::SAMPLE.into(),
             model: "small".into(),
             processor_ms: 2_700,
+            processor_transcribing_ms: Some(2_700),
             cards: vec![CardTime {
                 index: 0,
                 name: "NVIDIA GeForce RTX 5090".into(),
@@ -5656,10 +5657,11 @@ Speech segment 0: start = 1.0, end = 2.0
         let measuring = began.elapsed();
         let measured = deps::load_measured(&root).expect("the measurement was saved");
         eprintln!(
-            "Measured in {measuring:?} with {} ({}): processor {} ms; {}",
+            "Measured in {measuring:?} with {} ({}): processor {} ms, {:?} ms of it transcribing; {}",
             measured.model,
             build.display(),
             measured.processor_ms,
+            measured.processor_transcribing_ms,
             measured
                 .cards
                 .iter()
