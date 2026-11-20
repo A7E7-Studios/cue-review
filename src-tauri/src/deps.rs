@@ -1456,8 +1456,9 @@ pub(crate) fn cancel_measuring_in(state: &Mutex<Measuring>) {
 /// Takes the measurement for the app's worker ([`claim_measuring_in`]): due
 /// when the Vulkan build, the sample and a model to time it with are there,
 /// and the saved measurement is missing, from another computer, made on
-/// another sample, or made with base where a small model is now installed
-/// ([`needs_measuring`]), or the larger model waits to be timed.
+/// another sample, saved without the processor's transcribing time, or made
+/// with base where a small model is now installed ([`needs_measuring`]), or
+/// the larger model waits to be timed.
 pub fn claim_measuring(asked: bool) -> Option<Arc<AtomicBool>> {
     if card_build().is_none() || sample_file().is_none() {
         return None;

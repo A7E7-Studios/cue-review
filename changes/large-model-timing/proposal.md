@@ -23,8 +23,8 @@ microphone track took 113 s with Large on the card and 994 s with small on the p
   whisper's own `total time` less its `load time`, and are compared with the same for small on the
   processor; Large is used when it is no slower: "Loading the larger model does not count against
   it".
-- A run whose log lacks whisper's timings counts its whole run: "A run without whisper's times
-  counts whole".
+- A run whose log lacks whisper's timings, or whose total time is below its load time, counts its
+  whole run: "A run without whisper's times counts whole".
 - A saved measurement without the processor's transcribing time is made again in the background at
   the next start, and the larger model timed again, so a computer that judged Large slow on whole
   runs judges it again without the person asking: "A measurement without transcribing times is
@@ -53,7 +53,7 @@ microphone track took 113 s with Large on the card and 994 s with small on the p
 ## Calls for the owner
 
 - A run whose log has no `load time` or `total time` line (a runtime other than the bundled
-  whisper.cpp build) counts its whole run, as before. The alternative, refusing Large without the
+  whisper.cpp build), or a total time below its load time, counts its whole run, as before. The alternative, refusing Large without the
   lines, would hide it on such a runtime for good.
 - The processor's transcribing time is saved beside its whole-run time
   (`processorTranscribingMs`), and a saved measurement without it is made again: the devices are

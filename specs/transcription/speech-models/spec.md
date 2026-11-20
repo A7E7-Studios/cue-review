@@ -213,7 +213,7 @@ cannot.
 The app SHALL judge the larger model, timed on the graphics card after its download, by the time
 each run spends transcribing, whisper's own total time less the time it spends loading the model,
 against the same for the small model on the processor, and count a run's whole time only when its
-log lacks those times, because loading the 1.6 GB model takes most of a run of the 22 s sample
+log lacks those times or its total time is below its load time, because loading the 1.6 GB model takes most of a run of the 22 s sample
 while a take's pass loads it once for hours of audio: a card whose whole sample run with Large is
 10 ms slower than the processor's with small transcribes a 2.5-hour track in 113 s against the
 processor's 994 s.
@@ -228,7 +228,8 @@ processor's 994 s.
 - **PROOF** desk: open
 
 #### Scenario: A run without whisper's times counts whole
-- **GIVEN** a run of the sample whose log has no load time or no total time
+- **GIVEN** a run of the sample whose log has no load time or no total time, or a total time below
+  its load time
 - **WHEN** the larger model on the card or the small model on the processor is timed
 - **THEN** that run's whole time is compared
 - **PROOF** test: src-tauri/src/deps.rs::tests::loading_the_larger_model_does_not_count_against_it
