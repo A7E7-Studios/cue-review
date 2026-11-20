@@ -53,8 +53,8 @@ microphone track took 113 s with Large on the card and 994 s with small on the p
 ## Calls for the owner
 
 - A run whose log has no `load time` or `total time` line (a runtime other than the bundled
-  whisper.cpp build), or a total time below its load time, counts its whole run, as before. The alternative, refusing Large without the
-  lines, would hide it on such a runtime for good.
+  whisper.cpp build), or a total time below its load time, counts its whole run, as before. The
+  alternative, refusing Large without the lines, would hide it on such a runtime for good.
 - The processor's transcribing time is saved beside its whole-run time
   (`processorTranscribingMs`), and a saved measurement without it is made again: the devices are
   timed again in the background (about 20 s on the owner's PC, then the four runs of Large), once.
