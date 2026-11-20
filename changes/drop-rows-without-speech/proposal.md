@@ -2,7 +2,6 @@
 title: Leave out transcript rows made up over silence
 capabilities:
   - transcription/speech-detection
-review: unreviewed
 ---
 # Leave out transcript rows made up over silence
 
@@ -36,6 +35,11 @@ Measured on the IKA review's Large transcript and speech regions (161 made-up ro
 tracks, 21,745 words), with the rule as built: it leaves out 151 of the 161, and 27 other rows (31
 words, mostly a lone "Ja." or "Okay." that the detector did not hear, some of them likely made up
 too).
+
+## Review
+
+At the desk: the IKA review transcribed again with a build of this change. The rows made up over its
+silences are gone, and short replies beside speech or after a long silence are still there.
 
 ## Settled questions
 

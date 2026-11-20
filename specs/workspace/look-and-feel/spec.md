@@ -1,5 +1,6 @@
 ---
 title: Look and feel
+review: unreviewed
 code:
   - src/app/useContextMenuGuard.ts
   - src/App.tsx
@@ -16,11 +17,11 @@ code:
 ---
 # Look and feel
 
-## Purpose
+## Summary
 
-The behaviour and look every screen of the app shares: what a right-click offers, how scrollbars,
-form fields and dialogs look, and how sharply text renders. It makes the app feel like one desktop
-app rather than a web page in a window.
+What every screen of the app shares: what a right-click offers, how scrollbars, form fields and
+dialogs look, and how sharply text renders. You meet it everywhere in the app, and it makes
+CueReview feel like one desktop app rather than a web page in a window.
 
 ## Requirements
 
@@ -37,14 +38,12 @@ a desktop app, while Cut, Copy and Paste matter where text is typed.
 - **THEN** no menu appears
 - **PROOF** test: src/app/useContextMenuGuard.test.ts::suppresses the webview menu outside text fields
 - **PROOF** test: src/App.test.tsx::cancels the webview menu across the workspace and keeps it in text fields
-- **PROOF** desk: open
 
 #### Scenario: Right-clicking a text field keeps its editing menu
 - **WHEN** the person right-clicks the search field, the vocabulary field, a title being renamed or
   Find in transcript
 - **THEN** the system's editing menu appears, with Cut, Copy and Paste
 - **PROOF** test: src/app/useContextMenuGuard.test.ts::keeps the system menu in text fields
-- **PROOF** desk: open
 
 ### Requirement: Text is sharp at 100% display scaling
 The app SHALL set its text in a hinted build of its typeface, in every weight its styles use,
@@ -58,7 +57,6 @@ weight without its own face would render in the nearest declared weight instead 
 - **AND** the text keeps the Float v2 typeface, sizes and line breaks
 - **PROOF** test: src/ui/fonts.test.ts::ships hinted static Figtree faces
 - **PROOF** test: src/ui/fonts.test.ts::is the family the app and Storybook set text in
-- **PROOF** desk: open
 
 #### Scenario: Every weight the styles use has its own face
 - **WHEN** a style sets a font weight
@@ -77,7 +75,6 @@ square ends cut into a rounded dialog.
 - **THEN** it is a slim rounded thumb on a clear track with no arrow buttons
 - **AND** the thumb gets more visible while the pointer is over it
 - **PROOF** test: src/ui/lookAndFeel.test.ts::every scroll area uses the app scrollbar
-- **PROOF** desk: open
 
 #### Scenario: The Settings scrollbar clears the dialog's corners
 - **GIVEN** Settings taller than the window
@@ -85,7 +82,6 @@ square ends cut into a rounded dialog.
 - **THEN** the scrollbar starts and ends inside the dialog's straight edge, clear of its rounded
   corners
 - **PROOF** test: src/ui/lookAndFeel.test.ts::keeps the dialog scrollbar clear of its corners
-- **PROOF** desk: open
 
 ### Requirement: The Appearance dropdown looks like the app's
 The app SHALL show the Appearance choice as a dropdown in the app's own style, its open list
@@ -100,7 +96,6 @@ typeahead and screen reader support.
 - **AND** choosing the other theme applies it
 - **PROOF** test: src/ui/lookAndFeel.test.ts::styles the Appearance dropdown and its open list
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::keeps the appearance, capability statuses and setup actions
-- **PROOF** desk: open
 
 ### Requirement: Dialogs stand out from the app behind them
 The app SHALL draw a dialog's close button as a crisp 16 px cross, and in the dark theme SHALL
@@ -112,7 +107,6 @@ does not read as in front.
 - **WHEN** a dialog with a close button is open
 - **THEN** its cross is 16 px with 1.5 px strokes
 - **PROOF** test: src/ui/Dialog.test.tsx::draws the close icon at 16 px with 1.5 px strokes
-- **PROOF** desk: open
 
 #### Scenario: A dialog in the dark theme stands out
 - **GIVEN** the dark theme
@@ -120,7 +114,6 @@ does not read as in front.
 - **THEN** the app behind it is darkened to half black and the dialog's surface is lighter than the
   sheet, with its text still legible
 - **PROOF** test: src/ui/lookAndFeel.test.ts::darkens the backdrop in the dark theme and lifts the dialog
-- **PROOF** desk: open
 
 #### Scenario: The light theme keeps its backdrop
 - **GIVEN** the light theme

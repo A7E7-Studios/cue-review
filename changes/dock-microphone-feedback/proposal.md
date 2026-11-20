@@ -2,7 +2,6 @@
 title: Show the microphone's level, name and mute plainly in the recording dock
 capabilities:
   - workspace/recording-dock
-review: unreviewed
 ---
 # Show the microphone's level, name and mute plainly in the recording dock
 
@@ -15,11 +14,10 @@ Wanting to test it, they pressed the dock's microphone button 22 times, muting a
 times, and recorded 13.7 s of silence without noticing, because the muted state was only a
 different icon. Muting also hid the meter, so the dock changed width under the pointer.
 
-- Evidence: `evidence/meter-dark-while-speaking.png`, "I don't know which microphone I'm using
+- Evidence: "I don't know which microphone I'm using
   but it's like I'm basically exactly next to the microphone I think and shows zero, yeah zero
   volume here" at 2:37–2:53 (157914–173594).
-- `evidence/muted-dock-narrower.png` and `evidence/unmuted-dock-wider.png`, the dock muted and
-  unmuted two seconds apart, at 3:06 and 3:08; "maybe it makes sense to still show it or show it
+- Evidence: the dock muted and unmuted two seconds apart, at 3:06 and 3:08; "maybe it makes sense to still show it or show it
   flat or whatever" at 3:08 (188534).
 
 ## What changes
@@ -30,6 +28,12 @@ different icon. Muting also hid the meter, so the dock changed width under the p
 - Muted, the dock says so in words, keeps the meter in place and flat, and keeps its width:
   "Muting the microphone while recording".
 - A mute from the dock lasts for its take: "The next take starts unmuted".
+
+## Review
+
+At the desk, while recording: the dock names the microphone, its meter lights at quiet speech,
+muting says so in words with a flat meter and keeps the dock's width, and the next take starts
+unmuted.
 
 ## Settled questions
 

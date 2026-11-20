@@ -2,7 +2,6 @@
 title: Take the take label and the caption out of the recording dock
 capabilities:
   - workspace/recording-dock
-review: unreviewed
 ---
 # Take the take label and the caption out of the recording dock
 
@@ -13,9 +12,9 @@ session. Stop to process take 3 on this device." The owner found neither adds an
 recording: the transcript already shows "Take 3 · recording", and the label made the dock change
 width between takes.
 
-- Evidence: `evidence/caption-selected.png`, the owner selecting the caption: "this text is also
+- Evidence: the owner selecting the caption: "this text is also
   … can be taken out" at 2:15–2:32.
-- Evidence: `evidence/take-3-label.png`, "take free can also be taken out … not sure if we gain any
+- Evidence: "take free can also be taken out … not sure if we gain any
   information from that so probably I would just take out take free as well" at 2:32 and 3:17–3:24.
 
 ## What changes
@@ -24,12 +23,17 @@ width between takes.
   (scenario: Recording a later take). Screen readers still hear the take in the timer's name, "Take
   N elapsed time".
 
+## Review
+
+At the desk, recording a second take: the dock shows no take label and no caption, and keeps its
+width from take to take.
+
 ## Settled questions
 
 - **Q1 The caption** (review item, 2:15–2:32): taken out, nothing replaces it.
 - **Q2 The "Take N" label** (review item, 2:32 and 3:21): taken out; the transcript's divider names the
   take.
-- **Q3 The look**: the removal as drawn in `look/workspace-recording-take-2.png`. Rejected: changes to
+- **Q3 The look**: the removal as drawn (workspace, recording take 2). Rejected: changes to
   it.
 
 ## Calls for the owner

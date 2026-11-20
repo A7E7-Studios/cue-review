@@ -17,7 +17,7 @@ checkout or worktree.
 
 | Check | Here |
 |---|---|
-| Human checks | `desk`: the app at a Windows computer (recording, playback, the window chrome, an Android device on USB), Storybook, the `cue` CLI's output, a gate run on GitHub. `headset`: a Quest capture checked wearing the headset. The other checks have no use here |
+| Where the owner reviews | at the desk: the app at a Windows computer (recording, playback, the window chrome, an Android device on USB), Storybook, the `cue` CLI's output, a gate run on GitHub; at a Mac: the signed app, for macOS capture and its permissions; with the headset: a Quest capture checked wearing it. A change's `## Review` says which |
 | A build | an installed release: `build <version>` (`0.2.0`), the version the installer's name and Windows' installed-apps list show; its commit is `git rev-parse v<version>^{commit}`, the tag the release was published from. A build from source: `build <short sha>`, its commit that sha; a build from a dirty tree is no build to check. The app shows no version itself |
 | A look | Storybook or the running app, [below](#rendering-a-look) |
 | The other repository | none: CueReview is the whole solution |
@@ -29,7 +29,8 @@ checkout or worktree.
   [changes/README.md](changes/README.md#which-pull-requests-carry-a-change-folder).
 - The domains are in [specs/domains.json](specs/domains.json): capture, transcription, the review
   workspace and the agent CLI.
-- **Only the owner's word sets `pass` or `fail`** on a PROOF line; agents write `test:` and `open`.
+- **Only the owner's word sets a feature's `review`** to `approved` or `changes-requested`, through
+  the triage skill; agents set `unreviewed`, and PROOF lines are `test:` only.
 - **The owner merges** a pull request that touches a protected path (`tools/gate/config.json`
   `protectedPaths`: the kit, `.github/`, the agent rules and settings, the Tauri capabilities and
   configs, the release script, the licence); the gate's `protected` check fails it and an agent
@@ -46,7 +47,7 @@ are in [docs/VERIFICATION.md](docs/VERIFICATION.md#unattended-set); per area:
 | `src/`, `.storybook/`, `index.html`, `package.json`, the Vite or TypeScript config | `npm test`, `npm run build`, `npm run build-storybook` |
 | `src-tauri/` | `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings`, `cargo test --manifest-path src-tauri/Cargo.toml --lib --locked` |
 | Capture, takes, transcription, the CLI, recovery, the window chrome | also the ignored integration tests and `scripts/verify-*` that cover the area: [the tests](docs/VERIFICATION.md#ignored-integration-tests), [the scripts](docs/VERIFICATION.md#scripts) |
-| The kit (a sync) | `cd tools/gate && npm test`, `cd tools/overview && npm test`, `cd tools/kit && npm test`, `cd tools/setup-agents && npm test`, `node tools/kit/sync.mjs --check` |
+| The kit (a sync) | `cd tools/gate && npm test`, `cd tools/overview && npm test`, `cd tools/kit && npm test`, `cd tools/setup-agents && npm test`, `cd tools/solution-map && npm test`, `node tools/kit/sync.mjs --check` |
 
 - **Attended runs** record the screen, a window or the microphone, play tones or move the pointer:
   tell the owner before one starts, and run only the ones the owner agrees to
@@ -93,9 +94,10 @@ Then, inside it, `npm ci` and `node tools/setup-agents/setup.mjs`.
   docs/VERIFICATION.md for the tests, the scripts and the recorded evidence, a tool's README for
   that tool, this file for the rules. Link to a fact's home; never restate it.
 - Living docs (specs, READMEs, docs/ARCHITECTURE.md, this file) state what IS: no history, no
-  status, no pull request numbers or dates outside PROOF lines. Rewrite, don't append. Write a hex
-  colour as inline code.
-- Byte budgets: this file 32 KiB, a README 40 KiB, a spec and each `.md` of a change folder 30 KiB.
+  status, no pull request numbers or dates. Rewrite, don't append. Write a hex colour as inline
+  code.
+- Byte budgets: this file 32 KiB, a README 40 KiB, a spec, a board beside it and each `.md` of a
+  change folder 30 KiB.
 
 ## Commit style
 

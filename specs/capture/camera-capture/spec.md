@@ -1,5 +1,6 @@
 ---
 title: Camera capture
+review: unreviewed
 code:
   - src-tauri/tauri.conf.json
   - src-tauri/Entitlements.plist
@@ -12,10 +13,11 @@ code:
 ---
 # Camera capture
 
-## Purpose
+## Summary
 
-A person can deliberately select a camera to show physical work in a review. On macOS the
-built-in camera supplies a live preview and a recording that can be played back.
+You can choose a camera on purpose as the source of a review, when you need to show physical work.
+On macOS the built-in camera gives a live preview before you record and a recording you can play
+back.
 
 ## Requirements
 
@@ -30,7 +32,6 @@ because listing a camera as a source is useful only when the person can see what
 - **AND** it continues updating while that source is selected in the draft
 - **PROOF** test: src-tauri/src/preview.rs::tests::synthetic_preview_frames_reach_the_viewer
 - **PROOF** test: src/stories/Workspace.stories.tsx::MacCameraSelected
-- **PROOF** desk: open
 
 ### Requirement: Recording can start from a macOS camera preview
 The app SHALL record the selected macOS camera when Record is pressed from its live preview,
@@ -44,7 +45,6 @@ because the preview and recording must cooperate over access to the same camera.
 - **AND** playing it in the app shows the recorded camera view
 - **PROOF** test: src/App.test.tsx::starts a macos camera recording from its preview
 - **PROOF** test: src/stories/Workspace.stories.tsx::MacCameraRecordingFromPreview
-- **PROOF** desk: open
 
 ### Requirement: A blocked camera has a recoverable error
 The app SHALL explain a blocked macOS camera preview or recording and let the person retry after
@@ -59,7 +59,6 @@ resolving the block, because an indefinitely loading view gives no way to recove
 - **PROOF** test: src/App.test.tsx::shows actionable macos camera startup errors
 - **PROOF** test: src-tauri/src/preview.rs::tests::decoder_failure_reports_stderr_and_macos_access_guidance
 - **PROOF** test: src-tauri/src/capture.rs::tests::avfoundation_startup_failures_keep_the_cause_and_offer_recovery
-- **PROOF** desk: open
 
 #### Scenario: A camera preview never displays its first frame
 - **GIVEN** the selected camera's preview stream has started
@@ -83,4 +82,3 @@ resolving the block, because an indefinitely loading view gives no way to recove
 - **THEN** the camera view appears and updates
 - **AND** recording can start without restarting the app
 - **PROOF** test: src/App.test.tsx::retries a blocked camera preview after access is restored
-- **PROOF** desk: open

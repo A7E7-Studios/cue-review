@@ -21,38 +21,14 @@ direction was rendered.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Review | default, light | `look/review-default.png` |
-| Review | default, dark | `look/review-dark.png` |
-| Title bar | window controls, Close hovered | `look/window-controls-close-hover.png` |
-| Title bar | brand and sidebar toggle, dark | `look/brand-and-toggle-dark.png` |
-| Review | sidebar sliding out (90ms in) | `look/sidebar-sliding-out.png` |
-| Review | sidebar hidden | `look/sidebar-hidden.png` |
-
-Review, default, light:
-
-![Review, default, light](look/review-default.png)
-
-Review, default, dark:
-
-![Review, default, dark](look/review-dark.png)
-
-Title bar, window controls, Close hovered:
-
-![Window controls, Close hovered](look/window-controls-close-hover.png)
-
-Title bar, brand and sidebar toggle, dark:
-
-![Brand and sidebar toggle, dark](look/brand-and-toggle-dark.png)
-
-Review, sidebar sliding out:
-
-![Sidebar sliding out](look/sidebar-sliding-out.png)
-
-Review, sidebar hidden:
-
-![Sidebar hidden](look/sidebar-hidden.png)
+| Screen | State |
+|---|---|
+| Review | default, light |
+| Review | default, dark |
+| Title bar | window controls, Close hovered |
+| Title bar | brand and sidebar toggle, dark |
+| Review | sidebar sliding out (90ms in) |
+| Review | sidebar hidden |
 
 ## Components
 

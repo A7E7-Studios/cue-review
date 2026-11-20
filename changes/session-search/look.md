@@ -12,53 +12,23 @@ that Notion, Slack and Linear use: Ctrl+K searches everything, Ctrl+F searches t
 
 Each direction is shown in the default state and in the state that tells the directions apart.
 
-- **B, the title bar field with a dropdown** (`look/directions/b-title-bar-dropdown/`): keeps the
+- **B, the title bar field with a dropdown**: keeps the
   field the owner wanted gone and two search surfaces that look different.
-- **C, one window scoped to the open recording** (`look/directions/c-scoped-window/`): the window
+- **C, one window scoped to the open recording**: the window
   covers the video and transcript being read, and stepping through matches while watching is harder
   than with a find bar.
 
-Direction A as proposed: `look/directions/a-claude-style/`.
-
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Review | sidebar with New session and Search, no title bar field | `look/sidebar-default.png` |
-| Search window | before typing: recent recordings | `look/search-recent.png` |
-| Search window | results, light | `look/search-results-light.png` |
-| Search window | results, dark | `look/search-results-dark.png` |
-| Search window | no matches | `look/search-no-matches.png` |
-| Transcript | Find sliding open (60ms in) | `look/find-sliding-open.png` |
-| Transcript | Find open with a match | `look/find-open.png` |
-
-Review, sidebar with New session and Search:
-
-![Sidebar with Search](look/sidebar-default.png)
-
-Search window, before typing:
-
-![Recent recordings](look/search-recent.png)
-
-Search window, results, light:
-
-![Results, light](look/search-results-light.png)
-
-Search window, results, dark:
-
-![Results, dark](look/search-results-dark.png)
-
-Search window, no matches:
-
-![No matches](look/search-no-matches.png)
-
-Transcript, Find sliding open:
-
-![Find sliding open](look/find-sliding-open.png)
-
-Transcript, Find open:
-
-![Find open](look/find-open.png)
+| Screen | State |
+|---|---|
+| Review | sidebar with New session and Search, no title bar field |
+| Search window | before typing: recent recordings |
+| Search window | results, light |
+| Search window | results, dark |
+| Search window | no matches |
+| Transcript | Find sliding open (60ms in) |
+| Transcript | Find open with a match |
 
 ## Components
 

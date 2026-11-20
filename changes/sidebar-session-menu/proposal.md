@@ -2,7 +2,6 @@
 title: Move to section as a submenu, and new sessions straight into a section
 capabilities:
   - workspace/sidebar
-review: unreviewed
 ---
 # Move to section as a submenu, and new sessions straight into a section
 
@@ -34,6 +33,13 @@ into it, as the Claude app's section headings do.
   that is filed in that section once it records, opening the section if it was collapsed: scenario
   "A person starts a session in a section". It is hidden while recording and while searching:
   scenarios "The + is hidden while recording" and "The + is hidden while searching".
+
+## Review
+
+At the desk, in the sidebar: Move to section opens its submenu with the pointer and the keyboard,
+and stays inside a narrow window; a recording moves into a section or a new one; a section's menu
+offers New section…; the + on a section heading starts a session filed in that section, and is
+hidden while recording or searching.
 
 ## Settled questions
 

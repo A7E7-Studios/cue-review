@@ -2,7 +2,6 @@
 title: Run the speech runtime built for the processor's vector instructions
 capabilities:
   - transcription/speech-runtime
-review: unreviewed
 ---
 # Run the speech runtime built for the processor's vector instructions
 
@@ -13,7 +12,7 @@ and a half after Stop. The bundled whisper.cpp is built with AVX, AVX2, FMA and 
 runs with 4 of the processor's threads, so on the owner's Ryzen 9 9950X (32 threads) one 30-second
 window took 5 s to encode.
 
-- Evidence: `evidence/transcribing-is-super-slow.png`, "transcribing is super slow … when I look at
+- Evidence: "transcribing is super slow … when I look at
   other software like [another dictation app] it's way faster, and then the post processing is …
   also fairly slow, takes quite some time especially for a longer session. We should really look
   into how we can do about the performance." at 0:52–1:15.
@@ -41,6 +40,11 @@ update; with the AVX2 build and 4 threads, 1.5–2.6 s.
 - Final transcription uses half the logical threads (at most 8, at least 4 where there are that
   many), live transcription a quarter (at most 4, at least 2): "Thread counts follow the
   processor".
+
+## Review
+
+At the desk, on a processor with AVX2: a recording with about five minutes of speech is transcribed
+in seconds after Stop.
 
 ## Settled questions
 

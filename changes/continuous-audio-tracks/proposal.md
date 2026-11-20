@@ -2,7 +2,6 @@
 title: Record audio tracks without holes
 capabilities:
   - capture/audio-tracks
-review: unreviewed
 ---
 # Record audio tracks without holes
 
@@ -14,9 +13,9 @@ so a device whose clock runs slow left a short run of zeros between packets, and
 ahead had samples dropped. With the owner's webcam microphone that cut a hole of about 38 samples
 (about 0.8 ms) every 120 ms: 134 holes in 16 s, about 0.67% of the track, heard as crackle.
 
-- Evidence: `evidence/cuereview-mic-spectrum-clicks.png`, the spectrum of the CueReview
+- Evidence: the spectrum of the CueReview
   `mic.wav` (session `3eb5275d-93e9-4a44-97e7-730953652ce3`), each hole a full-height line;
-  `evidence/ableton-mic-spectrum-clean.png`, the same microphone in Ableton, with none. The owner:
+  the same microphone's spectrum in Ableton, with none. The owner:
   "Ableton one is much better than the crackling one".
 
 ## What changes
@@ -29,6 +28,12 @@ ahead had samples dropped. With the owner's webcam microphone that cut a hole of
 - A gap of more than 50 ms between packets stays silence of the gap's length: "System audio is
   silent for a while".
 - Muting still writes silence of the same length: "The microphone is muted for part of a take".
+
+## Review
+
+At the desk, in the app: record a take with the microphone and the computer's audio, muting the
+microphone for a while, and listen to both tracks: no crackle, the audio in step with the video to
+the end, and silence where the computer was quiet or the microphone muted.
 
 ## Settled questions
 

@@ -2,7 +2,6 @@
 title: Stop the webview's page menu on right-click
 capabilities:
   - workspace/look-and-feel
-review: unreviewed
 ---
 # Stop the webview's page menu on right-click
 
@@ -13,7 +12,7 @@ Refresh, Save as, Print, More tools. None of it does anything useful in CueRevie
 app feel like a web page. The owner wants a right-click to offer only what matters there, or
 nothing.
 
-- Evidence: `evidence/workspace-right-click-7m36s.png`, "like right click there's a bit of weird
+- Evidence: "like right click there's a bit of weird
   stuff happening, refresh, save as, print, more tools, like there should be things that either
   matter or they should not exist" at 7:24–7:41. The window recording does not capture the popup
   menu itself; the frame shows the workspace the owner right-clicked.
@@ -26,6 +25,11 @@ nothing.
   menu").
 - The sidebar's own menus are unchanged. Its menu for empty space (New session, New section) is
   the sidebar capability's, built by the sidebar-new-session change.
+
+## Review
+
+At the desk, in the app: right-clicking the workspace, the transcript, the video and the title bar
+shows no menu, and a text field keeps its editing menu.
 
 ## Settled questions
 

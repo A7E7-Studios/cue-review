@@ -3,7 +3,6 @@ title: Transcribe on the graphics card where it is faster
 capabilities:
   - transcription/speech-runtime
   - transcription/speech-models
-review: unreviewed
 ---
 # Transcribe on the graphics card where it is faster
 
@@ -46,6 +45,15 @@ the pinned revision, on ten minutes of German speech with the app's own argument
   model on a fast graphics card", "The larger model transcribes every language", "Without the
   graphics card the small models transcribe", "Choosing Standard goes back to the small models", "A
   slower computer is not offered the larger model".
+
+## Review
+
+At the desk, on the PC with the RTX 5090, in the installed app: the first start measures the devices
+in the background while recording works, then Settings reads "Runs on NVIDIA GeForce RTX 5090" and a
+long recording's transcript is ready sooner; the second start does not measure. Switched off,
+transcription stays on the processor across a restart; testing the graphics card again measures it
+again. Choosing Large shows its download, then a German and an English review both come out with it,
+the English one no worse; choosing Standard goes back to the small models.
 
 ## Settled questions
 

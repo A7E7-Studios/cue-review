@@ -5,7 +5,6 @@ capabilities:
   - workspace/take-playback
   - workspace/recording-dock
   - agent-cli/take-frames
-review: unreviewed
 ---
 # Record more from any source and keep each take's video
 
@@ -39,6 +38,14 @@ command). I would keep the videos themself separate."
   own frame size (`agent-cli/take-frames`).
 - The `SOURCE_GONE` refusal, the source identity check, "Discard take" in the app and its
   `discard_take` command go. `cue discard-take` stays and says that no take waits to be added.
+
+## Review
+
+At the desk: record a take of Display 1, then Record more from a window of another size; both videos
+are kept and the session plays through both. Playing over the boundary, clicking a word of take 2
+and dragging back into take 1 each show the right video; a search result in take 2 opens at that
+moment, paused; the bar in review opens its source picker, and a closed window's refusal reads under
+the bar; `cue frame` in take 2 shows its window at its own size.
 
 ## Settled questions
 

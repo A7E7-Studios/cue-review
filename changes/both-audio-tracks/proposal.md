@@ -3,7 +3,6 @@ title: Transcribe the system audio beside the microphone
 capabilities:
   - transcription/transcribed-tracks
   - transcription/speech-runtime
-review: unreviewed
 ---
 # Transcribe the system audio beside the microphone
 
@@ -34,6 +33,14 @@ and cannot tell who said what.
 - Each track has its own language: "The reviewer and the call speak different languages".
 - An earlier recording gains its second track when it is transcribed again: "An earlier recording
   gains the call on Retry".
+
+## Review
+
+At the desk, with a call: record a short call over the loudspeakers and speak in its pauses, then
+the same on headphones speaking over it. The call's words appear once on the left and yours on the
+right, both ready seconds after Stop; a German call with English remarks names each side's language;
+hovering and tabbing through rows names each row's track without moving any text; `cue transcribe`
+on an earlier German recording adds the call's words.
 
 ## Settled questions
 

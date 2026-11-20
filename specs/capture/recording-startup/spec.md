@@ -1,5 +1,6 @@
 ---
 title: Recording startup
+review: unreviewed
 code:
   - src-tauri/src/capture.rs
   - src-tauri/src/preview.rs
@@ -9,10 +10,11 @@ code:
 ---
 # Recording startup
 
-## Purpose
+## Summary
 
-A selected source starts recording promptly when it supplies video. The reviewer receives a
-failure when the capture process cannot supply usable output.
+When you press Record, recording starts promptly once the chosen source supplies video; on a Mac the
+preview first lets go of the source so the recording can open it. When the capture cannot supply
+usable output, you are told that it failed.
 
 ## Requirements
 
@@ -29,14 +31,12 @@ from receiving its first frame.
 - **AND** stopping normally produces a playable video of the display
 - **PROOF** test: src/stories/Workspace.stories.tsx::MacDisplayRecordingFromPreview
 - **PROOF** test: src-tauri/src/preview.rs::tests::exclusive_source_start_waits_for_preview_worker_to_release_source
-- **PROOF** desk: open
 
 #### Scenario: Returning to preview after a refused macOS recording
 - **GIVEN** the selected macOS source has a live preview
 - **WHEN** recording startup fails after the preview is released
 - **THEN** the app shows the recording error and resumes preview in the draft
 - **PROOF** test: src/App.test.tsx::pauses Capture screen 0 preview during startup and recording, then restores it after a failed start
-- **PROOF** desk: open
 
 ### Requirement: Healthy FFmpeg video reaches recording readiness
 The app SHALL make healthy FFmpeg recording output visible to its startup check promptly,
@@ -48,7 +48,6 @@ because buffered output must not make a working source appear to produce no fram
 - **THEN** recording starts within the startup deadline instead of reporting no frames
 - **AND** stopping produces a decodable video with frames
 - **PROOF** test: src-tauri/src/capture.rs::tests::actual_ffmpeg_recording_startup_flushes_static_and_moving_video
-- **PROOF** desk: open
 
 #### Scenario: Starting a recording of moving content
 - **GIVEN** an accessible source supplies changing video frames
@@ -56,4 +55,3 @@ because buffered output must not make a working source appear to produce no fram
 - **THEN** recording starts within the startup deadline instead of reporting no frames
 - **AND** stopping produces a decodable video with frames
 - **PROOF** test: src-tauri/src/capture.rs::tests::actual_ffmpeg_recording_startup_flushes_static_and_moving_video
-- **PROOF** desk: open

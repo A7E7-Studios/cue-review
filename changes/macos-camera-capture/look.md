@@ -21,23 +21,11 @@ These 1280 by 820 renders use the repository's actual CaptureControls and MediaS
 with illustrative fixtures. They activate no recording hardware. Other selection and unavailable
 source states keep their current presentation.
 
-| Screen | State | Image |
-|---|---|---|
-| Recording draft | Display selected, ordered picker open | `look/source-display.png` |
-| Recording draft | Camera deliberately selected, ordered picker open | `look/source-camera.png` |
-| Recording draft | Camera blocked, existing error and Retry | `look/source-blocked.png` |
-
-Display selected:
-
-![Display selected](look/source-display.png)
-
-Camera selected:
-
-![Camera selected](look/source-camera.png)
-
-Camera blocked:
-
-![Camera blocked](look/source-blocked.png)
+| Screen | State |
+|---|---|
+| Recording draft | Display selected, ordered picker open |
+| Recording draft | Camera deliberately selected, ordered picker open |
+| Recording draft | Camera blocked, existing error and Retry |
 
 ## Components
 

@@ -13,48 +13,24 @@ label and toggle.
 
 Each direction is shown speaking at −38 dBFS and muted.
 
-- **Name label + Mute toggle** (`look/directions/mute-toggle/`): the clearest toggle, but the
+- **Name label + Mute toggle**: the clearest toggle, but the
   widest by about 240 px; the source truncates at the default window width.
-- **Two-line meter** (`look/directions/two-line-meter/`): the smallest, but the name is 11 px
+- **Two-line meter**: the smallest, but the name is 11 px
   secondary text and mute stays a round icon button, the control the owner misread.
 
 ## States drawn
 
-The pick in every state its scenarios name: one PNG per screen and state in `look/`, at most
-1280 px wide. Rendered from boards built of the library's tokens and dock styles.
+The pick was drawn in every state its scenarios name, from boards built of the library's tokens
+and dock styles.
 
-| Screen | State | Image |
-|---|---|---|
-| Recording dock | speaking at −38 dBFS | `look/dock-speaking.png` |
-| Recording dock | muted | `look/dock-muted.png` |
-| Recording dock, dark theme | speaking | `look/dock-speaking-dark.png` |
-| Recording dock, dark theme | muted | `look/dock-muted-dark.png` |
-| Recording dock, narrow window | speaking: the name drops, icon and meter stay | `look/dock-narrow.png` |
-| Recording dock, narrow window | muted | `look/dock-narrow-muted.png` |
-
-Recording dock, speaking at −38 dBFS:
-
-![](look/dock-speaking.png)
-
-Recording dock, muted:
-
-![](look/dock-muted.png)
-
-Recording dock, dark theme, speaking:
-
-![](look/dock-speaking-dark.png)
-
-Recording dock, dark theme, muted:
-
-![](look/dock-muted-dark.png)
-
-Recording dock, narrow window, speaking:
-
-![](look/dock-narrow.png)
-
-Recording dock, narrow window, muted:
-
-![](look/dock-narrow-muted.png)
+| Screen | State |
+|---|---|
+| Recording dock | speaking at −38 dBFS |
+| Recording dock | muted |
+| Recording dock, dark theme | speaking |
+| Recording dock, dark theme | muted |
+| Recording dock, narrow window | speaking: the name drops, icon and meter stay |
+| Recording dock, narrow window | muted |
 
 ## Components
 

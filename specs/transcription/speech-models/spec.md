@@ -1,5 +1,6 @@
 ---
 title: Speech models
+review: unreviewed
 code:
   - src-tauri/src/deps.rs
   - src-tauri/src/settings.rs
@@ -15,21 +16,24 @@ code:
 ---
 # Speech models
 
-## Purpose
+## Summary
 
-Which speech model turns a recording into words, in which language, and how the app gets that
-model onto the computer without the person waiting for it.
+Which speech model turns a recording into words, in which language, and how the app gets that model
+onto the computer without you waiting for it. You meet it in every transcript, and in Settings,
+where you choose a language or leave it on Auto to detect each take's, and choose the larger model
+where the computer can run it.
 
 ## Requirements
 
 ### Requirement: Each take is transcribed in its own language with that language's model
-The app SHALL, while the language in Settings is Auto, which it is until a person chooses another,
-detect each take's language from its first speech, hold the take to it once a guess is confident,
-and transcribe it with that language's model: small.en for English and the multilingual small
-model for every other language, because a recording in another language than the one assumed comes
-out as nonsense, the small models make far fewer mistakes than base (5.8 % against 14.6 % of the
-words of a five-minute review), and a take held to one language never switches language mid-way on
-short or noisy audio. A language chosen in Settings is used for every take without detecting.
+The app SHALL transcribe each take with its language's model, small.en for English and the
+multilingual small model for every other language, using the language chosen in Settings for every
+take without detecting, and, while that language is Auto, which it is until a person chooses
+another, detecting each take's language from its first speech and holding the take to it once a
+guess is confident, because a recording in another language than the one assumed comes out as
+nonsense, the small models make far fewer mistakes than base (5.8 % against 14.6 % of the words of a
+five-minute review), and a take held to one language never switches language mid-way on short or
+noisy audio.
 
 #### Scenario: A German take is transcribed as German without a setting
 - **GIVEN** no language has been chosen and both small models are installed
@@ -38,7 +42,6 @@ short or noisy audio. A language chosen in Settings is used for every take witho
   Stop
 - **PROOF** test: src-tauri/src/settings.rs::tests::a_take_is_held_to_its_detected_language
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::actual_german_speech_is_detected_and_transcribed_as_german
-- **PROOF** desk: open
 
 #### Scenario: An English take stays on small.en
 - **GIVEN** no language has been chosen and both small models are installed
@@ -67,7 +70,6 @@ short or noisy audio. A language chosen in Settings is used for every take witho
 - **WHEN** the person records more, speaking English
 - **THEN** the first take stays German and the new take is transcribed as English
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::each_take_is_detected_on_its_own
-- **PROOF** desk: open
 
 #### Scenario: A chosen language is used without detecting
 - **GIVEN** a language other than Auto is chosen in Settings and its model is installed
@@ -76,7 +78,6 @@ short or noisy audio. A language chosen in Settings is used for every take witho
   spoken
 - **PROOF** test: src-tauri/src/settings.rs::tests::a_chosen_language_is_used_without_detecting
 - **PROOF** test: src-tauri/src/deps.rs::tests::english_uses_small_en_and_every_other_language_the_multilingual_model
-- **PROOF** desk: open
 
 #### Scenario: Transcribing again detects the language again
 - **GIVEN** the language is Auto and a take whose transcript was made in another language than it
@@ -86,7 +87,6 @@ short or noisy audio. A language chosen in Settings is used for every take witho
   language
 - **PROOF** test: src-tauri/src/agent.rs::tests::transcribing_again_detects_the_language_again
 - **PROOF** test: src-tauri/src/transcribe.rs::tests::a_whole_take_pass_detects_under_auto_and_never_under_a_chosen_language
-- **PROOF** desk: open
 
 ### Requirement: The models the language needs arrive in the background
 The app SHALL download the models its language needs by itself whenever one is missing, both small
@@ -102,7 +102,6 @@ ready, because the person should never have to wait for or start a download befo
 - **AND** the next transcription after a model's download finishes uses that model
 - **PROOF** test: src-tauri/src/deps.rs::tests::a_missing_language_model_falls_back_to_base
 - **PROOF** test: src-tauri/src/deps.rs::tests::auto_fetches_both_small_models_english_first
-- **PROOF** desk: open
 
 #### Scenario: Choosing German fetches the German model
 - **GIVEN** the German model is not installed
@@ -111,7 +110,6 @@ ready, because the person should never have to wait for or start a download befo
 - **AND** a download of the English model still running stops and the German one follows
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::shows the language model's download progress
 - **PROOF** test: src-tauri/src/deps.rs::tests::a_language_chosen_during_a_download_gets_its_model
-- **PROOF** desk: open
 
 #### Scenario: A damaged download is never used
 - **WHEN** a model download ends with the wrong size or SHA-256, or is cut off
@@ -133,7 +131,6 @@ out worse, and a fixed language is the remedy when Auto guesses wrong.
 - **WHEN** the person opens Settings
 - **THEN** Settings shows the language and that its models are ready
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::shows the chosen language and its ready models
-- **PROOF** desk: open
 
 #### Scenario: Settings offers Auto and every language
 - **WHEN** the person opens the language list in Settings
@@ -142,7 +139,6 @@ out worse, and a fixed language is the remedy when Auto guesses wrong.
 - **AND** Auto is the one shown as chosen until the person chooses another
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::offers Auto first and every language the speech model knows
 - **PROOF** test: src-tauri/src/settings.rs::tests::every_language_of_the_speech_model_can_be_chosen
-- **PROOF** desk: open
 
 ### Requirement: The transcript says which language each take is in
 The app SHALL show each take's language with its transcript, marked as detected when Auto found
@@ -155,7 +151,6 @@ reads like bad hearing and neither the person nor the agent can tell what to cha
 - **THEN** the take's transcript is marked "German, detected"
 - **AND** a take transcribed in a language chosen in Settings is marked with that language alone
 - **PROOF** test: src/workspace/TranscriptPane.test.tsx::names each take's language and whether it was detected
-- **PROOF** desk: open
 
 #### Scenario: An agent reads each take's language
 - **GIVEN** a session with a German take and an English take
@@ -178,7 +173,6 @@ cannot.
 - **THEN** Settings offers the model choice with Standard chosen, and says that Large is a 1.6 GB
   download
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::offers the larger model on a fast graphics card
-- **PROOF** desk: open
 
 #### Scenario: The larger model transcribes every language
 - **GIVEN** the larger model is chosen and its download has finished
@@ -187,7 +181,6 @@ cannot.
 - **AND** until its download finishes the small models transcribe, and Settings shows its progress
 - **PROOF** test: src-tauri/src/deps.rs::tests::the_larger_model_transcribes_every_language_once_installed
 - **PROOF** test: src/dialogs/SettingsDialog.test.tsx::shows the larger model's download progress
-- **PROOF** desk: open
 
 #### Scenario: Without the graphics card the small models transcribe
 - **GIVEN** the larger model is chosen and installed
@@ -200,7 +193,6 @@ cannot.
 - **WHEN** the person chooses Standard
 - **THEN** takes are transcribed with the small models again, and the large model stays installed
 - **PROOF** test: src-tauri/src/deps.rs::tests::standard_goes_back_to_the_small_models
-- **PROOF** desk: open
 
 #### Scenario: A slower computer is not offered the larger model
 - **GIVEN** a computer that transcribes on its processor, or whose graphics card is too slow for
@@ -225,7 +217,6 @@ whose whole sample run with Large is 10 ms slower than the processor's with smal
 - **THEN** it counts as no slower, and with Large chosen it transcribes every take on the card
 - **AND** Settings and `cue setup` do not report it as slower
 - **PROOF** test: src-tauri/src/deps.rs::tests::loading_the_larger_model_does_not_count_against_it
-- **PROOF** desk: open
 
 #### Scenario: A run without whisper's times counts whole
 - **GIVEN** a run of the sample whose log has no load time or no total time, or a total time below
@@ -252,4 +243,3 @@ the same transcripts the app makes.
 - **THEN** the tools, base and every model the chosen language needs are installed, and `cue setup`
   reports each of them under `languageModels` with `state` `ready`
 - **PROOF** test: src-tauri/src/models.rs::tests::the_language_models_are_reported_in_camel_case
-- **PROOF** desk: open

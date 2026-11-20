@@ -2,7 +2,6 @@
 title: Sharpen text by bundling an auto-hinted Figtree
 capabilities:
   - workspace/look-and-feel
-review: unreviewed
 ---
 # Sharpen text by bundling an auto-hinted Figtree
 
@@ -14,7 +13,7 @@ bundled Figtree variable font is unhinted (it has no TrueType instructions), so 
 fall between pixels and render as grey fringes. Segoe UI, which is hinted, looks crisp beside it at
 the same size.
 
-- Evidence: `evidence/soft-text-1m24s.png`, "it might be because the font size is so small or so,
+- Evidence: "it might be because the font size is so small or so,
   but it has a bit of this feel that it's not sharp, not fully sharp" at 1:24–1:31.
 
 ## What changes
@@ -25,6 +24,11 @@ the same size.
 - Every weight the styles use has its own face, and a test fails when a style uses a weight
   without one ("Every weight the styles use has its own face").
 - `scripts/hint-figtree.py` rebuilds the faces from the font package, reproducibly.
+
+## Review
+
+At the desk, in the installed app at 100% display scaling: text in the review workspace and in
+Settings is sharp in both themes, with the same typeface, sizes and line breaks.
 
 ## Settled questions
 

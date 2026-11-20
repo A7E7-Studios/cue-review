@@ -2,7 +2,6 @@
 title: Style scrollbars, the Appearance dropdown and dialogs like the app
 capabilities:
   - workspace/look-and-feel
-review: unreviewed
 ---
 # Style scrollbars, the Appearance dropdown and dialogs like the app
 
@@ -14,11 +13,11 @@ dialog's rounded corner. The Appearance dropdown was the system's own control. T
 looked jagged. In the dark theme, the backdrop barely dimmed the app behind a dialog, so front and
 back looked alike.
 
-- Evidence: `evidence/settings-scrollbar-3m55s.png`, "scroll bar not styled … it looks a bit weird"
+- Evidence: "scroll bar not styled … it looks a bit weird"
   at 3:40–3:59; the owner found the dialog's transition fine.
-- Evidence: `evidence/appearance-select-and-close-4m23s.png`, "So now here drop down not styled.
+- Evidence: "So now here drop down not styled.
   The X again looks a bit alias" at 4:23.
-- Evidence: `evidence/dark-backdrop-4m53s.png`, "I think the background needs to be even made
+- Evidence: "I think the background needs to be even made
   darker to have this difference" at 4:45–4:59.
 
 ## What changes
@@ -33,6 +32,12 @@ back looked alike.
   ("A dialog in the dark theme stands out"); the light theme keeps its backdrop ("The light theme
   keeps its backdrop").
 
+## Review
+
+At the desk, in the app in the light and dark themes: Settings' slim scrollbar clear of the dialog's
+corners, the Appearance dropdown and its open list in the app's menu style, the crisp close cross,
+and in the dark theme the darker backdrop behind a lighter dialog.
+
 ## Settled questions
 
 - **Q3 Backdrop**: darker in the dark theme only. Rejected: darker in both themes.
@@ -42,7 +47,7 @@ back looked alike.
 ## Calls for the owner
 
 The owner was away when Q8–Q11 were asked and delegated open picks to the agent's recommendation.
-All directions are on the directions page shown to the owner and in `look/directions/`.
+All directions were on the directions page shown to the owner.
 
 - **Q8 Scrollbar: slim rail.** Always visible, so a dialog shows that it scrolls. Hover-reveal
   repainted late in WebView2 (its thumb stayed hidden under the pointer), and Chromium's thin

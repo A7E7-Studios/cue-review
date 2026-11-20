@@ -2,7 +2,6 @@
 title: Choose playback speed from a list, and focus the video by hiding both sidebars
 capabilities:
   - workspace/playback-controls
-review: unreviewed
 ---
 # Choose playback speed from a list, and focus the video by hiding both sidebars
 
@@ -32,6 +31,13 @@ the transcript, then turned into a sidebar icon. The owner named YouTube as the 
 - Focus video hides both the sidebar and the transcript, and restores both on a second press or
   Escape; its icon stays and shows pressed: scenarios "A person focuses the video" and "A person
   leaves focus".
+
+## Review
+
+At the desk, in review: the speed button keeps its width and opens the list of speeds, with the
+pointer and the keyboard; the chosen speed holds for the next recording and after a restart; Focus
+video hides both sidebars and restores them on a second press or Escape, and ends when the sidebar
+is shown or a new recording starts.
 
 ## Settled questions
 

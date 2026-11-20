@@ -1,5 +1,6 @@
 ---
 title: Take frames
+review: unreviewed
 code:
   - src-tauri/src/agent.rs
   - src-tauri/src/cli.rs
@@ -8,11 +9,11 @@ code:
 ---
 # Take frames
 
-## Purpose
+## Summary
 
-The `cue` commands that read video, for frames, clips and moments, take what they export from the
-video of the take the requested time falls in, so an agent asks by session time and never needs to
-know which take or file holds it.
+The `cue` commands that read video, for frames, clips and moments, export from the video of the take
+the requested time falls in. You meet it when an agent looks at a review of several takes: it asks
+by the session's time and never needs to know which take or file holds that moment.
 
 ## Requirements
 
@@ -30,7 +31,6 @@ video and the agent asks by the times the transcript gives it.
 - **PROOF** test: src-tauri/src/takes.rs::tests::video_at_picks_the_take_video_by_session_time
 - **PROOF** test: src-tauri/src/agent.rs::tests::actual_frames_come_from_each_take_video
 - **PROOF** test: src-tauri/src/cli.rs::tests::frame_help_names_the_take_video
-- **PROOF** desk: open
 
 ### Requirement: A clip stays inside one take video
 The `cue` CLI SHALL refuse a clip whose range crosses from one take video into the next, naming the

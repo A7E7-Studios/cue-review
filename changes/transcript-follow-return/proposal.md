@@ -2,7 +2,6 @@
 title: Offer the way back in the transcript only where it leads somewhere
 capabilities:
   - workspace/transcript-following
-review: unreviewed
 ---
 # Offer the way back in the transcript only where it leads somewhere
 
@@ -13,10 +12,10 @@ no playback while recording, and pressing it jumped to the live words. In review
 playing, the same button appeared after a scroll and did nothing, because the transcript only knew
 where to go while the playhead sat on a word.
 
-- Evidence: `evidence/return-to-playback-while-recording.png`, "I don't get this return, I kind of
+- Evidence: "I don't get this return, I kind of
   show it while recording, but there's a return to playback button … it basically does nothing up
   here and it's weird" at 6:07–6:15; "Okay, it jumps down" at 6:27.
-- Evidence: `evidence/return-to-playback-take-5.png`, "if there is no playback or no recording it
+- Evidence: "if there is no playback or no recording it
   still appears this button but it basically does nothing so that's of course not a good thing" at
   8:07.
 
@@ -31,6 +30,13 @@ where to go while the playhead sat on a word.
   yet).
 - Scrolling the followed place back into view resumes following and hides the button (scenario:
   The reader scrolls back to the playing sentence).
+
+## Review
+
+At the desk: scrolling up while recording offers "Back to live", which goes to the newest words; in
+review, scrolling away offers "Return to playback", also in a pause between words, and it scrolls to
+the sentence last reached; before playback reaches a sentence there is no button; scrolling back
+resumes following.
 
 ## Settled questions
 

@@ -11,29 +11,17 @@ tools, and the select follows Microsoft's advice for a choice whose default is t
 
 Each direction is shown in the default state and in the state that tells the directions apart.
 
-- **A Transcription section** (`look/directions/section/`): the pick, drawn first as a direction.
-- **B Inline in Recording tools** (`look/directions/inline/`): mixes a choice into a list of tool
+- **A Transcription section**: the pick, drawn first as a direction.
+- **B Inline in Recording tools**: mixes a choice into a list of tool
   statuses, and its progress bar sits between unrelated rows.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Settings | ready | `look/settings-ready.png` |
-| Settings | downloading the German model | `look/settings-downloading.png` |
-| Settings | download failed | `look/settings-failed.png` |
-
-Settings, ready:
-
-![Settings, ready](look/settings-ready.png)
-
-Settings, downloading the German model:
-
-![Settings, downloading](look/settings-downloading.png)
-
-Settings, download failed:
-
-![Settings, download failed](look/settings-failed.png)
+| Screen | State |
+|---|---|
+| Settings | ready |
+| Settings | downloading the German model |
+| Settings | download failed |
 
 ## Components
 

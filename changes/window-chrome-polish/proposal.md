@@ -2,7 +2,6 @@
 title: Give the title bar room, legible icons and a sliding sidebar
 capabilities:
   - workspace/window-chrome
-review: unreviewed
 ---
 # Give the title bar room, legible icons and a sliding sidebar
 
@@ -12,14 +11,14 @@ On Windows the title bar felt cramped, its window controls were tiny and soft be
 and the sidebar vanished in one frame when its toggle was pressed. The owner met all three while
 reviewing the app itself, comparing it with the Claude desktop app.
 
-- Evidence: `evidence/title-bar-cramped-5m14.png`, "maybe we made the top bar a bit thicker, like
+- Evidence: "maybe we made the top bar a bit thicker, like
   the distance here, it feels a bit cramped" at 5:14.
-- Evidence: `evidence/window-controls-tiny-5m28.png` (the pointer on Close), "those icons are way
+- Evidence: the pointer on Close, "those icons are way
   too tiny. If I compare them with other apps, they are usually much bigger, and that's why I also
   they look a bit weird. The bar itself does not necessarily need to be much bigger, comparing with
   the Claude desktop app it's actually basically the same" at 5:26–5:56.
-- Evidence: `evidence/sidebar-toggle-no-motion-1m51.png` (the pointer on the sidebar toggle,
-  pressed at 1:51), "is missing somehow an animation" at 1:44–1:52.
+- Evidence: the pointer on the sidebar toggle,
+  pressed at 1:51, "is missing somehow an animation" at 1:44–1:52.
 
 ## What changes
 
@@ -33,6 +32,12 @@ reviewing the app itself, comparing it with the Claude desktop app.
   over the sheet in a narrow window". It changes at once beside live video and under reduced
   motion: scenarios "The sidebar changes at once beside live video" and "The sidebar changes at
   once under reduced motion".
+
+## Review
+
+At the desk, on Windows: the title bar's height and the size of the window controls beside another
+Windows app; the sidebar sliding out and in, over the sheet in a narrow window, and changing at once
+beside live video and under reduced motion.
 
 ## Settled questions
 

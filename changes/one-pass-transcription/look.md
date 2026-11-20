@@ -12,25 +12,17 @@ colour asks.
 
 Each direction is shown in the default state and in the state that tells the directions apart.
 
-- **Rows and the live box** (`look/directions/rows-and-box/`): the pick, drawn first as a direction.
-- **One row** (`look/directions/one-row/`): the unsettled words continue the last row in grey
+- **Rows and the live box**: the pick, drawn first as a direction.
+- **One row**: the unsettled words continue the last row in grey
   italics; the grey is barely apart from the transcript's text at AA contrast, so the boundary is
   lost.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| Transcript column | recording, a finished stretch and words still being heard | `look/transcript-recording.png` |
-| Transcript column | the same, dark | `look/transcript-recording-dark.png` |
-
-Transcript column, recording:
-
-![Transcript column, recording](look/transcript-recording.png)
-
-Transcript column, recording, dark:
-
-![Transcript column, recording, dark](look/transcript-recording-dark.png)
+| Screen | State |
+|---|---|
+| Transcript column | recording, a finished stretch and words still being heard |
+| Transcript column | the same, dark |
 
 ## Components
 

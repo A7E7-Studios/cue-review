@@ -10,38 +10,18 @@ named as the model, and it no longer competes with the workspace's own primary a
 
 Each direction is shown in review and with the sidebar's menu open.
 
-- **Button** (`look/directions/button/`): today's white raised button with a plus where the red dot
+- **Button**: today's white raised button with a plus where the red dot
   was; it keeps a second primary-looking control in the sidebar.
 
 ## States drawn
 
-| Screen | State | Image |
-|---|---|---|
-| workspace | review, light | `look/workspace-review-light.png` |
-| workspace | review, dark | `look/workspace-review-dark.png` |
-| workspace | recording (New session dimmed) | `look/workspace-recording.png` |
-| sidebar | menu on empty space | `look/sidebar-menu.png` |
-| sidebar | menu while recording (items disabled) | `look/sidebar-menu-recording.png` |
-
-Workspace, review, light:
-
-![Review, light](look/workspace-review-light.png)
-
-Workspace, review, dark:
-
-![Review, dark](look/workspace-review-dark.png)
-
-Workspace, recording:
-
-![Recording](look/workspace-recording.png)
-
-Sidebar, menu on empty space:
-
-![Sidebar menu](look/sidebar-menu.png)
-
-Sidebar, menu while recording:
-
-![Sidebar menu while recording](look/sidebar-menu-recording.png)
+| Screen | State |
+|---|---|
+| workspace | review, light |
+| workspace | review, dark |
+| workspace | recording (New session dimmed) |
+| sidebar | menu on empty space |
+| sidebar | menu while recording (items disabled) |
 
 ## Components
 

@@ -2,9 +2,6 @@
 title: Show one recording bar with the source and microphone, before and during a take
 capabilities:
   - workspace/recording-dock
-review: changes-requested
-follow-ups:
-  - macos-recording-controls
 ---
 # Show one recording bar with the source and microphone, before and during a take
 
@@ -17,10 +14,10 @@ had closed it ended in "The original window/display for this recording is no lon
 Start a new recording to capture another source." The owner wants one recording bar, always shown,
 with the display and microphone in it, for a new recording, for Record more and while recording.
 
-- Evidence: `evidence/record-button-lost.png`, "if you're not recording the record button feels a
+- Evidence: "if you're not recording the record button feels a
   bit lost … and it's the call to action" at 7:53–8:01 (said while recording, so the frame shows
   the dock it was compared with).
-- Evidence: `evidence/record-more-no-options.png`, "for the record more, I don't have any options
+- Evidence: "for the record more, I don't have any options
   for the audio device and so on" at 0:36.
 
 ## What changes
@@ -39,6 +36,11 @@ with the display and microphone in it, for a new recording, for Record more and 
 - While a take records the bar becomes the dock it is today, Stop where Record was, the pickers
   locked (scenario: Recording a later take, unchanged).
 
+## Review
+
+At the desk, in the app: the recording bar in a new recording, in review, while recording, and after
+the session's window has closed, in the light and dark themes, at 1280×800 and 900×650.
+
 ## Settled questions
 
 - **Q3 The record button** (7:53): unify it with the recording bar, always shown, with display and
@@ -46,8 +48,7 @@ with the display and microphone in it, for a new recording, for Record more and 
   directions. Rejected: a bigger Record in place.
 - **Q7 Switching mid-take**: between takes only; the pickers lock while a take records. Rejected:
   switching continues the take on the new source.
-- **Q12 The direction**: A, the dock always (`look/directions/dock/`). Rejected: B, one merged row
-  (`look/directions/merged-row/`); C, a bar pinned to the bottom (`look/directions/pinned-bar/`).
+- **Q12 The direction**: A, the dock always. Rejected: B, one merged row; C, a bar pinned to the bottom.
 - **Q14 Record's colour**: the recording red. Rejected: the accent purple.
 - **Q15 A microphone level before recording**: left out; the meter shows once a take records.
   Rejected: a backend microphone monitor in this change.

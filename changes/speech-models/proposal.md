@@ -2,7 +2,6 @@
 title: Transcribe with the small model of the chosen language
 capabilities:
   - transcription/speech-models
-review: unreviewed
 ---
 # Transcribe with the small model of the chosen language
 
@@ -13,7 +12,7 @@ The base model mishears too much for a review an agent works from: "take free" f
 take 3's text, so the model is the cause. The app also detects the language anew for every
 recording and every live snapshot, and offers no way to transcribe German.
 
-- Evidence: `evidence/settings-and-misheard-words.png`, the Settings dialog at 4:02 beside the live
+- Evidence: the Settings dialog at 4:02 beside the live
   transcript reading "the fun size" (font size, 1:24) and "take free" (Take 3, 2:34), and the
   owner's words: "the vocabulary, I mean … not sure how helpful it is to have to enter this
   manually. But yeah, I'm not sure what the best way it would be for this."
@@ -37,6 +36,13 @@ threads, against a hand-corrected reference:
   "An upgraded app fetches the English model by itself", "Choosing German fetches the German model",
   "A damaged download is never used".
 - Settings gets a Language choice and the model's state: "The model is ready".
+
+## Review
+
+At the desk, in the app installed over 0.2.0: Settings downloads the English model by itself, then
+shows Language and the English model ready, and a take afterwards gets "font size" and "take three"
+right. Choosing German shows the German model's progress, then ready, and a short German review
+comes out in German, not translated.
 
 ## Settled questions
 
