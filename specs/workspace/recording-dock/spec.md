@@ -39,6 +39,19 @@ because a reviewer expects the same control to open and dismiss its choices.
 - **PROOF** test: scripts/verify-picker-toggle.cjs
 - **PROOF** desk: open
 
+### Requirement: A long picker list scrolls
+The app SHALL let the reviewer scroll a source or microphone list that is taller than the room
+beside its trigger, and keep the list where they scrolled it while the picker stays open, because
+the sources past the fold are otherwise out of reach.
+
+#### Scenario: Scrolling to the last source
+- **GIVEN** the source picker lists more sources than fit in the window
+- **WHEN** the reviewer scrolls the list down
+- **THEN** the list stays where they scrolled it and the last source can be chosen
+- **AND** resizing the window or scrolling the page re-places the picker without moving its list
+- **PROOF** test: src/workspace/CaptureControls.test.tsx::CaptureControls keeps a scrolled list where it is, and re-places the picker for a scroll outside it
+- **PROOF** desk: open
+
 ### Requirement: The dock does not repeat which take is recording
 The app SHALL show no "Take N" label in the dock and no caption under it, because the transcript's
 "Take N · recording" divider already says which take is recording, and a label that appears from

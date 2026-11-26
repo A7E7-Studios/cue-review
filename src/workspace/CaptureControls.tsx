@@ -79,6 +79,9 @@ function Popover({ id, anchor, title, refreshLabel, onRefresh, children }: { id:
     const place = () => {
       const trigger = anchor.current;
       if (!trigger) return;
+      // Measuring the natural height lifts the cap for a moment, which lets the browser clamp a
+      // scrolled list back to its top; the lists keep their place across it.
+      const lists = [...element.querySelectorAll<HTMLElement>('.cr-option-list')].map(list => [list, list.scrollTop] as const);
       element.style.maxHeight = '';
       const rect = element.getBoundingClientRect();
       const next = placePopover(trigger.getBoundingClientRect(), rect, { width: window.innerWidth, height: window.innerHeight });
@@ -86,13 +89,16 @@ function Popover({ id, anchor, title, refreshLabel, onRefresh, children }: { id:
       element.style.top = `${next.top}px`;
       element.style.maxHeight = `${next.maxHeight}px`;
       element.dataset.side = next.side;
+      for (const [list, top] of lists) list.scrollTop = top;
     };
+    // Scrolling the panel's own list moves nothing it is anchored to.
+    const scrolled = (event: Event) => { if (!(event.target instanceof Node && element.contains(event.target))) place(); };
     place();
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
     observer?.observe(element);
     window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
-    return () => { observer?.disconnect(); window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); };
+    window.addEventListener('scroll', scrolled, true);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', place); window.removeEventListener('scroll', scrolled, true); };
   }, [anchor]);
   return <div ref={panel} id={id} className="cr-popover">
     <div className="cr-popover-title"><span>{title}</span><button type="button" className="cr-btn cr-popover-refresh" aria-label={refreshLabel} title={refreshLabel} onClick={onRefresh}><Icon name="refresh" strokeWidth={1.8}/></button></div>

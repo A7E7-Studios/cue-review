@@ -67,6 +67,22 @@ describe('CaptureControls', () => {
       expect(trigger).toHaveFocus();
     }
   });
+  it('keeps a scrolled list where it is, and re-places the picker for a scroll outside it', async () => {
+    const user = userEvent.setup();
+    const many = Array.from({ length: 30 }, (_, index): CaptureSource => ({ id: `window${index}`, name: `Window ${index}`, kind: 'window', available: true }));
+    render(<div className="page"><Harness sources={many} source={many[0]}/></div>);
+    await user.click(screen.getByRole('button', { name: 'Window 0' }));
+    const list = screen.getByRole('group', { name: 'Capture sources' });
+    const panel = list.closest<HTMLElement>('.cr-popover')!;
+    const measured = vi.spyOn(panel, 'getBoundingClientRect');
+    list.scrollTop = 240;
+    list.dispatchEvent(new Event('scroll'));
+    expect(measured).not.toHaveBeenCalled();
+    expect(list.scrollTop).toBe(240);
+    document.querySelector('.page')!.dispatchEvent(new Event('scroll'));
+    expect(measured).toHaveBeenCalled();
+    expect(list.scrollTop).toBe(240);
+  });
   it('moves through options with arrows, Home, End and typeahead, keeping one tab stop', async () => {
     const user = userEvent.setup();
     render(<Harness initialMenu="source"/>);
