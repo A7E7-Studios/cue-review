@@ -26,12 +26,15 @@ export type SourceIdentity =
   | { kind: 'display'; device: string; left: number; top: number; right: number; bottom: number };
 /** A take's own video on the session timeline. Take 1's is `videoPath`, take N's `<folderPath>/takes/<N>/video.mp4`. */
 export interface TakeVideo { take: number; startMs: number; durationMs: number }
+/** A stretch of the session timeline, in ms, with no device video: the device was off USB, and the video is black there. */
+export interface DeviceGap { startMs: number; endMs: number }
 /**
  * `takes` is absent for sessions recorded before takes existed; `sourceIdentity` for sessions recorded before identities
  * and for other sources. `videos` (format 2) lists the take videos by start; without it the session has one video,
- * `videoPath`, from 0 for `durationMs`, the whole timeline's length.
+ * `videoPath`, from 0 for `durationMs`, the whole timeline's length. `deviceGaps` lists, on the session timeline, where an
+ * Android or Quest take's device was gone (a gap that ran until Stop ends at its take's end); absent when there is none.
  */
-export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; sourceIdentity?: SourceIdentity; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[]; formatVersion?: number; videos?: TakeVideo[] }
+export interface Session { id: string; projectId: string|null; name: string; createdAt: string; durationMs: number; status: 'recording' | 'processing' | 'ready' | 'error'; videoPath?: string; folderPath?: string; error?: string; sourceId?: string; sourceIdentity?: SourceIdentity; microphoneId?: string; systemAudio?: boolean; autoTitle?: boolean; takes?: Take[]; formatVersion?: number; videos?: TakeVideo[]; deviceGaps?: DeviceGap[] }
 export interface Word { text: string; startMs: number; endMs: number; seekMs?: number }
 /**
  * A transcript sentence. While recording, the live transcript lists the finished stretches first,
@@ -52,7 +55,14 @@ export interface CaptureSource { id: string; name: string; kind: 'display' | 'wi
 export interface Microphone { id: string; name: string }
 export interface RecordingStatus { state: 'idle' | 'recording' | 'processing' | 'error'; sessionId?: string; elapsedMs?: number; audioLevel?: number; liveTranscript?: Transcript; error?: string; takeIndex?: number; takeOffsetMs?: number;
   /** Counts transcripts refined in the background after Stop; the open recording's transcript is read again when it changes. */
-  transcriptRevision?: number }
+  transcriptRevision?: number;
+  /**
+   * The recorded device's link while an Android or Quest source records (`sourceId` starting `android:`): `reconnecting`
+   * from the moment it drops off USB until its video resumes. Absent for other sources and when nothing records.
+   */
+  device?: DeviceLink }
+/** Whether a recording's Android or Quest device is on USB (`connected`) or gone and awaited (`reconnecting`). */
+export type DeviceLink = 'connected' | 'reconnecting';
 /** A language the speech model knows: its code (`en`, `de`, `nl`) and English name. */
 export interface SpeechLanguage { code: string; name: string }
 /**

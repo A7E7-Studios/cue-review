@@ -65,6 +65,8 @@ export interface SessionHeaderProps {
   /** Another action is under way: the pill stays focusable but inert (aria-disabled). */
   copyBusy?: boolean;
   onCopyForAgent: () => void;
+  /** Device video missing from the session, in ms (its `deviceGaps` summed): a note under the title, NAMES.deviceVideoMissing. None when 0 or absent. */
+  deviceVideoMissingMs?: number;
 }
 
 export interface MediaEmptyState { title: string; detail?: string }
@@ -181,6 +183,8 @@ export interface RecordingDockProps {
   audioLevel?: number;
   /** The locked source, shown as a disabled button. */
   sourceName: string;
+  /** The source is an Android or Quest device that dropped off USB: the source reads NAMES.reconnectingTo(sourceName) in the warning tone, and a status announces it. */
+  reconnecting?: boolean;
   hasMicrophone: boolean;
   /** The recorded microphone's device name; the chip shows its short form and its tooltip the whole name. */
   microphoneName?: string;
@@ -316,6 +320,8 @@ export const NAMES = {
   renameRecording: 'Rename recording',
   openRecordingFolder: 'Open recording folder',
   copyForAgent: 'Copy for agent',
+  /** The note under the title of a session whose device dropped off USB: "12 s of device video missing". */
+  deviceVideoMissing: (duration: string) => `${duration} of device video missing`,
 
   // Media
   capturePreview: 'Capture preview',
@@ -361,6 +367,8 @@ export const NAMES = {
   compact: 'Compact',
   expand: 'Expand',
   stop: 'Stop',
+  /** The dock's source while its device is off USB, and the status that announces it. */
+  reconnectingTo: (source: string) => `Reconnecting to ${source}…`,
 
   // Transcript
   transcript: 'Transcript',

@@ -51,6 +51,18 @@ pub struct Session {
     /// Windows windows and displays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_identity: Option<SourceIdentity>,
+    /// Where an Android or Quest device was gone while it was recorded, on
+    /// the session timeline: the video is black there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_gaps: Vec<DeviceGap>,
+}
+
+/// A stretch of the session timeline without device video.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceGap {
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 /// The newest `session.json` format this build reads and writes.
@@ -380,6 +392,9 @@ pub struct RecordingStatus {
     /// recording's transcript when it changes.
     #[serde(default)]
     pub transcript_revision: u64,
+    /// While a device take records: `"connected"` or `"reconnecting"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -911,6 +926,7 @@ mod tests {
             take_index: None,
             take_offset_ms: None,
             transcript_revision: 0,
+            device: None,
         };
         let idle = serde_json::to_value(&status).unwrap();
         assert!(idle.get("takeIndex").is_none() && idle.get("takeOffsetMs").is_none());

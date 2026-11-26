@@ -43,15 +43,18 @@ export interface RecordingDockViewProps extends RecordingDockProps {
  * It stays on one row: as its slot narrows, workspace.css drops the source and Stop labels to
  * icons (their names stay as visually hidden text), then the microphone's name, then the meter.
  * Stop is always shown. The take shows only in the timer's name and the transcript's divider: the
- * dock keeps one width from take to take, and muting keeps it too.
+ * dock keeps one width from take to take, and muting keeps it too. While a device source is off USB
+ * the source reads "Reconnecting to Quest 3…" in the warning tone, with the refresh icon, and drops
+ * to that icon in the same steps; a status, there from the start so it is announced, says it too.
  */
-export function RecordingDock({ elapsedMs, take, audioLevel, sourceName, hasMicrophone, microphoneName, muted, onMuted, compact, onToggleCompact, stopDisabled, onStop, platform }: RecordingDockViewProps) {
+export function RecordingDock({ elapsedMs, take, audioLevel, sourceName, reconnecting = false, hasMicrophone, microphoneName, muted, onMuted, compact, onToggleCompact, stopDisabled, onStop, platform }: RecordingDockViewProps) {
   const stop = shortcut('r', platform);
   const nameId = useId();
   const level = muted ? 0 : Math.min(1, Math.max(0, Number.isFinite(audioLevel) ? audioLevel! : 0));
   const lit = litBars(level);
   const db = Math.round(levelDb(level));
   const device = microphoneName || 'Microphone';
+  const sourceLabel = reconnecting ? NAMES.reconnectingTo(sourceName) : sourceName;
   return <div className="cr-dock-slot" role="group" aria-label={NAMES.recordingControls} data-compact={compact || undefined}>
     <div className="cr-dock">
       <p className="cr-dock-timer" role="timer" aria-label={NAMES.takeTimer(take)}>
@@ -59,7 +62,11 @@ export function RecordingDock({ elapsedMs, take, audioLevel, sourceName, hasMicr
         <span className="cr-dock-clock">{formatTimer(elapsedMs)}</span>
       </p>
       <span className="cr-dock-divider" aria-hidden="true"/>
-      <button type="button" className="cr-btn cr-dock-source" disabled title={`${sourceName}. The source is locked while recording.`}><Icon name="monitor" strokeWidth={1.7}/><span className="cr-dock-label">{sourceName}</span></button>
+      <button type="button" className="cr-btn cr-dock-source" disabled data-reconnecting={reconnecting || undefined}
+        title={reconnecting ? `${sourceName} dropped off USB. The microphone keeps recording, and ${sourceName} is recorded again once it is back.` : `${sourceName}. The source is locked while recording.`}>
+        <Icon name={reconnecting ? 'refresh' : 'monitor'} strokeWidth={1.7}/><span className="cr-dock-label">{sourceLabel}</span>
+      </button>
+      <span className="cr-dock-status" role="status">{reconnecting ? NAMES.reconnectingTo(sourceName) : ''}</span>
       {/* The chip is the toggle. Its name and meter lie over it as siblings: a button cannot hold a meter, and the
           button's accessible name stays "Mute microphone", with the name (or Muted) as its description; hidden from the
           tree on its own, so a screen reader does not read it twice. */}

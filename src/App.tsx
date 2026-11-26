@@ -17,7 +17,7 @@ import { captureEmptyState, MediaStage, reviewEmptyState } from './workspace/Med
 import type { MediaStageViewProps } from './workspace/MediaStage';
 import { PLAYBACK_SPEEDS, PlaybackBar } from './workspace/PlaybackBar';
 import { RecordingDock } from './workspace/RecordingDock';
-import { SessionHeader } from './workspace/SessionHeader';
+import { deviceVideoMissingMs, SessionHeader } from './workspace/SessionHeader';
 import { TranscriptPane } from './workspace/TranscriptPane';
 import { NAMES } from './workspace/types';
 import type { CaptureMenu, WorkspaceMode } from './workspace/types';
@@ -26,6 +26,8 @@ import type { NameDialogState } from './app/dialogs';
 import { liveTake, recordingTranscript, releaseMedia, sessionVideos, takeInFlight, takeMarks, videoAt } from './app/media';
 import { MICROPHONE_UNAVAILABLE, useCaptureDevices } from './app/useCaptureDevices';
 import { useCompactWindow } from './app/useCompactWindow';
+import { createDeviceLinkSounds } from './app/deviceLinkSounds';
+import type { DeviceLinkSounds } from './app/deviceLinkSounds';
 import { useContextMenuGuard } from './app/useContextMenuGuard';
 import { canTakeFocus, useFocusRescue } from './app/useFocusRescue';
 import { usePreviewStream } from './app/usePreviewStream';
@@ -308,6 +310,12 @@ export default function App({ platform: requested }: AppProps = {}) {
     timer = setTimeout(() => void poll(), POLL_MS);
     return () => { alive = false; clearTimeout(timer); };
   }, [session?.id, session?.status, refreshProjects, report]);
+
+  // The device of an Android or Quest recording: the PC sounds when it drops off USB and when it is recorded again,
+  // for a reviewer in a headset who does not see the dock. The status carries it only while such a source records.
+  const deviceLinkSounds = useRef<DeviceLinkSounds | null>(null);
+  useEffect(() => { (deviceLinkSounds.current ??= createDeviceLinkSounds()).update(status.device); }, [status.device]);
+  useEffect(() => () => { deviceLinkSounds.current?.dispose(); deviceLinkSounds.current = null; }, []);
 
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(timer); }, [notice]);
   // Compact mode exists only while recording.
@@ -755,7 +763,7 @@ export default function App({ platform: requested }: AppProps = {}) {
   };
 
   const dock = <RecordingDock platform={os} elapsedMs={status.elapsedMs || 0} take={status.takeIndex ?? 1} audioLevel={status.audioLevel}
-    sourceName={source?.name || 'Capture source'} hasMicrophone={!!microphoneId && !microphoneUnavailable}
+    sourceName={source?.name || 'Capture source'} reconnecting={status.device === 'reconnecting'} hasMicrophone={!!microphoneId && !microphoneUnavailable}
     microphoneName={microphones.find(item => item.id === microphoneId)?.name} muted={muted} onMuted={next => void changeMuted(next)}
     compact={compact} onToggleCompact={() => void toggleCompact()} stopDisabled={busy} onStop={() => void stop()}/>;
   // The recording bar in a draft and in review: its choices are the app's, and set the next recording's or take's
@@ -813,7 +821,8 @@ export default function App({ platform: requested }: AppProps = {}) {
       <SessionHeader title={draft ? NAMES.newRecording : session?.name || 'Recording'} draft={draft}
         renameDisabled={recording || processing || busy} onRename={() => session && openDialog({ kind: 'renameRecording', id: session.id, value: session.name })}
         onOpenFolder={() => session && void backend.openFolder(session.id).catch(report)}
-        copyDisabled={recording || processing} copyBusy={busy} onCopyForAgent={() => void copyHandoff()}/>
+        copyDisabled={recording || processing} copyBusy={busy} onCopyForAgent={() => void copyHandoff()}
+        deviceVideoMissingMs={mode === 'review' ? deviceVideoMissingMs(session?.deviceGaps) : undefined}/>
       {errorBanner}
       {setupBanner}
       <MediaStage mode={mode} previewUrl={preview || undefined} sourceName={source?.name} previewError={previewError || undefined}

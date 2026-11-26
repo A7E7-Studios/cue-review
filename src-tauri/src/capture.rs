@@ -2,7 +2,7 @@
 #[cfg(any(windows, test))]
 use crate::cursor;
 use crate::{
-    deps,
+    deps, device_link,
     models::{CaptureConfig, CaptureSource, Microphone, Track},
     touch,
 };
@@ -1973,6 +1973,8 @@ impl AudioWorker {
 enum VideoCapture {
     #[cfg(windows)]
     Native(CaptureControl<NativeCapture, String>),
+    /// An Android or Quest device, recorded again after a drop.
+    Device(device_link::DeviceLink),
     Process {
         child: Mutex<Child>,
         input: PathBuf,
@@ -1998,6 +2000,9 @@ pub struct ActiveCapture {
     cursor: Option<pointer::Sampler>,
     /// The touch reader of an Android device capture.
     touch: Option<touch::Reader>,
+    /// Where a device take has no device video, in ms on its clock: set by
+    /// `stop`.
+    device_gaps: Vec<(u64, u64)>,
 }
 pub fn start(config: CaptureConfig, folder: &Path) -> Result<ActiveCapture, String> {
     start_muted(config, folder, false)
@@ -2030,6 +2035,7 @@ pub fn start_muted(
         #[cfg(windows)]
         cursor: None,
         touch: None,
+        device_gaps: Vec::new(),
     };
     capture.audio = Some(AudioWorker::start(
         &config,
@@ -2047,40 +2053,22 @@ pub fn start_muted(
         .map(|serial| touch::Reader::start(serial, folder, capture.epoch));
     let result = (|| {
         if let Some(serial) = config.source_id.strip_prefix("android:") {
-            let input = folder.join("native-video.mkv");
-            // Matroska remains recoverable if a device disconnects or scrcpy must be terminated.
-            let log = File::create(folder.join("capture.log")).map_err(|e| e.to_string())?;
-            let window_title = format!("CueReview capture {}", uuid::Uuid::new_v4());
-            let mut cmd = deps::command("scrcpy")?;
-            cmd.args([
-                "--serial",
-                serial,
-                "--no-audio-playback",
-                "--no-control",
-                "--window-borderless",
-                "--window-x=-10000",
-                "--window-y=-10000",
-                "--window-width=64",
-                "--window-height=64",
-                "--window-title",
-                &window_title,
-                "--max-fps",
-                &config.fps.to_string(),
-            ]);
-            if config.system_audio {
-                cmd.args(["--audio-codec=aac", "--require-audio"]);
-            } else {
-                cmd.arg("--no-audio");
-            }
-            let child = cmd
-                .arg("--record")
-                .arg(&input)
-                .stdin(Stdio::null())
-                .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
-                .stderr(Stdio::from(log))
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            ready_process(child, input, Some(window_title), capture.epoch)
+            // The first segment starts here, as before; the link records again
+            // after a drop.
+            let mut launcher = device_link::ScrcpyLauncher {
+                serial: serial.to_owned(),
+                folder: folder.to_owned(),
+                fps: config.fps,
+                system_audio: config.system_audio,
+                epoch: capture.epoch,
+            };
+            let never = AtomicBool::new(false);
+            let (first, running) = device_link::Launcher::launch(&mut launcher, 0, &never)?;
+            Ok(VideoCapture::Device(device_link::DeviceLink::start(
+                Box::new(launcher),
+                first,
+                running,
+            )))
         } else if is_process_source(&config.source_id) {
             let input = folder.join("native-video.mkv");
             let log = File::create(folder.join("capture.log")).map_err(|e| e.to_string())?;
@@ -2095,7 +2083,8 @@ pub fn start_muted(
                 .stderr(Stdio::from(log))
                 .spawn()
                 .map_err(|e| e.to_string())?;
-            ready_process(child, input, None, capture.epoch)
+            let log = folder.join("capture.log");
+            ready_process(child, input, None, capture.epoch, &log, None)
                 .map_err(|error| recording_startup_error(&config.source_id, error))
         } else {
             #[cfg(not(windows))]
@@ -2145,8 +2134,8 @@ pub fn start_muted(
                     canvas,
                 ));
             }
-            if let (Some(reader), VideoCapture::Process { canvas, .. }) = (reader, &video) {
-                reader.set_canvas(*canvas);
+            if let (Some(reader), VideoCapture::Device(link)) = (reader, &video) {
+                reader.set_canvas(link.first_canvas());
                 capture.touch = Some(reader);
             }
             capture.video = Some(video);
@@ -2193,6 +2182,25 @@ impl ActiveCapture {
     ) -> Result<(u64, u64), String> {
         let tracks = self.audio.as_ref().map_or(&[][..], |audio| &audio.live);
         snapshot_live_track(tracks, track, from_ms, target)
+    }
+    /// `"connected"` or `"reconnecting"` while a device take records, else
+    /// `None`.
+    pub fn device_link(&self) -> Option<&'static str> {
+        match self.video.as_ref() {
+            Some(VideoCapture::Device(link)) if self.stopped.is_none() => {
+                Some(if link.connected() {
+                    "connected"
+                } else {
+                    "reconnecting"
+                })
+            }
+            _ => None,
+        }
+    }
+    /// The stretches a stopped device take has no device video, in ms on its
+    /// clock.
+    pub fn device_gaps(&self) -> &[(u64, u64)] {
+        &self.device_gaps
     }
     pub fn elapsed_ms(&self) -> u64 {
         self.stopped
@@ -2248,6 +2256,8 @@ impl ActiveCapture {
         let mut failures = Vec::new();
         let mut delay = 0.0;
         let mut device_capture = false;
+        // The segments a joined device recording was made of.
+        let mut device_segments: Vec<device_link::Segment> = Vec::new();
         if let Some(mut audio) = self.audio.take() {
             if let Err(e) = audio.stop(duration) {
                 failures.push(e);
@@ -2276,63 +2286,46 @@ impl ActiveCapture {
             }) => {
                 device_capture = window_title.is_some();
                 delay = process_delay;
-                let mut child = child.into_inner().unwrap_or_else(|e| e.into_inner());
-                #[cfg(windows)]
-                if let Some(title) = window_title {
-                    if let Ok(window) = Window::from_name(&title) {
-                        #[link(name = "user32")]
-                        extern "system" {
-                            fn PostMessageW(
-                                hwnd: *mut std::ffi::c_void,
-                                message: u32,
-                                wparam: usize,
-                                lparam: isize,
-                            ) -> i32;
-                        }
-                        // SDL handles WM_CLOSE as a normal quit, flushing its recording.
-                        unsafe {
-                            PostMessageW(window.as_raw_hwnd(), 0x0010, 0, 0);
-                        }
-                    }
-                } else {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(b"q\n");
-                    }
-                }
-                #[cfg(unix)]
-                if device_capture {
-                    // scrcpy flushes its recorder on SIGINT; kill() would discard the trailer.
-                    match std::process::Command::new("/bin/kill")
-                        .args(["-INT", &child.id().to_string()]).status() {
-                        Ok(status) if status.success() => (),
-                        _ => failures.push("Could not request a clean device stop; original tracks will be retained".into()),
-                    }
-                } else if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(b"q\n");
-                }
-                let deadline = Instant::now() + Duration::from_secs(8);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            if !status.success() {
-                                failures.push(format!(
-                                    "Video capture exited: {status}; see capture.log"
-                                ));
-                            }
-                            break;
-                        }
-                        Ok(None) if Instant::now() < deadline => {
-                            thread::sleep(Duration::from_millis(25))
-                        }
-                        _ => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            failures.push("Video capture did not close cleanly; original tracks retained for recovery".into());
-                            break;
-                        }
-                    }
+                let child = child.into_inner().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = stop_process(child, window_title, device_capture) {
+                    failures.push(e);
                 }
                 (input, canvas)
+            }
+            Some(VideoCapture::Device(link)) => {
+                device_capture = true;
+                let recorded = link.stop();
+                failures.extend(recorded.failure);
+                let first = recorded.segments.first().cloned();
+                delay = first.as_ref().map_or(0.0, |first| first.delay);
+                let canvas = first.as_ref().and_then(|first| first.canvas);
+                let gapless = recorded.connected && recorded.segments.len() == 1;
+                match first {
+                    Some(first) if gapless => (first.input, canvas),
+                    _ => match device_link::join(
+                        &self.folder,
+                        &recorded.segments,
+                        recorded.connected,
+                        duration.as_secs_f64(),
+                        self.fps,
+                        self.device_audio,
+                    ) {
+                        Ok(joined) => {
+                            self.device_gaps = joined
+                                .gaps
+                                .iter()
+                                .map(|gap| ((gap.start * 1000.0) as u64, (gap.end * 1000.0) as u64))
+                                .collect();
+                            device_segments = recorded.segments.clone();
+                            (joined.input, canvas)
+                        }
+                        Err(e) => {
+                            failures
+                                .push(format!("The device's recordings could not be joined: {e}"));
+                            (self.folder.join("native-video.mkv"), canvas)
+                        }
+                    },
+                }
             }
             None => (self.folder.join("native-video.mp4"), None),
         };
@@ -2344,7 +2337,29 @@ impl ActiveCapture {
             self.fps,
             self.device_audio,
             device_capture,
-            timing_extra(canvas, cursor, touch_delay),
+            {
+                let mut extra = timing_extra(canvas, cursor, touch_delay);
+                if !device_segments.is_empty() {
+                    extra.insert(
+                        "deviceSegmentStartsMs".into(),
+                        serde_json::json!(device_segments
+                            .iter()
+                            .map(|segment| segment.delay * 1000.0)
+                            .collect::<Vec<_>>()),
+                    );
+                    extra.insert(
+                        "deviceGaps".into(),
+                        serde_json::json!(self
+                            .device_gaps
+                            .iter()
+                            .map(
+                                |&(start, end)| serde_json::json!({"startMs": start, "endMs": end})
+                            )
+                            .collect::<Vec<_>>()),
+                    );
+                }
+                extra
+            },
         ) {
             failures.push(e);
         }
@@ -2355,8 +2370,13 @@ impl ActiveCapture {
             // Finalization has verified the output streams and timeline. The native video
             // is now redundant; keep the lossless audio tracks for transcription/retry.
             // Cleanup failure must not turn a usable recording into a failed recording.
-            if let Err(error) = remove_native_intermediate(&self.folder, &input) {
-                let _ = fs::write(self.folder.join("cleanup.log"), error);
+            let segments = device_segments
+                .iter()
+                .map(|segment| segment.input.as_path());
+            for native in std::iter::once(input.as_path()).chain(segments) {
+                if let Err(error) = remove_native_intermediate(&self.folder, native) {
+                    let _ = fs::write(self.folder.join("cleanup.log"), error);
+                }
             }
             Ok(())
         } else {
@@ -2470,7 +2490,7 @@ pub(crate) fn adb(
     command.args(["-s", serial]).args(args);
     output_until(command, timeout, cancelled)
 }
-fn ffmpeg(command: std::process::Command) -> Result<(), String> {
+pub(crate) fn ffmpeg(command: std::process::Command) -> Result<(), String> {
     let out = output_with_timeout(command, Duration::from_secs(3600))?;
     if out.status.success() {
         Ok(())
@@ -2518,15 +2538,96 @@ fn configure_recording_output(command: &mut std::process::Command, fps: u32) {
     ]);
 }
 
+/// Asks a capture process to finish its file and waits for it: scrcpy
+/// through its window (Windows) or SIGINT, FFmpeg through `q`.
+pub(crate) fn stop_process(
+    mut child: Child,
+    window_title: Option<String>,
+    device_capture: bool,
+) -> Result<(), String> {
+    let mut failures: Vec<String> = Vec::new();
+    #[cfg(windows)]
+    let _ = device_capture;
+    #[cfg(windows)]
+    if let Some(title) = window_title {
+        if let Ok(window) = Window::from_name(&title) {
+            #[link(name = "user32")]
+            extern "system" {
+                fn PostMessageW(
+                    hwnd: *mut std::ffi::c_void,
+                    message: u32,
+                    wparam: usize,
+                    lparam: isize,
+                ) -> i32;
+            }
+            // SDL handles WM_CLOSE as a normal quit, flushing its recording.
+            unsafe {
+                PostMessageW(window.as_raw_hwnd(), 0x0010, 0, 0);
+            }
+        }
+    } else {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(b"q\n");
+        }
+    }
+    #[cfg(unix)]
+    if device_capture {
+        // scrcpy flushes its recorder on SIGINT; kill() would discard the trailer.
+        match std::process::Command::new("/bin/kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+        {
+            Ok(status) if status.success() => (),
+            _ => failures.push(
+                "Could not request a clean device stop; original tracks will be retained".into(),
+            ),
+        }
+    } else if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"q\n");
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    failures.push(format!("Video capture exited: {status}; see capture.log"));
+                }
+                break;
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                failures.push(
+                    "Video capture did not close cleanly; original tracks retained for recovery"
+                        .into(),
+                );
+                break;
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
 fn ready_process(
     mut child: Child,
     input: PathBuf,
     window_title: Option<String>,
     epoch: Instant,
+    log: &Path,
+    cancel: Option<&AtomicBool>,
 ) -> Result<VideoCapture, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut decoded = None;
     loop {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Capture start was cancelled".into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 return Err(format!(
@@ -2543,7 +2644,7 @@ fn ready_process(
         // The delay and the canvas, latched together: a later unreadable log
         // must not lose the canvas while the window is awaited below.
         let ready = if window_title.is_some() {
-            let log = fs::read_to_string(input.with_file_name("capture.log")).unwrap_or_default();
+            let log = fs::read_to_string(log).unwrap_or_default();
             latch_scrcpy_frame(&log, &mut decoded, epoch.elapsed().as_secs_f64())
                 .map(|(delay, canvas)| (delay, Some(canvas)))
         } else {
@@ -2633,7 +2734,11 @@ fn stream_starts(info: &serde_json::Value) -> Result<(f64, f64), String> {
     };
     Ok((start("video")?, start("audio")?))
 }
-fn device_audio_filter(video_host_start: f64, video_pts: f64, audio_pts: f64) -> (f64, String) {
+pub(crate) fn device_audio_filter(
+    video_host_start: f64,
+    video_pts: f64,
+    audio_pts: f64,
+) -> (f64, String) {
     let audio_host_start = video_host_start + audio_pts - video_pts;
     let filter = if audio_host_start >= 0.0 {
         format!(
@@ -2784,7 +2889,7 @@ fn parse_frame_sizes(text: &str) -> Vec<(u32, u32)> {
 /// The frame sizes of a device recording. scrcpy restarts its encoder at a
 /// new size when the display turns between portrait and landscape, and every
 /// restart begins with a key frame, so only key frames are decoded.
-fn device_frame_sizes(input: &Path) -> Result<Vec<(u32, u32)>, String> {
+pub(crate) fn device_frame_sizes(input: &Path) -> Result<Vec<(u32, u32)>, String> {
     let mut probe = deps::command("ffprobe")?;
     probe
         .args([
@@ -2810,9 +2915,196 @@ fn device_frame_sizes(input: &Path) -> Result<Vec<(u32, u32)>, String> {
     Ok(parse_frame_sizes(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// A device recording's end on the take's clock, how it was found, and its
+/// stream metadata: from the Matroska trailer, else from its packets.
+fn device_probe(
+    input: &Path,
+    delay: f64,
+    fps: u32,
+) -> Result<(f64, &'static str, serde_json::Value), String> {
+    let mut probe = deps::command("ffprobe")?;
+    probe
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type,start_time:format=start_time,duration",
+            "-of",
+            "json",
+        ])
+        .arg(input);
+    let output = output_with_timeout(probe, Duration::from_secs(10))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Device timestamps could not be read: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    if let Some(end) = metadata_device_end(&info, delay, fps) {
+        return Ok((end, "containerMetadata", info));
+    }
+    let mut probe = deps::command("ffprobe")?;
+    probe
+        .args([
+            "-v",
+            "error",
+            "-show_packets",
+            "-show_entries",
+            "stream=index,codec_type,start_time:packet=stream_index,pts_time,duration_time",
+            "-of",
+            "json",
+        ])
+        .arg(input);
+    let output = output_with_timeout(probe, Duration::from_secs(10))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Device packet timestamps could not be read: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let end = mapped_device_end(&info, delay, fps)?;
+    Ok((end, "packetTimestamps", info))
+}
+/// Where a device recording whose first frame came at `delay` ends on the
+/// take's clock.
+pub(crate) fn device_end(input: &Path, delay: f64, fps: u32) -> Result<f64, String> {
+    device_probe(input, delay, fps).map(|(end, _, _)| end)
+}
+/// A device recording's first video and audio timestamps.
+pub(crate) fn device_stream_starts(input: &Path) -> Result<(f64, f64), String> {
+    let mut probe = deps::command("ffprobe")?;
+    probe
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type,start_time",
+            "-of",
+            "json",
+        ])
+        .arg(input);
+    let output = output_with_timeout(probe, Duration::from_secs(10))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    stream_starts(&info)
+}
+/// Puts every frame of a device recording onto `canvas` (even sizes) with
+/// stateless filters, timestamps passed through, video only.
+pub(crate) fn letterbox_device(
+    input: &Path,
+    output: &Path,
+    canvas: (u32, u32),
+) -> Result<(), String> {
+    let mut fit = deps::command("ffmpeg")?;
+    fit.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(input)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            &fit_filter(canvas),
+            "-fps_mode",
+            "passthrough",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "15",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(output);
+    if let Err(error) = ffmpeg(fit) {
+        let _ = fs::remove_file(output);
+        return Err(error);
+    }
+    Ok(())
+}
+/// Starts scrcpy recording `serial` into `input`, its output in `log`, and
+/// waits for its first decoded frame, giving up when `cancel` is set.
+pub(crate) fn start_scrcpy(
+    serial: &str,
+    fps: u32,
+    system_audio: bool,
+    input: &Path,
+    log: &Path,
+    epoch: Instant,
+    cancel: &AtomicBool,
+) -> Result<(device_link::Segment, device_link::Running), String> {
+    // Matroska remains recoverable if a device disconnects or scrcpy must be terminated.
+    let log_file = File::create(log).map_err(|e| e.to_string())?;
+    let window_title = format!("CueReview capture {}", uuid::Uuid::new_v4());
+    let mut cmd = deps::command("scrcpy")?;
+    cmd.args([
+        "--serial",
+        serial,
+        "--no-audio-playback",
+        "--no-control",
+        "--window-borderless",
+        "--window-x=-10000",
+        "--window-y=-10000",
+        "--window-width=64",
+        "--window-height=64",
+        "--window-title",
+        &window_title,
+        "--max-fps",
+        &fps.to_string(),
+    ]);
+    if system_audio {
+        cmd.args(["--audio-codec=aac", "--require-audio"]);
+    } else {
+        cmd.arg("--no-audio");
+    }
+    let child = cmd
+        .arg("--record")
+        .arg(input)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            log_file.try_clone().map_err(|e| e.to_string())?,
+        ))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    match ready_process(
+        child,
+        input.to_owned(),
+        Some(window_title),
+        epoch,
+        log,
+        Some(cancel),
+    )? {
+        VideoCapture::Process {
+            child,
+            input,
+            window_title,
+            delay,
+            canvas,
+        } => Ok((
+            device_link::Segment {
+                input,
+                delay,
+                canvas,
+            },
+            device_link::Running {
+                child: child.into_inner().unwrap_or_else(|e| e.into_inner()),
+                window_title,
+            },
+        )),
+        _ => Err("Device capture did not start".into()),
+    }
+}
 /// `timing_extra` holds additional `capture-timing.json` keys.
 #[allow(clippy::too_many_arguments)]
-fn finalize(
+pub(crate) fn finalize(
     folder: &Path,
     input: &Path,
     duration: Duration,
@@ -2831,53 +3123,8 @@ fn finalize(
     }
     let mut output_end = duration.as_secs_f64();
     let native_timing = if device_capture {
-        let mut probe = deps::command("ffprobe")?;
-        probe
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=index,codec_type,start_time:format=start_time,duration",
-                "-of",
-                "json",
-            ])
-            .arg(input);
-        let output = output_with_timeout(probe, Duration::from_secs(10))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Device timestamps could not be read: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        let mut info: serde_json::Value =
-            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
-        let end = if let Some(end) = metadata_device_end(&info, delay, fps) {
-            timing["nativeExtentSource"] = serde_json::json!("containerMetadata");
-            end
-        } else {
-            let mut probe = deps::command("ffprobe")?;
-            probe
-                .args([
-                    "-v",
-                    "error",
-                    "-show_packets",
-                    "-show_entries",
-                    "stream=index,codec_type,start_time:packet=stream_index,pts_time,duration_time",
-                    "-of",
-                    "json",
-                ])
-                .arg(input);
-            let output = output_with_timeout(probe, Duration::from_secs(10))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "Device packet timestamps could not be read: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            info = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
-            timing["nativeExtentSource"] = serde_json::json!("packetTimestamps");
-            mapped_device_end(&info, delay, fps)?
-        };
+        let (end, source, info) = device_probe(input, delay, fps)?;
+        timing["nativeExtentSource"] = serde_json::json!(source);
         timing["mappedNativeEndMs"] = serde_json::json!(end * 1000.0);
         output_end = output_end.max(end);
         Some(info)
@@ -2975,31 +3222,7 @@ fn finalize(
     // timing above still describe the letterboxed video.
     let letterboxed = folder.join("native-video.letterboxed.mkv");
     let video_input = if let [(width, height), _, ..] = frame_sizes.as_slice() {
-        let mut fit = deps::command("ffmpeg")?;
-        fit.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-            .arg(input)
-            .args([
-                "-map",
-                "0:v:0",
-                "-an",
-                "-vf",
-                &fit_filter((width / 2 * 2, height / 2 * 2)),
-                "-fps_mode",
-                "passthrough",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "15",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&letterboxed);
-        if let Err(error) = ffmpeg(fit) {
-            let _ = fs::remove_file(&letterboxed);
-            return Err(error);
-        }
+        letterbox_device(input, &letterboxed, (width / 2 * 2, height / 2 * 2))?;
         letterboxed.as_path()
     } else {
         input
@@ -3099,13 +3322,22 @@ fn validate_final_video(path: &Path, expected_seconds: f64, fps: u32) -> Result<
     Ok(())
 }
 
+/// `native-video.<n>.mkv`: a device recording made after a drop.
+fn is_device_segment(input: &Path) -> bool {
+    input
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("native-video."))
+        .and_then(|rest| rest.strip_suffix(".mkv"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
 fn remove_native_intermediate(folder: &Path, input: &Path) -> Result<(), String> {
     // Never use metadata-provided media paths for cleanup, or traverse a directory.
     if input.parent() != Some(folder)
         || !matches!(
             input.file_name().and_then(|name| name.to_str()),
-            Some("native-video.mp4" | "native-video.mkv")
-        )
+            Some("native-video.mp4" | "native-video.mkv" | device_link::JOINED)
+        ) && !is_device_segment(input)
     {
         return Err("Skipped cleanup of an unexpected native video path.".into());
     }
@@ -3174,7 +3406,14 @@ mod tests {
                 .stderr(Stdio::from(File::create(&log).unwrap()))
                 .spawn()
                 .unwrap();
-            let video = match ready_process(child, input.clone(), None, epoch) {
+            let video = match ready_process(
+                child,
+                input.clone(),
+                None,
+                epoch,
+                &input.with_file_name("capture.log"),
+                None,
+            ) {
                 Ok(video) => video,
                 Err(error) => {
                     failures.push(format!(
@@ -3190,6 +3429,7 @@ mod tests {
                 VideoCapture::Process { child, .. } => child.into_inner().unwrap(),
                 #[cfg(windows)]
                 VideoCapture::Native(_) => panic!("Expected an FFmpeg recording"),
+                VideoCapture::Device(_) => panic!("Expected an FFmpeg recording"),
             };
             // Clean up before asserting the bound, so a timing regression
             // cannot leave an encoder running after the test fails.
@@ -3287,7 +3527,8 @@ mod tests {
             // error must close the child's reader, not leave it waiting here.
             let mut stdin = child.stdin.take().unwrap();
             let epoch = Instant::now();
-            let result = ready_process(child, input, None, epoch);
+            let log = input.with_file_name("capture.log");
+            let result = ready_process(child, input, None, epoch, &log, None);
             let elapsed = epoch.elapsed();
             let error = match result {
                 Err(error) => error,
@@ -3298,6 +3539,7 @@ mod tests {
                 }
                 #[cfg(windows)]
                 Ok(VideoCapture::Native(_)) => panic!("Expected an FFmpeg recording"),
+                Ok(VideoCapture::Device(_)) => panic!("Expected an FFmpeg recording"),
             };
             assert!(
                 stdin.write_all(&[0]).is_err(),
@@ -5975,6 +6217,7 @@ mod tests {
             device_audio: false,
             cursor: None,
             touch: None,
+            device_gaps: Vec::new(),
         };
         let began = Instant::now();
         let stopped = early.stop();
