@@ -2548,6 +2548,9 @@ pub(crate) fn stop_process(
     let mut failures: Vec<String> = Vec::new();
     #[cfg(windows)]
     let _ = device_capture;
+    // Only Windows closes scrcpy through its window.
+    #[cfg(not(windows))]
+    let _ = window_title;
     #[cfg(windows)]
     if let Some(title) = window_title {
         if let Ok(window) = Window::from_name(&title) {
