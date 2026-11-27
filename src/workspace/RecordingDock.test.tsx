@@ -98,6 +98,29 @@ describe('RecordingDock', () => {
     // The chip is the same element, muted or not: workspace.css gives it one width.
     expect(mute.closest('.cr-mic-chip')).toHaveAttribute('data-muted', 'true');
   });
+  it('says it is reconnecting while the device is gone', () => {
+    const { rerender } = render(<RecordingDock {...props({ sourceName: 'Quest 3' })} platform="windows"/>);
+    const dock = screen.getByRole('group', { name: 'Recording controls' });
+    const status = within(dock).getByRole('status');
+    expect(status).toBeEmptyDOMElement();
+    expect(within(dock).getByRole('button', { name: 'Quest 3' })).not.toHaveAttribute('data-reconnecting');
+    // The device drops off USB: the source says so in the warning tone, and the status announces it.
+    rerender(<RecordingDock {...props({ sourceName: 'Quest 3', reconnecting: true })} platform="windows"/>);
+    const source = within(dock).getByRole('button', { name: 'Reconnecting to Quest 3…' });
+    expect(source).toBeDisabled();
+    expect(source).toHaveAttribute('data-reconnecting', 'true');
+    expect(source.title).toMatch(/^Quest 3 dropped off USB\./);
+    expect(within(dock).getByRole('status')).toBe(status);
+    expect(status).toHaveTextContent(/^Reconnecting to Quest 3…$/);
+    // The rest of the dock records on: the timer, the microphone and Stop.
+    expect(within(dock).getByRole('timer', { name: 'Take 2 elapsed time' })).toHaveTextContent('00:08');
+    expect(within(dock).getByRole('button', { name: 'Mute microphone' })).toBeEnabled();
+    expect(within(dock).getByRole('button', { name: 'Stop' })).toBeEnabled();
+    // It is back: the dock is as before.
+    rerender(<RecordingDock {...props({ sourceName: 'Quest 3', reconnecting: false })} platform="windows"/>);
+    expect(within(dock).getByRole('button', { name: 'Quest 3' })).not.toHaveAttribute('data-reconnecting');
+    expect(status).toBeEmptyDOMElement();
+  });
   it('hides the meter and mute without a live microphone', () => {
     render(<RecordingDock {...props({ hasMicrophone: false, audioLevel: undefined })}/>);
     expect(screen.queryByRole('meter')).not.toBeInTheDocument();

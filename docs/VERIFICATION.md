@@ -128,6 +128,7 @@ App and CLI verification scripts use an isolated data folder and never attach to
 | `verify-native-ux.cjs [--review-only \| --compact-only]` | A test app on CDP 9224 with the pipeline fixture | compact mode only | The custom title bar (44 px, 46×44 window controls, drag regions only on empty areas, maximize and restore), shortcut hints on hover, word seek, no marker UI, clipboard handoff (the clipboard's text is saved and put back), speed, playback, rename persistence, both themes through Settings, compact mode at about 520×320 with Minimize and Close only. |
 | `verify-installed.cjs` | The installed app on CDP 9224, `CUEREVIEW_TEST_PID` | the default source, briefly | Close blocked while recording, from the native close message and the Close window button; playback; the light player tokens and the bundled Figtree font; the installed CLI and the agent workflow in the handoff; setup ready. |
 | `verify-device-ui.cjs` | An authorized ADB device in `CUEREVIEW_TEST_DEVICE` (CDP 9226) | the device | Fresh start without a project, device menus, continuous preview, recording, playback, optional grouping. |
+| `verify-device-reconnect.cjs [--manual]` | An authorized ADB device in `CUEREVIEW_TEST_DEVICE` (CDP 9227), a person to pull and replug its USB cable | the device, the default microphone; plays the drop and return sounds | Each drop and return in the status and the dock, then a ready session with one gap per drop, black in each gap, no native intermediates left, the header's missing-video note, and how strongly each sound stands out in the microphone track (inconclusive without speakers). It clicks Record and Stop itself, or with `--manual` the person does and the app stays open. Writes `test-results/device-reconnect/<run>/`. |
 | `inspect-desktop.cjs` | A test app on CDP 9224 | no | Prints the window chrome, theme and visible text, and saves a screenshot. Read-only. |
 
 A test app with CDP 9224 is the release app started with `CUEREVIEW_DATA_DIR` pointing at a dedicated folder (for the review checks, `.local/pipeline-data`) and `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9224`. Normal launches never open the port.
@@ -159,6 +160,7 @@ Tell the user before these start: they record the screen, a window or the microp
 - `node scripts/verify-takes.cjs`, `verify-desktop.cjs` and `verify-native-ux.cjs` against the release build.
 - By hand on Windows: drag the window by the title bar, double-click it to maximize and again to restore, resize from every edge, snap to the screen edges, and try to close while recording (the window must stay open with the guard message).
 - `verify-device-ui.cjs` only when a Quest or Android device is connected and authorized.
+- `verify-device-reconnect.cjs` only when a person can pull and replug the device's cable.
 
 ### Still hardware-only or open
 
@@ -168,6 +170,10 @@ Tell the user before these start: they record the screen, a window or the microp
 - Record more on a real display or window with microphone commentary, including a take from another source and size, and playback across the take boundary in the app.
 - Snap Layouts: the custom maximize button does not show the Windows 11 snap flyout on hover.
 - macOS and Linux: overlay/native chrome, the toolbar, and every capture path still need real-hardware validation; cursor tracking is not implemented there.
+
+### Device reconnect (27 November 2026)
+
+- **Quest 3 behind a dock, USB cable pulled and plugged back in by a person** (`verify-device-reconnect.cjs --manual`, a release build of the branch, an HD Pro Webcam C920 microphone and desk speakers). Two takes of 23 and 12 s, one drop each: the status turned `reconnecting` 5.8–6.0 s in and `connected` 1.2–1.9 s later, and the dock read "Reconnecting to Quest 3…" meanwhile. Each session finished ready 8–17 s after Stop with one gap (4.05–7.80 s, 3.90–6.69 s): it starts at the last frame scrcpy received, about 2 s before scrcpy noticed the drop. The gap was black (the brightest of 32×32 averaged pixels 0) and the Quest showed on both sides; the header read "4 s of device video missing"; no `native-video.*` file was left. Both sounds stood out of the microphone track at 8–76 times the power of nearby frequencies. In the first take the preview stayed on "Preview stream ended" after the return; since the app restarts it, it was live again about a second after the return. Evidence: `test-results/device-reconnect/`.
 
 ### Android touch tracking (29 October 2026)
 

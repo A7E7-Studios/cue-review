@@ -3,6 +3,7 @@ pub mod capture;
 pub mod cli;
 pub mod cursor;
 pub mod deps;
+pub(crate) mod device_link;
 pub mod echo;
 pub mod models;
 pub mod preview;
@@ -1083,6 +1084,17 @@ async fn stop_recording(s: CmdState<'_>) -> Result<Session, String> {
     })
     .await
 }
+/// A stopped take's device gaps, placed on the session timeline at `offset_ms`.
+fn device_gaps(active: &capture::ActiveCapture, offset_ms: u64) -> Vec<DeviceGap> {
+    active
+        .device_gaps()
+        .iter()
+        .map(|&(start, end)| DeviceGap {
+            start_ms: offset_ms + start,
+            end_ms: offset_ms + end,
+        })
+        .collect()
+}
 /// Stops a first recording, exactly as before takes existed.
 fn stop_first(job: ProcessingJob, mut active: capture::ActiveCapture) -> Result<Session, String> {
     let s = job.state.clone();
@@ -1096,9 +1108,11 @@ fn stop_first(job: ProcessingJob, mut active: capture::ActiveCapture) -> Result<
     let stopped = active.stop();
     let elapsed = active.elapsed_ms();
     let mut failure = None;
+    let gaps = device_gaps(&active, 0);
     let saved = s.store.update_session(&id, |session| {
         session.duration_ms = elapsed;
         session.status = "processing".into();
+        session.device_gaps.extend(gaps);
         // A source/device failure may still leave a completely usable final video.
         let video = attach_finished_video(&s.store, session);
         if let Err(error) = stopped.and(video) {
@@ -1145,8 +1159,19 @@ fn stop_take(
     let id = job.id.clone();
     let _ = takes::mark_finalizing(&s.store, &id, take.index, active.elapsed_ms());
     let stopped = active.stop();
+    let gaps = device_gaps(&active, take.offset_ms);
     match takes::finish_capture(&s.store, &id, take.index, stopped) {
         Ok(session) => {
+            let session = if gaps.is_empty() {
+                session
+            } else {
+                s.store
+                    .update_session(&id, |session| {
+                        session.device_gaps.extend(gaps);
+                        Ok(())
+                    })
+                    .unwrap_or(session)
+            };
             std::thread::Builder::new()
                 .name("take".into())
                 .spawn(move || finish_takes(job, vec![take.index]))
@@ -1376,6 +1401,7 @@ async fn get_recording_status(s: CmdState<'_>) -> Result<RecordingStatus, String
                 take_index: runtime.active_take.map(|take| take.index),
                 take_offset_ms: runtime.active_take.map(|take| take.offset_ms),
                 transcript_revision: runtime.refined,
+                device: active.device_link().map(str::to_owned),
             });
         }
         Ok(idle_status(&runtime))
@@ -1398,6 +1424,7 @@ fn idle_status(runtime: &Runtime) -> RecordingStatus {
         take_index: runtime.processing_take.map(|take| take.index),
         take_offset_ms: runtime.processing_take.map(|take| take.offset_ms),
         transcript_revision: runtime.refined,
+        device: None,
     }
 }
 pub fn run() {

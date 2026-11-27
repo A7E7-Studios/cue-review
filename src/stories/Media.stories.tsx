@@ -25,15 +25,18 @@ const takeOneSegments = twoTakeTranscript.segments.filter(segment => segment.sta
 const recordingTakeTwo: Transcript = { takes: [{ index: 1, startMs: 0 }], segments: [...takeOneSegments, ...takeTwoLiveTranscript.segments] };
 
 // 'window-closed': Record more was refused because the window chosen in the bar has closed since it was listed.
-type Scenario = 'review' | 'recording-take-2' | 'recording-first' | 'processing' | 'error' | 'no-speech' | 'no-video' | 'window-closed' | 'draft' | 'draft-unavailable';
+// 'recording-reconnecting': the recorded Quest dropped off USB during take 2. 'device-gap': a session whose Quest was gone for 12 s.
+type Scenario = 'review' | 'recording-take-2' | 'recording-first' | 'recording-reconnecting' | 'processing' | 'error' | 'no-speech' | 'no-video' | 'window-closed' | 'device-gap' | 'draft' | 'draft-unavailable';
 interface Args { scenario: Scenario; compact: boolean; focused: boolean }
 
 function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
-  const review = ['review', 'processing', 'error', 'no-speech', 'no-video', 'window-closed'].includes(scenario);
+  const review = ['review', 'processing', 'error', 'no-speech', 'no-video', 'window-closed', 'device-gap'].includes(scenario);
+  const device = scenario === 'recording-reconnecting' || scenario === 'device-gap';
+  const sourceName = device ? 'Quest 3' : 'Display 1';
   const [recordMoreError, setRecordMoreError] = useState(scenario === 'window-closed' ? WINDOW_CLOSED : '');
   const recording = scenario.startsWith('recording');
   const draft = scenario.startsWith('draft');
-  const take = scenario === 'recording-take-2' ? 2 : 1;
+  const take = scenario === 'recording-take-2' || scenario === 'recording-reconnecting' ? 2 : 1;
   const [time, setTime] = useState(33200);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
@@ -41,7 +44,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   const [muted, setMuted] = useState(false);
   const [compactMode, setCompactMode] = useState(compact);
   const [menu, setMenu] = useState<CaptureMenu | null>(null);
-  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : scenario === 'window-closed' ? 'window' : 'monitor:1');
+  const [sourceId, setSourceId] = useState(scenario === 'draft-unavailable' ? 'camera' : scenario === 'window-closed' ? 'window' : device ? 'quest' : 'monitor:1');
   const [microphoneId, setMicrophoneId] = useState('microphone');
   const [systemAudio, setSystemAudio] = useState(false);
   const [notice, setNotice] = useState('');
@@ -77,7 +80,7 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
     onRefreshSources: () => setNotice('Refresh selected.'), onRefreshMicrophones: () => setNotice('Refresh selected.'), locked: false, busy: false,
   };
   const controls = recording
-    ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={0.0126} sourceName="Display 1" hasMicrophone microphoneName="Microphone (HD Pro Webcam C920)" muted={muted} onMuted={setMuted}
+    ? <RecordingDock elapsedMs={elapsed} take={take} audioLevel={0.0126} sourceName={sourceName} reconnecting={scenario === 'recording-reconnecting'} hasMicrophone microphoneName="Microphone (HD Pro Webcam C920)" muted={muted} onMuted={setMuted}
         compact={compactMode} onToggleCompact={() => setCompactMode(value => !value)} stopDisabled={false} onStop={() => setNotice('Stop selected.')}/>
     : draft
       ? <CaptureControls {...bar}
@@ -95,8 +98,9 @@ function Workspace({ scenario, compact, focused: initiallyFocused }: Args) {
   return <div style={{ height: '100vh', display: 'flex', minWidth: 0, overflow: 'hidden', background: 'var(--color-sheet)', color: 'var(--color-text)' }}>
     <div className="cr-center">
       <SessionHeader title={draft ? 'New recording' : twoTakeSession.name} draft={draft} renameDisabled={recording} onRename={() => setNotice('Rename selected.')}
-        onOpenFolder={() => setNotice('Open folder selected.')} copyDisabled={recording || scenario === 'processing'} onCopyForAgent={() => setNotice('Agent instructions copied.')}/>
-      <MediaStage mode={recording ? 'recording' : draft ? 'draft' : 'review'} focused={focused} sourceName="Display 1"
+        onOpenFolder={() => setNotice('Open folder selected.')} copyDisabled={recording || scenario === 'processing'} onCopyForAgent={() => setNotice('Agent instructions copied.')}
+        deviceVideoMissingMs={scenario === 'device-gap' ? 12000 : undefined}/>
+      <MediaStage mode={recording ? 'recording' : draft ? 'draft' : 'review'} focused={focused} sourceName={sourceName}
         previewUrl={(recording || scenario === 'draft') ? sample : undefined}
         empty={draft ? captureEmptyState({ source }) : reviewEmptyState({ processing: scenario === 'processing' })}
         videoSrc={playable ? sample : undefined} videoProps={{ poster: sample, onClick: () => setPlaying(value => !value) }}>
@@ -112,7 +116,7 @@ const meta = {
   title: 'Workspace/Media',
   component: Workspace,
   args: { scenario: 'review', compact: false, focused: false },
-  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-first', 'processing', 'error', 'no-speech', 'no-video', 'window-closed', 'draft', 'draft-unavailable'] } },
+  argTypes: { scenario: { control: 'select', options: ['review', 'recording-take-2', 'recording-first', 'recording-reconnecting', 'processing', 'error', 'no-speech', 'no-video', 'window-closed', 'device-gap', 'draft', 'draft-unavailable'] } },
   render: args => <Workspace key={`${args.scenario}-${args.compact}-${args.focused}`} {...args}/>,
   globals: { viewport: { value: 'desktop', isRotated: false } },
 } satisfies Meta<typeof Workspace>;
@@ -130,6 +134,24 @@ export const RecordingTakeTwoSmallWindow: Story = { args: { scenario: 'recording
 export const RecordingFirstTake: Story = { args: { scenario: 'recording-first' } };
 export const RecordingCompact: Story = { args: { scenario: 'recording-take-2', compact: true }, globals: { viewport: { value: 'compact', isRotated: false } } };
 export const RecordingCompactDark: Story = { args: { scenario: 'recording-take-2', compact: true }, globals: { viewport: { value: 'compact', isRotated: false }, theme: 'dark' } };
+export const RecordingReconnecting: Story = {
+  args: { scenario: 'recording-reconnecting' },
+  play: async ({ canvasElement }) => {
+    const dock = within(within(canvasElement).getByRole('group', { name: 'Recording controls' }));
+    await expect(dock.getByRole('button', { name: 'Reconnecting to Quest 3…' })).toBeDisabled();
+    await expect(dock.getByRole('status')).toHaveTextContent('Reconnecting to Quest 3…');
+  },
+};
+export const RecordingReconnectingDark: Story = { args: { scenario: 'recording-reconnecting' }, globals: { theme: 'dark' } };
+export const RecordingReconnectingSmallWindow: Story = { args: { scenario: 'recording-reconnecting' }, globals: { viewport: { value: 'small', isRotated: false } } };
+export const RecordingReconnectingCompact: Story = { args: { scenario: 'recording-reconnecting', compact: true }, globals: { viewport: { value: 'compact', isRotated: false } } };
+export const ReviewDeviceVideoMissing: Story = {
+  args: { scenario: 'device-gap' },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByText('12 s of device video missing')).toBeVisible();
+  },
+};
+export const ReviewDeviceVideoMissingDark: Story = { args: { scenario: 'device-gap' }, globals: { theme: 'dark' } };
 export const Processing: Story = { args: { scenario: 'processing' } };
 export const TranscriptError: Story = { args: { scenario: 'error' } };
 export const NoSpeech: Story = { args: { scenario: 'no-speech' } };

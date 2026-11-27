@@ -506,6 +506,7 @@ impl Store {
             format_version: 1,
             videos: Vec::new(),
             source_identity: None,
+            device_gaps: Vec::new(),
         };
         self.save_session(&s)?;
         Ok(s)

@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import { SessionHeader } from './SessionHeader';
+import { deviceVideoMissingMs, formatMissing, SessionHeader } from './SessionHeader';
 import type { SessionHeaderProps } from './types';
 
 const props = (overrides: Partial<SessionHeaderProps> = {}): SessionHeaderProps => ({
@@ -29,6 +29,25 @@ describe('SessionHeader', () => {
     expect(screen.getByRole('button', { name: 'Copy for agent' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Library selection and details' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Open recording folder' })).toBeEnabled();
+  });
+  it('notes the device video a take is missing', () => {
+    // A Quest was gone for 12 s in take 1 and 0.4 s in take 2: the session notes the total, under the title.
+    const missing = deviceVideoMissingMs([{ startMs: 30000, endMs: 41600 }, { startMs: 95000, endMs: 95400 }]);
+    expect(missing).toBe(12000);
+    const { rerender } = render(<SessionHeader {...props({ deviceVideoMissingMs: missing })}/>);
+    const note = screen.getByText('12 s of device video missing');
+    expect(note.closest('header')).toBe(screen.getByRole('banner'));
+    expect(screen.getByRole('heading', { level: 1, name: 'Library selection and details' })).toBeVisible();
+    expect(screen.getByRole('heading', { level: 1 })).not.toContainElement(note);
+    expect(note.title).toMatch(/black/);
+    rerender(<SessionHeader {...props({ deviceVideoMissingMs: 183000 })}/>);
+    expect(screen.getByText('3 min 3 s of device video missing')).toBeVisible();
+    // No gaps, or a draft: no note.
+    rerender(<SessionHeader {...props({ deviceVideoMissingMs: deviceVideoMissingMs(undefined) })}/>);
+    expect(screen.queryByText(/of device video missing/)).not.toBeInTheDocument();
+    rerender(<SessionHeader {...props({ title: 'New recording', draft: true, deviceVideoMissingMs: 12000 })}/>);
+    expect(screen.queryByText(/of device video missing/)).not.toBeInTheDocument();
+    expect([400, 59600, 60000, 3723000].map(formatMissing)).toEqual(['1 s', '1 min', '1 min', '1 h 2 min 3 s']);
   });
   it('shows a plain title and no actions for a draft', () => {
     render(<SessionHeader {...props({ title: 'New recording', draft: true })}/>);

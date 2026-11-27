@@ -68,6 +68,13 @@
 .cr-rename:disabled { background: transparent; color: inherit; opacity: 1; cursor: default; }
 .cr-rename:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 0; }
 .cr-session-actions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+/* The title and, for a session whose device dropped off USB, a meta line under it. */
+.cr-session-heading { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cr-session-heading > .cr-session-title { flex: none; }
+.cr-session-note {
+  margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--color-text-tertiary); font-size: var(--font-size-meta); line-height: 1.4;
+}
 
 /* Media stage (decision 1). The stage fills the space under the title; the media
    box is sized by mediaFit.ts and the controls slot sits directly under it. */
@@ -199,6 +206,15 @@
 }
 .cr-dock-source > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cr-dock-source svg { width: 17px; height: 17px; }
+/* A device off USB: the source reads "Reconnecting to …" in the meter's high colour, the dock's
+   warning tone, over a tint of it. It may grow to 260px, then truncates and compacts as a name does. */
+.cr-dock-source[data-reconnecting] {
+  --cr-bg-disabled: color-mix(in srgb, var(--color-meter-high) 16%, transparent);
+  --cr-fg-disabled: color-mix(in srgb, var(--color-meter-high) 75%, var(--color-dock-text));
+  max-width: 260px;
+}
+.cr-dock-source[data-reconnecting] svg { color: var(--color-meter-high); }
+.cr-dock-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .cr-dock-button { --cr-fg: var(--color-dock-text); --cr-bg-hover: rgba(255, 255, 255, .08); width: var(--size-dock-control); height: var(--size-dock-control); border-radius: 50%; }
 .cr-dock-button svg { width: 18px; height: 18px; }
 /* The microphone chip names the microphone, holds the meter and mutes. It keeps one width muted or
