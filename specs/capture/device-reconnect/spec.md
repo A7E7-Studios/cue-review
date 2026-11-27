@@ -34,6 +34,7 @@ review.
 - **THEN** device video resumes in the same take, at its place on the take's timeline
 - **AND** the microphone track has no gap
 - **PROOF** test: src-tauri/src/device_link.rs::tests::device_recorder_records_again_after_the_device_returns
+- **PROOF** test: scripts/verify-device-reconnect.cjs
 - **PROOF** headset: open
 
 #### Scenario: The device is not back before Stop
@@ -64,9 +65,11 @@ look at the PC.
 - **GIVEN** a take records a device
 - **WHEN** the device drops off USB, then returns
 - **THEN** the PC plays the connection-lost sound and the dock says it is reconnecting to the device
-- **AND** when device video resumes, the PC plays the reconnected sound and the dock is as before
+- **AND** when device video resumes, the PC plays the reconnected sound, the dock is as before and the live preview starts again
 - **PROOF** test: src/workspace/RecordingDock.test.tsx::RecordingDock says it is reconnecting while the device is gone
 - **PROOF** test: src/app/deviceLinkSounds.test.ts::device link sounds play once for each drop and each return
+- **PROOF** test: src/App.test.tsx::local setup recovery and request races starts the preview again once a dropped device is recorded again
+- **PROOF** test: scripts/verify-device-reconnect.cjs
 - **PROOF** desk: open
 - **PROOF** headset: open
 

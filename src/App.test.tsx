@@ -2081,6 +2081,23 @@ describe('local setup recovery and request races', () => {
     expect(await screen.findByRole('img', { name: 'Live preview of Display 1' })).toHaveAttribute('src', 'http://127.0.0.1:9999/live?view=4');
     expect(backend.preview).toHaveBeenCalledTimes(2);
   });
+  it('starts the preview again once a dropped device is recorded again', async () => {
+    const user = await ready(); await user.click(screen.getByRole('button', { name: 'Display 1' })); await chooseSource(user, 'Quest USB');
+    await screen.findByRole('img', { name: 'Live preview of Quest USB' });
+    await user.click(screen.getByRole('button', { name: NAMES.record })); await screen.findByRole('button', { name: NAMES.stop });
+    status = { ...status, device: 'connected' }; await poll();
+    const started = backend.preview.mock.calls.length;
+    // The device drops: its preview stream ends with it.
+    status = { ...status, device: 'reconnecting' };
+    act(() => backend.preview.mock.calls[started - 1][2]('Preview stream ended. Check that the source is connected and available.'));
+    await poll();
+    await screen.findByText(/Preview stream ended/);
+    expect(backend.preview).toHaveBeenCalledTimes(started);
+    status = { ...status, device: 'connected' }; await poll();
+    expect(await screen.findByRole('img', { name: 'Live preview of Quest USB' })).toBeVisible();
+    expect(backend.preview).toHaveBeenCalledTimes(started + 1);
+    expect(screen.queryByText(/Preview stream ended/)).not.toBeInTheDocument();
+  });
   it('does not let an old session response replace a newly prepared recording', async () => {
     let resolveOld!: (value: Session) => void; backend.session.mockImplementationOnce(() => new Promise<Session>(resolve => { resolveOld = resolve; }));
     const user = await ready(); await open(user);

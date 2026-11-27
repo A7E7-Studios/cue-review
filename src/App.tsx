@@ -316,6 +316,12 @@ export default function App({ platform: requested }: AppProps = {}) {
   const deviceLinkSounds = useRef<DeviceLinkSounds | null>(null);
   useEffect(() => { (deviceLinkSounds.current ??= createDeviceLinkSounds()).update(status.device); }, [status.device]);
   useEffect(() => () => { deviceLinkSounds.current?.dispose(); deviceLinkSounds.current = null; }, []);
+  // The preview's own stream ends with the device; once the device is recorded again, the preview starts again too.
+  const lastDevice = useRef(status.device);
+  useEffect(() => {
+    if (lastDevice.current === 'reconnecting' && status.device === 'connected') setPreviewRevision(value => value + 1);
+    lastDevice.current = status.device;
+  }, [status.device]);
 
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(timer); }, [notice]);
   // Compact mode exists only while recording.
